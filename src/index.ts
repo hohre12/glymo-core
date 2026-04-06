@@ -1,0 +1,130 @@
+// ── Public Type Exports ──────────────────────────────
+
+export type {
+  EffectPresetName,
+  GlymoEvent,
+  GlymoOptions,
+  GIFOptions,
+  StrokePoint,
+  Point,
+  Point3D,
+  RGB,
+  EffectStyle,
+  Particle,
+  MatchedPair,
+  RenderedPoint,
+  MorphFrame,
+  RawInputPoint,
+  InputCapture,
+  PipelineStage,
+  BatchPipelineStage,
+  RenderLayer,
+  Stroke,
+  CanvasSession,
+  GlymoError,
+  SessionState,
+} from './types.js';
+
+export { EFFECT_PRESETS } from './types.js';
+
+export {
+  type GIFExportOptions,
+  type ReplayFn,
+  GIF_FPS,
+  GIF_DURATION_MS,
+  GIF_MAX_FRAMES,
+  GIF_SIZE_WARN_BYTES,
+} from './export/index.js';
+
+export {
+  PerformanceMonitor,
+  PERF_WINDOW_SIZE,
+  PERF_DEGRADED_THRESHOLD_MS,
+  PERF_DEGRADED_CONSECUTIVE,
+} from './util/PerformanceMonitor.js';
+
+// ── Text Mode Exports ───────────────────────────────
+
+export type {
+  TextModeConfig,
+  TypographyMode,
+  OverlayText,
+  RecognizedText,
+  RecognizedChar,
+  GlyphOutline,
+  TextModeResult,
+  TextErrorCode,
+  PositionedChar,
+  LayoutMode,
+  LayoutOptions,
+} from './text/types.js';
+
+export { DEFAULT_TEXT_MODE_CONFIG, DEFAULT_LAYOUT_OPTIONS } from './text/types.js';
+
+export { TextRecognizer } from './text/TextRecognizer.js';
+export { GlyphExtractor } from './text/GlyphExtractor.js';
+export { recognizeHandwriting } from './text/HandwritingRecognizer.js';
+
+// ── Cascading Recognition ────────────────────────────
+
+export type {
+  RecognizedChar as CascadingChar,
+  CharCorrection,
+  CascadingRecognizerOptions,
+} from './text/CascadingRecognizer.js';
+export { CascadingRecognizer } from './text/CascadingRecognizer.js';
+
+// ── Layout + Kinetic Typography Exports ─────────────
+
+export {
+  layoutTextAlongCurve,
+  layoutTextInCircle,
+  layoutTextInShape,
+} from './text/PretextLayout.js';
+
+export { KineticEngine } from './text/KineticEngine.js';
+
+// ── Input / Camera Exports ─────────────────────────
+
+export { HandVisualizer, HAND_CONNECTIONS } from './input/HandVisualizer.js';
+export type { Landmark, HandLandmarkerResult } from './input/CameraCapture.js';
+export {
+  PINCH_THRESHOLD,
+  computePinchDistance,
+  zToPressure,
+} from './input/CameraCapture.js';
+
+// ── Hand Styles ────────────────────────────────────
+
+export type { HandStyleName, HandStyleConfig } from './input/hand-styles/types.js';
+export { HandStyleBase } from './input/hand-styles/types.js';
+export { createHandStyle } from './input/hand-styles/index.js';
+
+// ── Gesture DSL ────────────────────────────────────
+
+export type {
+  FingerName,
+  BuiltInGesture,
+  HandState,
+  GestureDetectorFn,
+  GestureEvent,
+  GestureCallback,
+} from './gesture/types.js';
+export { HandStateImpl } from './gesture/HandStateImpl.js';
+export { GestureEngine } from './gesture/GestureEngine.js';
+export { BUILTIN_GESTURES } from './gesture/builtins.js';
+export {
+  LANDMARK_COUNT,
+  FINGER_FOLD_THRESHOLD,
+  FINGER_EXTEND_THRESHOLD,
+  GESTURE_ACTIVATE_FRAMES,
+  GESTURE_DEACTIVATE_FRAMES,
+} from './gesture/constants.js';
+
+// ── CreateOptions (Glymo.create) ───────────────────
+
+export type { CreateOptions } from './types.js';
+
+// ── Main Class ──────────────────────────────────────
+
+export { Glymo } from './Glymo.js';

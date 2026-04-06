@@ -1,0 +1,85 @@
+{
+  "name": "@glymo/core",
+  "version": "0.2.0",
+  "description": "Hand-powered creative toolkit for the browser. Hand tracking + artistic effects + gesture control in one library.",
+  "type": "module",
+  "main": "./dist/glymo.js",
+  "module": "./dist/glymo.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/glymo.mjs",
+      "require": "./dist/glymo.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.ko.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@chenglou/pretext": "^0.0.4",
+    "gifenc": "^1.0.3"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.0",
+    "@webgpu/types": "^0.1.69",
+    "typescript": "^5.7",
+    "vite": "^8.0",
+    "vite-plugin-dts": "^4.0",
+    "vitest": "^3.0"
+  },
+  "peerDependencies": {
+    "@mediapipe/tasks-vision": ">=0.10.0",
+    "tesseract.js": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@mediapipe/tasks-vision": {
+      "optional": true
+    },
+    "tesseract.js": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hohre12/glymo-core.git"
+  },
+  "homepage": "https://glymo.app",
+  "bugs": {
+    "url": "https://github.com/hohre12/glymo-core/issues"
+  },
+  "keywords": [
+    "hand-tracking",
+    "handwriting",
+    "drawing",
+    "canvas",
+    "effects",
+    "smoothing",
+    "calligraphy",
+    "neon",
+    "particles",
+    "pipeline",
+    "creative",
+    "gesture",
+    "mediapipe",
+    "kinetic-typography",
+    "webcam"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
