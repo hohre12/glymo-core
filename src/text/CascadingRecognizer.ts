@@ -163,8 +163,8 @@ export class CascadingRecognizer {
         // ── Fire Net 2 ────────────────────────────────────────────────
         this.fireContextSweep();
       }
-    }).catch(err => {
-      console.error('[CascadingRecognizer/Net1] error:', err);
+    }).catch(() => {
+      // Error propagated via onRecognizing(false) in finally
     }).finally(() => {
       this.inflight--;
       if (this.inflight === 0) {
@@ -273,8 +273,8 @@ export class CascadingRecognizer {
 
         this.opts.onCorrection({ id: rec.charId, oldChar, newChar });
       }
-    }).catch(err => {
-      console.error('[CascadingRecognizer/Net2] error:', err);
+    }).catch(() => {
+      // Error silenced — corrections are best-effort
     });
   }
 }

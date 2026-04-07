@@ -1,6 +1,6 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { EffectPresetName, GlymoOptions, GIFOptions, GlymoEvent, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
+import type { EffectPresetName, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES, EFFECT_PRESETS } from './types.js';
 import { InputManager } from './input/InputManager.js';
 import { PipelineEngine } from './pipeline/PipelineEngine.js';
@@ -15,11 +15,11 @@ import { exportPNG } from './export/PNGExporter.js';
 import { exportGIF as exportGIFImpl } from './export/GIFExporter.js';
 import type { GIFExportOptions } from './export/GIFExporter.js';
 import { DEFAULT_TEXT_MODE_CONFIG } from './text/types.js';
-import type { LayoutMode, TypographyMode, OverlayText } from './text/types.js';
+import type { LayoutMode, TypographyMode } from './text/types.js';
 import { TextPipelineController } from './text/TextPipelineController.js';
 import { KineticEngine } from './text/KineticEngine.js';
 import { GestureEngine } from './gesture/GestureEngine.js';
-import type { GestureDetectorFn, GestureEvent } from './gesture/types.js';
+import type { GestureDetectorFn } from './gesture/types.js';
 import type { HandStyleName } from './input/hand-styles/types.js';
 
 // ── Constants ────────────────────────────────────────
@@ -80,7 +80,7 @@ export class Glymo {
     this.inputManager = new InputManager();
     this.stateMachine = new SessionStateMachine(this.eventBus);
     this.gestureEngine = new GestureEngine((event, data) => {
-      this.eventBus.emit(event as GlymoEvent, data);
+      this.eventBus.emit(event, data);
     });
 
     const textConfig = {
@@ -233,7 +233,7 @@ export class Glymo {
     }
     if (options?.onGesture) {
       for (const [name, handler] of Object.entries(options.onGesture)) {
-        glymo.on(`gesture:${name}` as GlymoEvent, handler);
+        glymo.on(`gesture:${name}`, handler);
       }
     }
     if (options?.onReady) {
@@ -427,7 +427,7 @@ export class Glymo {
 
   // ── Events ─────────────────────────────────────────
 
-  on(event: GlymoEvent, handler: (...args: unknown[]) => void): () => void {
+  on<K extends keyof GlymoEventMap>(event: K, handler: (...args: GlymoEventMap[K]) => void): () => void {
     return this.eventBus.on(event, handler);
   }
 
@@ -489,8 +489,8 @@ export class Glymo {
     });
 
     // Overlay mode: render recognized text over the stroke bounding box
-    this.eventBus.on('text:overlay', (overlayData: unknown) => {
-      this.renderer.setOverlayText(overlayData as OverlayText);
+    this.eventBus.on('text:overlay', (overlayData) => {
+      this.renderer.setOverlayText(overlayData);
     });
   }
 
@@ -535,7 +535,6 @@ export class Glymo {
       // Emit stroke:complete with useful data for text recognition
       // Use smoothed points for bbox — these match what's actually rendered
       const bbox = this.computeStrokeBounds([result.smoothed]);
-      console.log('[Glymo] stroke:complete bbox:', JSON.stringify(bbox), 'canvas:', this.canvas.width, 'x', this.canvas.height);
       this.eventBus.emit('stroke:complete', { stroke, bbox });
 
       // Return to ready state
@@ -629,7 +628,7 @@ export class Glymo {
       const rawStrokes = allStrokes.map(s => s.raw);
       const result = await recognizeHandwriting(rawStrokes);
       if (!result) {
-        console.warn('[Glymo] Handwriting recognition failed');
+        this.eventBus.emit('error', { code: 'HANDWRITING_RECOGNITION_FAILED', message: 'Handwriting recognition failed' });
         return;
       }
       text = result.text;
@@ -694,7 +693,7 @@ export class Glymo {
       this.accumulatedStrokes = [];
 
       this.textPipeline.runPipeline(strokesToProcess.map((s) => s.raw)).catch((err) => {
-        console.error('[Glymo] Text pipeline failed:', err);
+        this.eventBus.emit('error', { code: 'TEXT_PIPELINE_FAILED', message: err instanceof Error ? err.message : String(err), stage: 'text-pipeline' });
       });
     }
   }

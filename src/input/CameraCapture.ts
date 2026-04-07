@@ -545,7 +545,6 @@ export class CameraCapture implements InputCapture {
     const error = err instanceof Error ? err : new Error(String(err));
     this.active = false;
     this.releaseCamera();
-    console.error('[Glymo] Camera init failed:', error);
     this.onError(error);
   }
 

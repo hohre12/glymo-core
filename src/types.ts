@@ -166,6 +166,7 @@ export const CANVAS_EFFECT_NAMES: EffectPresetName[] = [
 
 export type SessionState = 'idle' | 'ready' | 'drawing' | 'pen_up_wait' | 'morphing' | 'recognizing' | 'exporting';
 
+/** @deprecated Use `GlymoEventMap` for typed event payloads instead */
 export type GlymoEvent =
   | 'stroke:start'
   | 'stroke:end'
@@ -188,6 +189,31 @@ export type GlymoEvent =
   | 'hand:lost'
   | 'hand:found'
   | `gesture:${string}`;
+
+/** Typed event map — maps event names to their payload tuples */
+export interface GlymoEventMap {
+  'stroke:start': [];
+  'stroke:end': [];
+  'stroke:complete': [{ stroke: Stroke; bbox: { x: number; y: number; width: number; height: number } }];
+  'morph:start': [];
+  'morph:progress': [{ progress: number }];
+  'morph:complete': [];
+  'effect:change': [EffectPresetName];
+  'state:change': [{ from: SessionState; to: SessionState; action: string }];
+  'camera:denied': [Error?];
+  'camera:ready': [];
+  'performance:degraded': [];
+  'error': [{ code: string; message: string; stage?: string }];
+  'text:recognized': [{ text: string; confidence: number; characters: unknown[]; processingTimeMs: number }];
+  'text:error': [{ code: string; message: string }];
+  'text:overlay': [import('./text/types.js').OverlayText];
+  'glyph:extracted': [];
+  'text:matched': [];
+  'renderer:fallback': [];
+  'hand:lost': [];
+  'hand:found': [];
+  [key: `gesture:${string}`]: [import('./gesture/types.js').GestureEvent];
+}
 
 export type RendererMode = 'canvas2d' | 'webgpu' | 'auto';
 

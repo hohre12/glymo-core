@@ -112,11 +112,7 @@ async function encodeFrames(
   const bytes = encoder.bytes();
   const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'image/gif' });
 
-  if (blob.size > GIF_SIZE_WARN_BYTES) {
-    console.warn(
-      `GIF size (${blob.size} bytes) exceeds ${GIF_SIZE_WARN_BYTES} byte limit`,
-    );
-  }
+  // Size check removed — callers can check blob.size themselves
 
   return blob;
 }

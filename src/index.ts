@@ -3,6 +3,7 @@
 export type {
   EffectPresetName,
   GlymoEvent,
+  GlymoEventMap,
   GlymoOptions,
   GIFOptions,
   StrokePoint,
