@@ -687,6 +687,11 @@ export class Glymo {
     this.renderer.addCompletedStroke(stroke);
     this.renderer.setMorphAnimator(null);
     this.morphAnimator = null;
+
+    // Emit stroke:complete for both morph and instant modes
+    const bbox = this.computeStrokeBounds([stroke.smoothed]);
+    this.eventBus.emit('stroke:complete', { stroke, bbox });
+
     this.pendingStroke = null;
     this.stateMachine.transition('morph_complete');
 
