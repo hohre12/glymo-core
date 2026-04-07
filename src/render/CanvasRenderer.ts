@@ -1,6 +1,5 @@
 import type { EffectPresetName, Stroke, StrokePoint } from '../types.js';
 import { EFFECT_PRESETS } from '../types.js';
-import { renderGlowPass, renderMainStroke } from './StrokeRenderer.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
 import type { FontMorphAnimator } from '../text/FontMorphAnimator.js';
@@ -9,10 +8,14 @@ import type { EventBus } from '../state/EventBus.js';
 import type { IRenderer, RendererType } from './IRenderer.js';
 import type { OverlayText } from '../text/types.js';
 
-// ── Constants ────────────────────────────────────────
-
-/** Background color */
-const BG_COLOR = '#000000';
+import { renderBackground } from './layers/background.js';
+import { renderCompletedStrokes } from './layers/completed.js';
+import { renderMorphingStroke } from './layers/morph.js';
+import { renderTextMorph } from './layers/textMorph.js';
+import { renderFadingStrokes } from './layers/fading.js';
+import type { FadingStroke } from './layers/fading.js';
+import { renderOverlayText } from './layers/overlay.js';
+import { renderActiveStroke } from './layers/active.js';
 
 // ── CanvasRenderer ───────────────────────────────────
 
@@ -39,7 +42,7 @@ export class CanvasRenderer implements IRenderer {
   private activePoints: ReadonlyArray<StrokePoint> = [];
   private activeEffect: EffectPresetName = 'neon';
   private overlayTexts: OverlayText[] = [];
-  private fadingStrokes: { stroke: Stroke; fadeStart: number; fadeDuration: number }[] = [];
+  private fadingStrokes: FadingStroke[] = [];
   private morphAnimator: MorphAnimator | null = null;
   private fontMorphAnimator: FontMorphAnimator | null = null;
   private backgroundMode: 'solid' | 'transparent' = 'solid';
@@ -217,13 +220,34 @@ export class CanvasRenderer implements IRenderer {
 
     this.activePoints = this.getActivePointsFn?.() ?? [];
 
-    this.renderBackground();
-    this.renderCompletedStrokes();
-    this.renderMorphingStroke(dt);
-    this.renderTextMorph();
-    this.renderFadingStrokes();
-    this.renderOverlayText();
-    this.renderActiveStroke();
+    // Layer 0 — Background
+    renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode);
+
+    // Layer 10 — Completed strokes (offscreen cache)
+    this.completedCacheDirty = renderCompletedStrokes(
+      this.ctx,
+      this.completedStrokes,
+      this.completedCache,
+      this.completedCacheCtx,
+      this.completedCacheDirty,
+    );
+
+    // Layer 20 — Morphing stroke
+    this.renderMorphLayer(dt);
+
+    // Layer 25 — Text morph
+    this.renderTextMorphLayer();
+
+    // Layer 26 — Fading strokes
+    this.fadingStrokes = renderFadingStrokes(this.ctx, this.fadingStrokes, performance.now());
+
+    // Layer 27 — Overlay text
+    renderOverlayText(this.ctx, this.overlayTexts, performance.now());
+
+    // Layer 30 — Active stroke
+    renderActiveStroke(this.ctx, this.activePoints, EFFECT_PRESETS[this.activeEffect]);
+
+    // Layer 40 — Particles
     this.particleSystem.updateAndRender(this.ctx, dt, degraded);
 
     this.perfMonitor.endFrame();
@@ -234,53 +258,11 @@ export class CanvasRenderer implements IRenderer {
     }
   }
 
-  private emitDegradedIfNeeded(degraded: boolean): void {
-    if (degraded && !this.degradedEmitted) {
-      this.degradedEmitted = true;
-      this.eventBus?.emit('performance:degraded');
-    } else if (!degraded && this.degradedEmitted) {
-      this.degradedEmitted = false;
-    }
-  }
-
-  // ── Private: Layer 0 — Background ──────────────────
-
-  private renderBackground(): void {
-    const { ctx, canvas } = this;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (this.backgroundMode === 'solid') {
-      ctx.fillStyle = BG_COLOR;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    // 'transparent' mode: clearRect is sufficient — no fill
-  }
-
-  // ── Private: Layer 10 — Completed Strokes ──────────
-
-  private renderCompletedStrokes(): void {
-    if (this.completedStrokes.length === 0) return;
-
-    // Re-render into the offscreen cache only when strokes have changed.
-    // Every other frame we simply blit the cached bitmap — O(1) cost.
-    if (this.completedCacheDirty && this.completedCacheCtx && this.completedCache) {
-      this.completedCacheCtx.clearRect(0, 0, this.completedCache.width, this.completedCache.height);
-      for (const stroke of this.completedStrokes) {
-        if (stroke.smoothed.length < 2) continue;
-        const style = EFFECT_PRESETS[stroke.effect];
-        renderGlowPass(this.completedCacheCtx as unknown as CanvasRenderingContext2D, stroke.smoothed, style);
-        renderMainStroke(this.completedCacheCtx as unknown as CanvasRenderingContext2D, stroke.smoothed, style);
-      }
-      this.completedCacheDirty = false;
-    }
-
-    if (this.completedCache) {
-      this.ctx.drawImage(this.completedCache, 0, 0);
-    }
-  }
-
-  // ── Private: Layer 20 — Morphing Stroke ─────────────
-
-  private renderMorphingStroke(dt: number): void {
+  /**
+   * Orchestrate morph layer — manages animator state and particle burst,
+   * then delegates pure rendering to the extracted layer function.
+   */
+  private renderMorphLayer(dt: number): void {
     // Capture to local — update() may synchronously trigger morph:complete
     // which calls setMorphAnimator(null), nullifying the instance field.
     const animator = this.morphAnimator;
@@ -295,206 +277,35 @@ export class CanvasRenderer implements IRenderer {
       }
     }
 
-    const effect = animator.effect;
     const points = animator.update(dt);
     if (!points || points.length < 2) return;
 
-    // Glow intensification: peaks at 2.0 at the midpoint of the animation
-    const progress = animator.getProgress();
-    const intensityScale = 1.0 + Math.sin(progress * Math.PI) * 1.0;
-
-    const style = EFFECT_PRESETS[effect];
-    renderGlowPass(this.ctx, points, style, intensityScale);
-    renderMainStroke(this.ctx, points, style);
+    renderMorphingStroke(this.ctx, {
+      effect: animator.effect,
+      points,
+      progress: animator.getProgress(),
+    });
   }
 
-  // ── Private: Layer 25 — Text Morph (FontMorphAnimator) ─
-
-  private renderTextMorph(): void {
+  /**
+   * Orchestrate text morph layer — reads animator frame and delegates rendering.
+   */
+  private renderTextMorphLayer(): void {
     const animator = this.fontMorphAnimator;
     if (!animator) return;
 
     const frame = animator.getLastFrame();
     if (!frame || frame.points.length === 0) return;
 
-    const ctx = this.ctx;
-    const points = frame.points;
-
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    // Glow pass — connected path with gap detection
-    const firstPt = points[0]!;
-    const avgAlpha = points.reduce((s, p) => s + p.alpha, 0) / points.length;
-    const glowColor = `rgba(${firstPt.color.r},${firstPt.color.g},${firstPt.color.b},${avgAlpha * 0.6})`;
-
-    ctx.globalAlpha = avgAlpha * 0.7;
-    ctx.strokeStyle = glowColor;
-    ctx.shadowColor = glowColor;
-    ctx.shadowBlur = 20;
-    ctx.lineWidth = 4;
-
-    ctx.beginPath();
-    ctx.moveTo(firstPt.x, firstPt.y);
-    for (let i = 1; i < points.length; i++) {
-      const prev = points[i - 1]!;
-      const curr = points[i]!;
-      const dx = curr.x - prev.x;
-      const dy = curr.y - prev.y;
-      if (dx * dx + dy * dy > 400) {
-        ctx.moveTo(curr.x, curr.y);
-      } else {
-        ctx.lineTo(curr.x, curr.y);
-      }
-    }
-    ctx.stroke();
-
-    // Main stroke pass — per-segment with per-point color and alpha
-    ctx.shadowBlur = 0;
-    ctx.shadowColor = 'transparent';
-    ctx.globalAlpha = 1.0;
-
-    for (let i = 1; i < points.length; i++) {
-      const prev = points[i - 1]!;
-      const curr = points[i]!;
-      const dx = curr.x - prev.x;
-      const dy = curr.y - prev.y;
-      if (dx * dx + dy * dy > 400) continue;
-
-      ctx.beginPath();
-      ctx.moveTo(prev.x, prev.y);
-      ctx.lineTo(curr.x, curr.y);
-      ctx.strokeStyle = `rgba(${curr.color.r},${curr.color.g},${curr.color.b},${curr.alpha})`;
-      ctx.lineWidth = curr.size * 1.5;
-      ctx.stroke();
-    }
-
-    ctx.restore();
+    renderTextMorph(this.ctx, frame);
   }
 
-  // ── Private: Layer 26 — Fading Strokes ─────────────
-
-  private renderFadingStrokes(): void {
-    const now = performance.now();
-    this.fadingStrokes = this.fadingStrokes.filter(({ stroke, fadeStart, fadeDuration }) => {
-      const elapsed = now - fadeStart;
-      if (elapsed >= fadeDuration) return false;
-
-      const alpha = 1.0 - (elapsed / fadeDuration);
-      const style = EFFECT_PRESETS[stroke.effect];
-      this.ctx.save();
-      this.ctx.globalAlpha = alpha;
-      renderGlowPass(this.ctx, stroke.smoothed, style);
-      renderMainStroke(this.ctx, stroke.smoothed, style);
-      this.ctx.restore();
-      return true;
-    });
-  }
-
-  // ── Private: Layer 27 — Overlay Text ───────────────
-
-  private renderOverlayText(): void {
-    if (this.overlayTexts.length === 0) return;
-
-    const ctx = this.ctx;
-    const now = performance.now();
-
-    for (const overlay of this.overlayTexts) {
-      const elapsed = now - overlay.startTime;
-      const alpha = Math.min(1, elapsed / overlay.fadeDuration);
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-
-      ctx.font = overlay.font;
-      ctx.textBaseline = 'top';
-      ctx.textAlign = 'left';
-      const metrics = ctx.measureText(overlay.text);
-      const textWidth = metrics.width;
-      const textHeight = metrics.actualBoundingBoxDescent ?? 72;
-
-      // Scale text to fit stroke bounding box
-      const scaleX = overlay.width / Math.max(textWidth, 1);
-      const scaleY = overlay.height / Math.max(textHeight, 1);
-      const scale = Math.min(scaleX, scaleY, 3);
-
-      const cx = overlay.x + overlay.width / 2;
-      const cy = overlay.y + overlay.height / 2;
-
-      ctx.translate(cx, cy);
-      ctx.scale(scale, scale);
-      ctx.translate(-textWidth / 2, -textHeight / 2);
-
-      // Glow pass
-      const glowIntensity = 0.5 + alpha * 0.5;
-      ctx.shadowColor = overlay.glowColor;
-      ctx.shadowBlur = overlay.glowSize * glowIntensity;
-      ctx.fillStyle = overlay.effectColor;
-      ctx.fillText(overlay.text, 0, 0);
-
-      // Crisp pass on top
-      ctx.shadowBlur = 0;
-      ctx.fillText(overlay.text, 0, 0);
-
-      ctx.restore();
+  private emitDegradedIfNeeded(degraded: boolean): void {
+    if (degraded && !this.degradedEmitted) {
+      this.degradedEmitted = true;
+      this.eventBus?.emit('performance:degraded');
+    } else if (!degraded && this.degradedEmitted) {
+      this.degradedEmitted = false;
     }
-  }
-
-  // ── Private: Layer 30 — Active Stroke ──────────────
-
-  private renderActiveStroke(): void {
-    const points = this.activePoints;
-    if (points.length === 0) return;
-
-    const style = EFFECT_PRESETS[this.activeEffect];
-
-    if (points.length === 1) {
-      // Single point: draw as a small glowing dot using the preset color
-      const { ctx } = this;
-      const pt = points[0]!;
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, style.minWidth / 2, 0, Math.PI * 2);
-      ctx.fillStyle = style.color;
-      ctx.shadowColor = style.glowColor;
-      ctx.shadowBlur = style.glowSize * 0.3;
-      ctx.fill();
-      ctx.restore();
-      return;
-    }
-
-    // Two or more points: render a live single-pass glow + main stroke for performance
-    const { ctx } = this;
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    // Single shadow glow pass
-    ctx.shadowColor = style.glowColor;
-    ctx.shadowBlur = style.glowSize * 0.6;
-    ctx.globalAlpha = 0.7;
-    ctx.strokeStyle = style.glowColor;
-    ctx.lineWidth = style.maxWidth;
-    ctx.beginPath();
-    ctx.moveTo(points[0]!.x, points[0]!.y);
-    for (let i = 1; i < points.length; i++) {
-      ctx.lineTo(points[i]!.x, points[i]!.y);
-    }
-    ctx.stroke();
-
-    // Core stroke on top
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1.0;
-    ctx.strokeStyle = style.color;
-    ctx.lineWidth = style.minWidth;
-    ctx.beginPath();
-    ctx.moveTo(points[0]!.x, points[0]!.y);
-    for (let i = 1; i < points.length; i++) {
-      ctx.lineTo(points[i]!.x, points[i]!.y);
-    }
-    ctx.stroke();
-
-    ctx.restore();
   }
 }
