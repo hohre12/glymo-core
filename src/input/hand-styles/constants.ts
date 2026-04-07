@@ -1,3 +1,8 @@
+import { INDEX_TIP, THUMB_TIP } from '../../gesture/constants.js';
+
+// Re-export so existing consumers are not broken
+export { INDEX_TIP, THUMB_TIP };
+
 // ── Shared Hand Style Constants ───────────────────────
 
 /**
@@ -34,11 +39,7 @@ export const FINGER_CHAINS: ReadonlyArray<ReadonlyArray<number>> = [
 /** Landmark indices of all 5 fingertips */
 export const FINGER_TIPS: ReadonlyArray<number> = [4, 8, 12, 16, 20];
 
-/** Landmark index of the index fingertip — the primary draw cursor */
-export const INDEX_TIP = 8;
-
-/** Landmark index of the thumb tip — used for pinch detection */
-export const THUMB_TIP = 4;
+// INDEX_TIP and THUMB_TIP are imported and re-exported from gesture/constants.ts above
 
 // ── Neon Skeleton palette (matches original HandVisualizer exactly) ──────────
 

@@ -1,9 +1,10 @@
 import type { InputCapture, RawInputPoint } from '../types.js';
+import { PINCH_THRESHOLD } from '../gesture/constants.js';
+
+// Re-export so existing consumers (e.g. index.ts) are not broken
+export { PINCH_THRESHOLD };
 
 // ── Constants ────────────────────────────────────────
-
-/** Pinch detection: normalized distance between thumb and index tips */
-export const PINCH_THRESHOLD = 0.08;
 
 /** Number of consecutive frames required to confirm a pen state change */
 const PEN_STATE_DEBOUNCE_FRAMES = 3;

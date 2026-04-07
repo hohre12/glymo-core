@@ -64,6 +64,19 @@ export function lerpGradient(colors: string[], t: number): string {
   return rgbToCss(lerpRgb(startColor, endColor, localT));
 }
 
+/** Compute axis-aligned bounding box for a set of points */
+export function computeBounds(points: ReadonlyArray<{ x: number; y: number }>): { x: number; y: number; width: number; height: number } {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const pt of points) {
+    if (pt.x < minX) minX = pt.x;
+    if (pt.y < minY) minY = pt.y;
+    if (pt.x > maxX) maxX = pt.x;
+    if (pt.y > maxY) maxY = pt.y;
+  }
+  if (!isFinite(minX)) return { x: 0, y: 0, width: 100, height: 100 };
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
 /**
  * Resample points to targetCount via uniform arc-length interpolation.
  * Preserves start and end points exactly.

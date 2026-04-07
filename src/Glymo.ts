@@ -21,6 +21,7 @@ import { KineticEngine } from './text/KineticEngine.js';
 import { GestureEngine } from './gesture/GestureEngine.js';
 import type { GestureDetectorFn } from './gesture/types.js';
 import type { HandStyleName } from './input/hand-styles/types.js';
+import { computeBounds } from './util/math.js';
 
 // ── Constants ────────────────────────────────────────
 
@@ -266,9 +267,13 @@ export class Glymo {
     const needsGPU = GPU_EFFECT_NAMES.includes(name);
     const isGPU = this.renderer.type === 'webgpu';
     if (needsGPU && !isGPU) {
-      this.setRenderer('webgpu').catch(() => {});
+      this.setRenderer('webgpu').catch((err) => {
+        this.eventBus.emit('error', { code: 'RENDERER_SWITCH_FAILED', message: String(err) });
+      });
     } else if (!needsGPU && isGPU) {
-      this.setRenderer('canvas2d').catch(() => {});
+      this.setRenderer('canvas2d').catch((err) => {
+        this.eventBus.emit('error', { code: 'RENDERER_SWITCH_FAILED', message: String(err) });
+      });
     }
   }
 
@@ -707,17 +712,7 @@ export class Glymo {
   }
 
   private computeStrokeBounds(strokeArrays: StrokePoint[][]): { x: number; y: number; width: number; height: number } {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const stroke of strokeArrays) {
-      for (const pt of stroke) {
-        if (pt.x < minX) minX = pt.x;
-        if (pt.y < minY) minY = pt.y;
-        if (pt.x > maxX) maxX = pt.x;
-        if (pt.y > maxY) maxY = pt.y;
-      }
-    }
-    if (!isFinite(minX)) return { x: 0, y: 0, width: 100, height: 100 };
-    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    return computeBounds(strokeArrays.flat());
   }
 
   private enforceMaxStrokes(): void {
