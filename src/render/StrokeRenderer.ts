@@ -12,7 +12,7 @@ import { lerpGradient } from '../util/math.js';
  * @param intensityScale — default 1.0; pass > 1.0 during morph for extra brightness
  */
 export function renderGlowPass(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   points: StrokePoint[],
   style: EffectStyle,
   intensityScale: number = 1.0,
@@ -39,7 +39,7 @@ export function renderGlowPass(
 
 /** Render the main stroke with per-segment variable-width and optional gradient */
 export function renderMainStroke(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   points: StrokePoint[],
   style: EffectStyle,
 ): void {

@@ -1,10 +1,11 @@
 import type { InputCapture, RawInputPoint } from '../types.js';
 import { PINCH_THRESHOLD } from '../gesture/constants.js';
 import { clamp01 } from '../gesture/math.js';
+import { OneEuroFilter } from '../filter/OneEuroFilter.js';
 import { GestureDetector } from './GestureDetector.js';
 import { computePinchDistance, computeSpeed, zToPressure } from './camera-utils.js';
 
-// Re-export so existing consumers (e.g. index.ts) are not broken
+// Re-export so existing consumers (e.g. index.ts, tests) are not broken
 export { PINCH_THRESHOLD };
 export { computePinchDistance, computeSpeed, zToPressure };
 
@@ -16,88 +17,9 @@ const PEN_STATE_DEBOUNCE_FRAMES = 3;
 /** Minimum pixel movement to emit a new point (rejects sub-pixel jitter) */
 const MIN_MOVE_DISTANCE = 2.0;
 
-// ── OneEuroFilter (position smoothing) ──────────────
-// Adaptive low-pass filter: low jitter when still, low latency when moving fast.
-// Essential for hand tracking where MediaPipe landmarks jitter significantly.
-//
-// NOTE: This is a separate implementation from src/filter/OneEuroFilter.ts.
-// That version uses a different state management pattern (initialized flag).
-// This version uses LowPassFilter helper + optional timestamp, and is
-// specifically tuned for CameraCapture's frame-by-frame processing.
-
-class LowPassFilter {
-  private y: number | null = null;
-  private s: number | null = null;
-
-  filter(value: number, alpha: number): number {
-    if (this.y === null || this.s === null) {
-      this.y = value;
-      this.s = value;
-      return value;
-    }
-    this.s = alpha * value + (1 - alpha) * this.s;
-    this.y = this.s;
-    return this.y;
-  }
-
-  reset(): void {
-    this.y = null;
-    this.s = null;
-  }
-
-  lastValue(): number | null {
-    return this.y;
-  }
-}
-
-class OneEuroFilter {
-  private freq: number;
-  private minCutoff: number;
-  private beta: number;
-  private dCutoff: number;
-  private xFilter = new LowPassFilter();
-  private dxFilter = new LowPassFilter();
-  private lastTime: number | null = null;
-
-  /**
-   * @param freq    Expected signal frequency (Hz). ~30 for 30fps camera.
-   * @param minCutoff  Minimum cutoff frequency. Lower = more smoothing when still. (default 1.0)
-   * @param beta    Speed coefficient. Higher = less lag when moving fast. (default 0.007)
-   * @param dCutoff Derivative cutoff frequency. (default 1.0)
-   */
-  constructor(freq = 30, minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
-    this.freq = freq;
-    this.minCutoff = minCutoff;
-    this.beta = beta;
-    this.dCutoff = dCutoff;
-  }
-
-  private alpha(cutoff: number): number {
-    const te = 1.0 / this.freq;
-    const tau = 1.0 / (2 * Math.PI * cutoff);
-    return 1.0 / (1.0 + tau / te);
-  }
-
-  filter(value: number, timestamp?: number): number {
-    if (this.lastTime !== null && timestamp !== undefined) {
-      const dt = (timestamp - this.lastTime) / 1000; // ms → sec
-      if (dt > 0) this.freq = 1.0 / dt;
-    }
-    this.lastTime = timestamp ?? null;
-
-    const prevX = this.xFilter.lastValue();
-    const dx = prevX !== null ? (value - prevX) * this.freq : 0;
-    const edx = this.dxFilter.filter(dx, this.alpha(this.dCutoff));
-    const cutoff = this.minCutoff + this.beta * Math.abs(edx);
-    return this.xFilter.filter(value, this.alpha(cutoff));
-  }
-
-  reset(): void {
-    this.xFilter.reset();
-    this.dxFilter.reset();
-    this.lastTime = null;
-  }
-}
+// OneEuroFilter for position smoothing — uses the canonical implementation
+// from src/filter/OneEuroFilter.ts. Essential for hand tracking where
+// MediaPipe landmarks jitter significantly.
 
 /** MediaPipe hand landmarker model URL */
 export const MODEL_URL =
@@ -191,8 +113,8 @@ export class CameraCapture implements InputCapture {
   // minCutoff=1.0: moderate smoothing when hand is still (filters jitter)
   // beta=0.5: high speed responsiveness (no lag when drawing fast)
   // dCutoff=1.0: derivative smoothing
-  private xFilter = new OneEuroFilter(30, 1.0, 0.5, 1.0);
-  private yFilter = new OneEuroFilter(30, 1.0, 0.5, 1.0);
+  private xFilter = new OneEuroFilter(1.0, 0.5, 1.0);
+  private yFilter = new OneEuroFilter(1.0, 0.5, 1.0);
 
   // ── Second-hand drawing (hand index 1) ───────────────
   // Tracks a second concurrent pinch-based stroke independently from hand 0.
@@ -201,8 +123,8 @@ export class CameraCapture implements InputCapture {
   private pendingStateFrames2 = 0;
   private pendingState2 = false;
   private lastDrawPos2: { x: number; y: number } | null = null;
-  private xFilter2 = new OneEuroFilter(30, 1.0, 0.5, 1.0);
-  private yFilter2 = new OneEuroFilter(30, 1.0, 0.5, 1.0);
+  private xFilter2 = new OneEuroFilter(1.0, 0.5, 1.0);
+  private yFilter2 = new OneEuroFilter(1.0, 0.5, 1.0);
   // Callbacks for the second-hand stroke stream (optional — only set when caller needs two-hand drawing)
   private onPoint2: PointCallback | null = null;
   private onPenState2: PenStateCallback | null = null;

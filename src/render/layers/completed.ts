@@ -17,22 +17,21 @@ export function renderCompletedStrokes(
   cacheCtx: OffscreenCanvasRenderingContext2D | null,
   dirty: boolean,
 ): boolean {
-  if (strokes.length === 0) return dirty;
-
-  // Re-render into the offscreen cache only when strokes have changed.
-  // Every other frame we simply blit the cached bitmap — O(1) cost.
+  // When dirty, re-render into the offscreen cache (even if strokes is empty —
+  // this ensures the cache is cleared when all strokes are removed).
   if (dirty && cacheCtx && cache) {
     cacheCtx.clearRect(0, 0, cache.width, cache.height);
     for (const stroke of strokes) {
       if (stroke.smoothed.length < 2) continue;
       const style = EFFECT_PRESETS[stroke.effect];
-      renderGlowPass(cacheCtx as unknown as CanvasRenderingContext2D, stroke.smoothed, style);
-      renderMainStroke(cacheCtx as unknown as CanvasRenderingContext2D, stroke.smoothed, style);
+      renderGlowPass(cacheCtx, stroke.smoothed, style);
+      renderMainStroke(cacheCtx, stroke.smoothed, style);
     }
     dirty = false;
   }
 
-  if (cache) {
+  // Blit cached bitmap onto the main canvas
+  if (strokes.length > 0 && cache) {
     ctx.drawImage(cache, 0, 0);
   }
 
