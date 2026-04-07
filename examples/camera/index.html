@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>@glymo/core — Camera Hand Tracking</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── Canvas container with camera video backdrop ──── */
+    #container {
+      position: relative;
+      width: 800px;
+      height: 600px;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    #container video {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);  /* Mirror for natural interaction */
+      border-radius: 16px;
+    }
+    #container canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border-radius: 16px;
+    }
+
+    /* ── Info overlay ─────────────────────────────────── */
+    #info {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 20px;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 13px;
+      text-align: center;
+      line-height: 1.6;
+      pointer-events: none;
+      user-select: none;
+      z-index: 10;
+    }
+
+    /* ── Status bar ───────────────────────────────────── */
+    #status {
+      position: fixed;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 14px;
+      font-family: monospace;
+      z-index: 10;
+      pointer-events: none;
+      transition: color 0.3s;
+    }
+
+    /* ── Hand style buttons ──────────────────────────── */
+    #controls {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    #controls button {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 8px 16px;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    #controls button:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.9);
+    }
+    #controls button.active {
+      background: rgba(167, 139, 250, 0.2);
+      border-color: rgba(167, 139, 250, 0.4);
+      color: #a78bfa;
+    }
+  </style>
+</head>
+<body>
+  <!-- Canvas container — the camera video is inserted here automatically -->
+  <div id="container">
+    <canvas id="canvas" width="800" height="600"></canvas>
+  </div>
+
+  <div id="info">
+    Pinch thumb + index finger to draw &middot; Release to finish stroke
+  </div>
+  <div id="status">Initializing camera...</div>
+
+  <!-- Hand style selector buttons -->
+  <div id="controls">
+    <button class="active" data-style="neon-skeleton">Neon Skeleton</button>
+    <button data-style="crystal">Crystal</button>
+    <button data-style="flame">Flame</button>
+    <button data-style="aurora">Aurora</button>
+    <button data-style="particle-cloud">Particle Cloud</button>
+  </div>
+
+  <script type="module">
+    // ── Step 1: Import Glymo and HandVisualizer from CDN
+    import { Glymo, HandVisualizer, createHandStyle } from 'https://unpkg.com/@glymo/core/dist/glymo.mjs';
+
+    const canvas = document.getElementById('canvas');
+    const container = document.getElementById('container');
+    const status = document.getElementById('status');
+
+    // ── Step 2: Create Glymo with camera mode ───────────
+    // Glymo.create() is an async factory that sets up
+    // camera hand tracking, applies the effect, and
+    // makes the canvas background transparent so the
+    // webcam feed shows through.
+    const glymo = await Glymo.create(canvas, {
+      camera: true,
+      effect: 'aurora',
+      handStyle: 'neon-skeleton',
+    });
+
+    status.textContent = 'Camera ready — pinch to draw!';
+
+    // ── Step 3: Show the camera video feed ──────────────
+    // Glymo exposes the internal <video> element so you can
+    // position it behind the transparent canvas.
+    const video = glymo.getCameraVideoElement();
+    if (video) {
+      video.style.borderRadius = '16px';
+      container.insertBefore(video, canvas);
+    }
+
+    // ── Step 4: Set up the hand visualizer overlay ──────
+    // HandVisualizer draws the artistic hand skeleton on a
+    // separate canvas layered on top.
+    const handCanvas = document.createElement('canvas');
+    handCanvas.width = 800;
+    handCanvas.height = 600;
+    container.appendChild(handCanvas);
+
+    const handVis = new HandVisualizer(handCanvas);
+    handVis.setStyle('neon-skeleton');
+
+    // Feed raw landmark data from the camera to the visualizer
+    glymo.setCameraLandmarkCallback((landmarks, isPinching, secondHand) => {
+      handVis.draw(landmarks, isPinching, secondHand);
+    });
+
+    // ── Step 5: Hand style switching ────────────────────
+    // Each button switches the artistic rendering style of
+    // the hand skeleton overlay.
+    const buttons = document.querySelectorAll('#controls button');
+
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const styleName = btn.dataset.style;
+
+        // Update active state on buttons
+        buttons.forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Apply the new hand style
+        handVis.setStyle(styleName);
+        glymo.setHandStyle(styleName);
+        status.textContent = `Hand style: ${styleName}`;
+      });
+    });
+
+    // ── Step 6: Listen for camera events ────────────────
+    glymo.on('camera:denied', () => {
+      status.textContent = 'Camera access denied. Please allow camera access and reload.';
+      status.style.color = '#ff6b6b';
+    });
+  </script>
+</body>
+</html>

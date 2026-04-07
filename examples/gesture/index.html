@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>@glymo/core — Gesture Recognition</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── Canvas container ─────────────────────────────── */
+    #container {
+      position: relative;
+      width: 800px;
+      height: 600px;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    #container video, #container canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border-radius: 16px;
+    }
+    #container video {
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    /* ── Info panel ───────────────────────────────────── */
+    #info {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 14px 24px;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 13px;
+      text-align: left;
+      line-height: 1.8;
+      z-index: 10;
+      pointer-events: none;
+      user-select: none;
+    }
+    #info .gesture-name {
+      color: rgba(255, 255, 255, 0.8);
+      font-weight: 600;
+    }
+
+    /* ── Gesture status display ──────────────────────── */
+    #status {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 14px 28px;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 18px;
+      font-family: monospace;
+      z-index: 10;
+      pointer-events: none;
+      transition: all 0.3s ease;
+      min-width: 300px;
+      text-align: center;
+    }
+    #status.flash {
+      background: rgba(167, 139, 250, 0.15);
+      border-color: rgba(167, 139, 250, 0.3);
+      color: #a78bfa;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <canvas id="canvas" width="800" height="600"></canvas>
+  </div>
+
+  <!-- Available gestures reference -->
+  <div id="info">
+    <strong style="color: rgba(255,255,255,0.7);">Built-in Gestures</strong><br>
+    <span class="gesture-name">Fist</span> — Clear canvas<br>
+    <span class="gesture-name">Open Palm</span> — Undo last stroke<br>
+    <span class="gesture-name">Peace Sign</span> — Switch effect<br>
+    <br>
+    <strong style="color: rgba(255,255,255,0.7);">Custom Gestures</strong><br>
+    <span class="gesture-name">Rock On</span> (index + pinky extended) — Special action<br>
+    <span class="gesture-name">Thumbs Up</span> — Confirmation
+  </div>
+
+  <div id="status">Initializing camera...</div>
+
+  <script type="module">
+    // ── Step 1: Import Glymo from the CDN ───────────────
+    import { Glymo, HandVisualizer } from 'https://unpkg.com/@glymo/core/dist/glymo.mjs';
+
+    const canvas = document.getElementById('canvas');
+    const container = document.getElementById('container');
+    const status = document.getElementById('status');
+
+    // Helper: flash the status bar with a message
+    function showStatus(text) {
+      status.textContent = text;
+      status.classList.add('flash');
+      setTimeout(() => status.classList.remove('flash'), 600);
+    }
+
+    // ── Step 2: Create Glymo with camera enabled ────────
+    // Glymo.create() is an async factory that handles all
+    // the camera setup, hand tracking initialization, and
+    // gesture engine wiring in one call.
+    const glymo = await Glymo.create(canvas, {
+      camera: true,
+      effect: 'neon',
+    });
+
+    status.textContent = 'Camera ready — try a gesture!';
+
+    // ── Step 3: Show the camera video behind the canvas ─
+    const video = glymo.getCameraVideoElement();
+    if (video) {
+      video.style.borderRadius = '16px';
+      container.insertBefore(video, canvas);
+    }
+
+    // ── Step 4: Set up hand visualizer ──────────────────
+    const handCanvas = document.createElement('canvas');
+    handCanvas.width = 800;
+    handCanvas.height = 600;
+    container.appendChild(handCanvas);
+
+    const handVis = new HandVisualizer(handCanvas);
+    handVis.setStyle('neon-skeleton');
+
+    glymo.setCameraLandmarkCallback((landmarks, isPinching, secondHand) => {
+      handVis.draw(landmarks, isPinching, secondHand);
+    });
+
+    // ── Step 5: Listen to built-in gestures ─────────────
+    // Glymo ships with several built-in gesture detectors:
+    // pinch, fist, point, open-palm, peace-sign, thumbs-up.
+    // Events fire as `gesture:${name}` when a gesture is
+    // detected for a sustained number of frames.
+
+    // Fist gesture: clear the canvas
+    glymo.on('gesture:fist', () => {
+      glymo.clear();
+      showStatus('Fist — Canvas cleared!');
+    });
+
+    // Open palm gesture: undo the last stroke
+    glymo.on('gesture:open-palm', () => {
+      glymo.undo();
+      showStatus('Open Palm — Undo!');
+    });
+
+    // Peace sign gesture: cycle through effects
+    const effects = ['neon', 'aurora', 'gold', 'calligraphy', 'fire'];
+    let effectIndex = 0;
+
+    glymo.on('gesture:peace-sign', () => {
+      effectIndex = (effectIndex + 1) % effects.length;
+      glymo.setEffect(effects[effectIndex]);
+      showStatus(`Peace Sign — Effect: ${effects[effectIndex]}`);
+    });
+
+    // Thumbs up: built-in gesture, just acknowledge it
+    glymo.on('gesture:thumbs-up', () => {
+      showStatus('Thumbs Up — Nice!');
+    });
+
+    // ── Step 6: Define custom gestures ──────────────────
+    // The gesture() method registers a custom detector function.
+    // The detector receives a HandState object with ergonomic
+    // helpers: extended(), folded(), pinchDistance(), fingerScore().
+    //
+    // Return true when the gesture is active. The engine handles
+    // debouncing (activates after N consecutive true frames).
+
+    // "Rock on" gesture: index + pinky extended, middle + ring folded
+    glymo.gesture('rock-on', (hand) =>
+      hand.extended('index', 'pinky') && hand.folded('middle', 'ring')
+    );
+
+    glymo.on('gesture:rock-on', () => {
+      showStatus('Rock On!');
+    });
+
+    // ── Step 7: Handle camera errors ────────────────────
+    glymo.on('camera:denied', () => {
+      status.textContent = 'Camera access denied. Please allow camera and reload.';
+      status.style.color = '#ff6b6b';
+    });
+  </script>
+</body>
+</html>

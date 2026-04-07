@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>@glymo/core — Basic Drawing</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+    }
+    canvas {
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      cursor: crosshair;
+    }
+
+    /* ── Info overlay ─────────────────────────────────── */
+    #info {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 20px;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 13px;
+      text-align: center;
+      line-height: 1.6;
+      pointer-events: none;
+      user-select: none;
+    }
+    #info kbd {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: monospace;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+    #effect-label {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 14px;
+      font-family: monospace;
+      transition: color 0.3s, opacity 0.3s;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="800" height="600"></canvas>
+
+  <!-- Info overlay with keyboard shortcuts -->
+  <div id="info">
+    Draw with your mouse &middot;
+    <kbd>1</kbd> neon &middot;
+    <kbd>2</kbd> aurora &middot;
+    <kbd>3</kbd> gold &middot;
+    <kbd>4</kbd> calligraphy &middot;
+    <kbd>5</kbd> fire &middot;
+    <kbd>C</kbd> clear
+  </div>
+  <div id="effect-label">neon</div>
+
+  <script type="module">
+    // ── Step 1: Import Glymo from the CDN ───────────────
+    import { Glymo } from 'https://unpkg.com/@glymo/core/dist/glymo.mjs';
+
+    // ── Step 2: Grab the canvas element ─────────────────
+    const canvas = document.getElementById('canvas');
+    const effectLabel = document.getElementById('effect-label');
+
+    // ── Step 3: Create a Glymo instance with the neon effect
+    // The constructor sets up the rendering pipeline and starts
+    // the animation loop automatically.
+    const glymo = new Glymo(canvas, { effect: 'neon' });
+
+    // ── Step 4: Bind mouse input ────────────────────────
+    // This attaches mousedown/mousemove/mouseup listeners so
+    // drawing happens when you click and drag on the canvas.
+    glymo.bindMouse();
+
+    // ── Step 5: Switch effects with number keys 1-5 ────
+    const effects = ['neon', 'aurora', 'gold', 'calligraphy', 'fire'];
+
+    document.addEventListener('keydown', (e) => {
+      // Number keys: switch effect preset
+      const idx = parseInt(e.key) - 1;
+      if (idx >= 0 && idx < effects.length) {
+        glymo.setEffect(effects[idx]);
+        effectLabel.textContent = effects[idx];
+      }
+
+      // C key: clear all strokes with a fade animation
+      if (e.key === 'c' || e.key === 'C') {
+        glymo.clear();
+      }
+    });
+  </script>
+</body>
+</html>

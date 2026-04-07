@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>@glymo/core — Air Writing &amp; Text Recognition</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── Canvas container ─────────────────────────────── */
+    #container {
+      position: relative;
+      width: 800px;
+      height: 500px;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    #container video, #container canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border-radius: 16px;
+    }
+    #container video {
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    /* ── Info overlay ─────────────────────────────────── */
+    #info {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 20px;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 13px;
+      text-align: center;
+      line-height: 1.6;
+      z-index: 10;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    /* ── Recognized text output ──────────────────────── */
+    #output-bar {
+      width: 800px;
+      margin-top: 16px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 16px 24px;
+      min-height: 60px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    #output-label {
+      color: rgba(255, 255, 255, 0.3);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    #output {
+      color: #00ffaa;
+      font-size: 28px;
+      font-family: monospace;
+      font-weight: 600;
+      letter-spacing: 4px;
+      text-shadow: 0 0 20px rgba(0, 255, 170, 0.4);
+      flex: 1;
+      min-height: 1.2em;
+      word-break: break-all;
+    }
+
+    /* ── Status + controls ───────────────────────────── */
+    #status {
+      position: fixed;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 13px;
+      font-family: monospace;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #controls {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    #controls button {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 8px 16px;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    #controls button:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    /* ── Correction flash ─────────────────────────────── */
+    .correction-flash {
+      animation: flash-correct 0.4s ease;
+    }
+    @keyframes flash-correct {
+      0%, 100% { color: #00ffaa; }
+      50% { color: #ffd700; }
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <canvas id="canvas" width="800" height="500"></canvas>
+  </div>
+
+  <!-- Recognized text display -->
+  <div id="output-bar">
+    <span id="output-label">Recognized</span>
+    <span id="output"></span>
+  </div>
+
+  <div id="info">
+    Point your index finger to draw letters in the air &middot;
+    Close fist to clear &middot;
+    Each stroke is recognized as a character
+  </div>
+  <div id="status">Initializing camera...</div>
+
+  <div id="controls">
+    <button id="btn-clear">Clear Text</button>
+    <button id="btn-undo">Undo Last Char</button>
+    <button id="btn-space">Add Space</button>
+  </div>
+
+  <script type="module">
+    // ── Step 1: Import Glymo and CascadingRecognizer ────
+    // CascadingRecognizer provides a two-layer recognition
+    // pipeline: instant per-stroke (Net 1) for speed, then
+    // full-context re-analysis (Net 2) for accuracy.
+    import {
+      Glymo,
+      CascadingRecognizer,
+      HandVisualizer,
+    } from 'https://unpkg.com/@glymo/core/dist/glymo.mjs';
+
+    const canvas = document.getElementById('canvas');
+    const container = document.getElementById('container');
+    const output = document.getElementById('output');
+    const status = document.getElementById('status');
+
+    // Map of char ID -> span element for live correction updates
+    const charSpans = new Map();
+
+    // ── Step 2: Create Glymo in text mode ───────────────
+    // textMode: true    — enables text recognition pipeline
+    // instantComplete   — strokes finalize immediately (no morph delay)
+    // alwaysDraw        — point finger to draw, fist to pause
+    //                     (no pinch needed — more natural for writing)
+    const glymo = await Glymo.create(canvas, {
+      camera: true,
+      effect: 'neon',
+      textMode: true,
+      instantComplete: true,
+      alwaysDraw: true,
+    });
+
+    status.textContent = 'Camera ready — point to write!';
+
+    // ── Step 3: Show camera video feed ──────────────────
+    const video = glymo.getCameraVideoElement();
+    if (video) {
+      video.style.borderRadius = '16px';
+      container.insertBefore(video, canvas);
+    }
+
+    // ── Step 4: Set up hand visualizer ──────────────────
+    const handCanvas = document.createElement('canvas');
+    handCanvas.width = 800;
+    handCanvas.height = 500;
+    container.appendChild(handCanvas);
+
+    const handVis = new HandVisualizer(handCanvas);
+    handVis.setStyle('neon-skeleton');
+
+    glymo.setCameraLandmarkCallback((landmarks, isPinching, secondHand) => {
+      handVis.draw(landmarks, isPinching, secondHand);
+    });
+
+    // ── Step 5: Set up CascadingRecognizer ──────────────
+    // The recognizer takes each completed stroke and runs
+    // handwriting recognition. Net 1 gives an instant result,
+    // then Net 2 re-evaluates all strokes in context and may
+    // emit corrections for earlier characters.
+    const recognizer = new CascadingRecognizer({
+      // Called when a new character is recognized (Net 1)
+      onChar: (char) => {
+        const span = document.createElement('span');
+        span.textContent = char.char;
+        span.dataset.id = char.id;
+        output.appendChild(span);
+        charSpans.set(char.id, span);
+      },
+
+      // Called when Net 2 corrects a previously recognized character
+      onCorrection: (correction) => {
+        const span = charSpans.get(correction.id);
+        if (span) {
+          span.textContent = correction.newChar;
+          // Visual flash to indicate the correction
+          span.classList.remove('correction-flash');
+          void span.offsetWidth; // force reflow to restart animation
+          span.classList.add('correction-flash');
+        }
+      },
+
+      // Called when recognition is in progress
+      onRecognizing: (busy) => {
+        status.textContent = busy ? 'Recognizing...' : 'Ready — point to write!';
+      },
+    });
+
+    // ── Step 6: Feed completed strokes to the recognizer
+    // The stroke:complete event fires whenever a stroke
+    // finishes. We pass the raw points and bounding box
+    // to the CascadingRecognizer for recognition.
+    glymo.on('stroke:complete', ({ stroke, bbox }) => {
+      recognizer.feedStroke(stroke.raw, bbox, window.devicePixelRatio);
+    });
+
+    // ── Step 7: Gesture-based clear ─────────────────────
+    glymo.on('gesture:fist', () => {
+      recognizer.clear();
+      output.textContent = '';
+      charSpans.clear();
+      glymo.clear();
+    });
+
+    // ── Step 8: Button controls ─────────────────────────
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      recognizer.clear();
+      output.textContent = '';
+      charSpans.clear();
+      glymo.clear();
+    });
+
+    document.getElementById('btn-undo').addEventListener('click', () => {
+      const removedId = recognizer.undo();
+      if (removedId) {
+        const span = charSpans.get(removedId);
+        if (span) span.remove();
+        charSpans.delete(removedId);
+      }
+      glymo.undo();
+    });
+
+    document.getElementById('btn-space').addEventListener('click', () => {
+      const space = document.createElement('span');
+      space.textContent = '\u00A0'; // non-breaking space
+      output.appendChild(space);
+    });
+
+    // ── Step 9: Handle errors ───────────────────────────
+    glymo.on('camera:denied', () => {
+      status.textContent = 'Camera access denied. Please allow camera and reload.';
+      status.style.color = '#ff6b6b';
+    });
+
+    glymo.on('error', (err) => {
+      console.warn('[Glymo error]', err);
+    });
+  </script>
+</body>
+</html>
