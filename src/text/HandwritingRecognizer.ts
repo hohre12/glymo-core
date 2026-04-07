@@ -6,7 +6,11 @@
 
 import type { StrokePoint } from '../types.js';
 
-const API_URL = 'https://inputtools.google.com/request?itc=en-t-i0-handwrit&app=glymo';
+const DEFAULT_LANGUAGE = 'en';
+
+function buildApiUrl(language: string): string {
+  return `https://inputtools.google.com/request?itc=${language}-t-i0-handwrit&app=glymo`;
+}
 
 interface GoogleHandwritingRequest {
   app_version: number;
@@ -27,7 +31,7 @@ interface GoogleHandwritingRequest {
  */
 export async function recognizeHandwriting(
   strokeArrays: StrokePoint[][],
-  language: string = 'en',
+  language: string = DEFAULT_LANGUAGE,
   canvasWidth: number = 1000,
   canvasHeight: number = 600,
 ): Promise<{ text: string; candidates: string[] } | null> {
@@ -63,7 +67,7 @@ export async function recognizeHandwriting(
   };
 
   try {
-    const response = await fetch(API_URL, {
+    const response = await fetch(buildApiUrl(language || DEFAULT_LANGUAGE), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
