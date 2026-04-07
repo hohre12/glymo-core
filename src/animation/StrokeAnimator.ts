@@ -3,7 +3,7 @@
 // Manages per-stroke animations and computes per-frame transforms.
 // Designed to be zero-overhead when no animations are active.
 
-import type { AnimationParams, AnimationTransform, StrokeAnimation } from './types.js';
+import type { AnimationKeyframe, AnimationParams, AnimationTransform, StrokeAnimation } from './types.js';
 
 // Default amplitude values per animation type
 const DEFAULT_AMPLITUDE: Record<string, number> = {
@@ -21,6 +21,11 @@ const DEFAULT_SPEED = 90; // degrees per second for rotate
 
 const TWO_PI = Math.PI * 2;
 const DEG_TO_RAD = Math.PI / 180;
+
+/** Linear interpolation */
+function lerp(a: number, b: number, f: number): number {
+  return a + (b - a) * f;
+}
 
 /**
  * StrokeAnimator manages active animations and computes per-frame
@@ -220,8 +225,57 @@ export class StrokeAnimator {
         // Linear fade from 1 to 0
         identity.opacity = 1 - t;
         break;
+
+      case 'keyframe': {
+        if (!params.keyframes || params.keyframes.length === 0) break;
+        const kf = this.interpolateKeyframes(params.keyframes, t);
+        identity.translateX = kf.x ?? 0;
+        identity.translateY = kf.y ?? 0;
+        identity.scale = kf.scale ?? 1;
+        identity.rotation = kf.rotation ?? 0;
+        identity.opacity = kf.opacity ?? 1;
+        identity.glowIntensity = kf.glow ?? 1;
+        break;
+      }
     }
 
     return identity;
+  }
+
+  /**
+   * Linearly interpolate between keyframes at time t (0-1).
+   * Keyframes must be sorted by t. Values between keyframes are lerped.
+   */
+  private interpolateKeyframes(
+    keyframes: AnimationKeyframe[],
+    t: number,
+  ): AnimationKeyframe {
+    if (keyframes.length === 1) return keyframes[0]!;
+
+    // Find the two surrounding keyframes
+    let prev = keyframes[0]!;
+    let next = keyframes[keyframes.length - 1]!;
+
+    for (let i = 0; i < keyframes.length - 1; i++) {
+      if (t >= keyframes[i]!.t && t <= keyframes[i + 1]!.t) {
+        prev = keyframes[i]!;
+        next = keyframes[i + 1]!;
+        break;
+      }
+    }
+
+    // Compute lerp factor between prev and next
+    const span = next.t - prev.t;
+    const f = span > 0 ? (t - prev.t) / span : 0;
+
+    return {
+      t,
+      x: lerp(prev.x ?? 0, next.x ?? 0, f),
+      y: lerp(prev.y ?? 0, next.y ?? 0, f),
+      scale: lerp(prev.scale ?? 1, next.scale ?? 1, f),
+      rotation: lerp(prev.rotation ?? 0, next.rotation ?? 0, f),
+      opacity: lerp(prev.opacity ?? 1, next.opacity ?? 1, f),
+      glow: lerp(prev.glow ?? 1, next.glow ?? 1, f),
+    };
   }
 }

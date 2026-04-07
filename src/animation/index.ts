@@ -2,6 +2,7 @@
 
 export type {
   AnimationType,
+  AnimationKeyframe,
   AnimationParams,
   StrokeAnimation,
   AnimationTransform,
