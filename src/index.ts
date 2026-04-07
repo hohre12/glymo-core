@@ -92,6 +92,7 @@ export type { Landmark, HandLandmarkerResult } from './input/CameraCapture.js';
 export {
   PINCH_THRESHOLD,
   computePinchDistance,
+  computeSpeed,
   zToPressure,
 } from './input/CameraCapture.js';
 
