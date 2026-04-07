@@ -93,7 +93,6 @@ export class CameraCapture implements InputCapture {
   private pendingState = false;
 
   // Position tracking
-  private lastPoint: { x: number; y: number; t: number } | null = null;
   private lastDrawPos: { x: number; y: number } | null = null;
 
   // ── Velocity-based pause detection for letter separation ──
@@ -106,8 +105,6 @@ export class CameraCapture implements InputCapture {
   // While drawing (pointing), a quick thumb-index pinch = letter break.
   // State machine: OPEN → PINCHED → OPEN = one tap = one break.
   // This is the most reliable signal MediaPipe provides.
-  private wasPinching = false;
-  private pinchBreakReady = false; // true after pinch detected, waiting for release
 
   // OneEuroFilters for position smoothing (critical for forward-pointing fingers)
   // minCutoff=1.0: moderate smoothing when hand is still (filters jitter)
@@ -166,7 +163,7 @@ export class CameraCapture implements InputCapture {
     // If pausing while pen is down, force pen up so current stroke ends
     if (paused && this.penDown) {
       this.penDown = false;
-      this.lastPoint = null;
+
       this.lastDrawPos = null;
       this.pauseFrames = 0;
       this.pausedAt = null;
@@ -250,12 +247,11 @@ export class CameraCapture implements InputCapture {
     this.pendingStateFrames = 0;
     this.pendingState = false;
     this.gestureDetector.reset();
-    this.lastPoint = null;
     this.lastDrawPos = null;
     this.pauseFrames = 0;
     this.pausedAt = null;
-    this.wasPinching = false;
-    this.pinchBreakReady = false;
+
+
     this.xFilter.reset();
     this.yFilter.reset();
     this.penDown2 = false;
@@ -339,7 +335,7 @@ export class CameraCapture implements InputCapture {
       this.noHandFrames++;
       if (this.penDown && this.noHandFrames >= this.NO_HAND_DEBOUNCE) {
         this.penDown = false;
-        this.lastPoint = null;
+  
         this.lastDrawPos = null;
         this.pauseFrames = 0;
         this.pausedAt = null;
@@ -434,7 +430,7 @@ export class CameraCapture implements InputCapture {
         // ── While drawing: pinch = INSTANT pen-up ──
         if (isPinching) {
           this.penDown = false;
-          this.lastPoint = null;
+    
           this.lastDrawPos = null;
           this.pauseFrames = 0;
           this.pausedAt = null;
@@ -445,7 +441,7 @@ export class CameraCapture implements InputCapture {
         // Both conditions required: finger must be extended AND thumb not touching
         if (isPointing && !isPinching) {
           this.penDown = true;
-          this.lastPoint = null;
+    
           this.lastDrawPos = null;
           this.pauseFrames = 0;
           this.pausedAt = null;
@@ -613,7 +609,7 @@ export class CameraCapture implements InputCapture {
       if (this.pendingStateFrames >= PEN_STATE_DEBOUNCE_FRAMES) {
         this.penDown = isPinching;
         this.pendingStateFrames = 0;
-        this.lastPoint = null;
+  
 
         if (isPinching) {
           this.lastDrawPos = null;
@@ -638,9 +634,8 @@ export class CameraCapture implements InputCapture {
   private emitPoint(indexTip: { x: number; y: number; z: number }, now: number): void {
     const { x, y } = indexTip;
 
-    // ── Not drawing — just track last position ──────────
+    // ── Not drawing — skip ──────────
     if (!this.penDown) {
-      this.lastPoint = { x, y, t: now };
       return;
     }
 
@@ -693,7 +688,7 @@ export class CameraCapture implements InputCapture {
             }
             this.onPenState(false);
             this.onPenState(true);
-            this.lastPoint = null;
+      
             this.lastDrawPos = null;
           }
           this.pausedAt = null;
@@ -703,7 +698,6 @@ export class CameraCapture implements InputCapture {
     }
 
     this.lastDrawPos = { x, y };
-    this.lastPoint = { x, y, t: now };
 
     const point: RawInputPoint = {
       x,

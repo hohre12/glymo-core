@@ -148,6 +148,38 @@ export class ParticleSystem {
     }
   }
 
+  /**
+   * Spawn sparkle particles at random positions along a stroke path.
+   * Creates bright, short-lived particles that flash in-place — the core of the sparkle effect.
+   */
+  spawnSparkleAlongStroke(points: StrokePoint[], color: string, count: number = 3): void {
+    if (points.length === 0) return;
+
+    for (let i = 0; i < count; i++) {
+      if (this.particles.length >= MAX_PARTICLES) return;
+
+      const idx = Math.floor(Math.random() * points.length);
+      const pt = points[idx]!;
+
+      // Randomize size: mix of tiny twinkles and medium flashes
+      const isBigFlash = Math.random() < 0.3;
+      const size = isBigFlash
+        ? PARTICLE_SIZE * 2.5 + Math.random() * PARTICLE_SIZE * 2
+        : PARTICLE_SIZE * 0.8 + Math.random() * PARTICLE_SIZE;
+
+      this.particles.push({
+        x: pt.x + (Math.random() - 0.5) * 12,
+        y: pt.y + (Math.random() - 0.5) * 12,
+        vx: (Math.random() - 0.5) * 0.4,
+        vy: (Math.random() - 0.5) * 0.4 - 0.2, // slight upward drift
+        life: 1.0,
+        decay: 0.035 + Math.random() * 0.025, // fast fade — sparkle is brief
+        size,
+        color: isBigFlash ? '#ffffff' : color, // big flashes are white
+      });
+    }
+  }
+
   /** Spawn a dense burst of particles along the entire stroke at morph start */
   spawnBurstForMorph(stroke: Pick<Stroke, 'raw' | 'smoothed' | 'effect'>): void {
     const style = EFFECT_PRESETS[stroke.effect];

@@ -1,6 +1,7 @@
 import type { GlymoEventMap } from '../types.js';
 
-type EventHandler<T extends unknown[] = unknown[]> = (...args: T) => void;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type EventHandler<T extends any[] = any[]> = (...args: T) => void;
 
 /**
  * Simple typed event emitter for internal pipeline communication.

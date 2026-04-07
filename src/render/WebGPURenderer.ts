@@ -1,4 +1,4 @@
-import type { EffectPresetName, GlymoEvent, Stroke, StrokePoint } from '../types.js';
+import type { EffectPresetName, Stroke, StrokePoint } from '../types.js';
 import { EFFECT_PRESETS, GPU_EFFECT_NAMES } from '../types.js';
 import { hexToRgb } from '../util/math.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
@@ -163,7 +163,6 @@ export class WebGPURenderer implements IRenderer {
   private uniformBuffer: GPUBuffer | null = null;
   private uniformBindGroup: GPUBindGroup | null = null;
 
-  private eventBus: EventBus | null = null;
   private animationId: number | null = null;
   private lastFrameTime = 0;
   private elapsedTime = 0;
@@ -206,7 +205,7 @@ export class WebGPURenderer implements IRenderer {
 
   // ── IRenderer ─────────────────────────────────────
 
-  setEventBus(bus: EventBus): void { this.eventBus = bus; }
+  setEventBus(_bus: EventBus): void { /* reserved for future event emission */ }
 
   start(): void {
     if (this.animationId !== null) return;
@@ -394,7 +393,7 @@ export class WebGPURenderer implements IRenderer {
       size: verts.byteLength,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
-    dev.queue.writeBuffer(vertexBuffer, 0, verts);
+    dev.queue.writeBuffer(vertexBuffer, 0, verts as Float32Array<ArrayBuffer>);
 
     const pipeline = isGlow ? this.glowPipeline! : this.strokePipeline!;
     pass.setPipeline(pipeline);
@@ -504,9 +503,6 @@ export class WebGPURenderer implements IRenderer {
     ctx.restore();
   }
 
-  private emitEvent(event: GlymoEvent, ...args: unknown[]): void {
-    this.eventBus?.emit(event, ...args);
-  }
 }
 
 // ── Color helpers ───────────────────────────────────

@@ -11,6 +11,8 @@ import type { IRenderer } from './render/IRenderer.js';
 import { EventBus } from './state/EventBus.js';
 import { SessionStateMachine } from './state/SessionStateMachine.js';
 import { MorphAnimator } from './animate/MorphAnimator.js';
+import { StrokeAnimator } from './animation/StrokeAnimator.js';
+import type { AnimationParams } from './animation/types.js';
 import { exportPNG } from './export/PNGExporter.js';
 import { exportGIF as exportGIFImpl } from './export/GIFExporter.js';
 import type { GIFExportOptions } from './export/GIFExporter.js';
@@ -45,6 +47,7 @@ export class Glymo {
   private strokes: Stroke[] = [];
   private currentEffect: EffectPresetName;
   private morphAnimator: MorphAnimator | null = null;
+  private readonly strokeAnimator: StrokeAnimator;
   private pendingStroke: FinalizedStroke | null = null;
   private destroyed = false;
   private instantComplete = false;
@@ -77,6 +80,7 @@ export class Glymo {
     this.eventBus = new EventBus();
     this.pipeline = new PipelineEngine(this.eventBus);
     this.pipeline2 = new PipelineEngine(this.eventBus);
+    this.strokeAnimator = new StrokeAnimator();
     this.renderer = new CanvasRenderer(canvas, this.options.pixelRatio);
     this.inputManager = new InputManager();
     this.stateMachine = new SessionStateMachine(this.eventBus);
@@ -99,6 +103,7 @@ export class Glymo {
     this.renderer.setEventBus(this.eventBus);
     this.renderer.setEffect(this.currentEffect);
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
+    this.wireStrokeAnimator();
     this.renderer.start();
     this.stateMachine.transition('init');
 
@@ -241,7 +246,7 @@ export class Glymo {
       glymo.on('camera:ready', options.onReady);
     }
     if (options?.onError) {
-      glymo.on('camera:denied', options.onError);
+      glymo.on('camera:denied', (error?: Error) => options.onError!(error ?? new Error('Camera denied')));
     }
     if (options?.camera) {
       await glymo.bindCamera();
@@ -339,6 +344,26 @@ export class Glymo {
   getLayoutMode(): LayoutMode { return this.kineticEngine.getLayoutMode(); }
   getKineticEngine(): KineticEngine { return this.kineticEngine; }
 
+  // ── Stroke Animation ─────────────────────────────
+
+  /** Animate one or more strokes with the given animation parameters. Returns an animation ID. */
+  animateStrokes(strokeIds: string[], params: AnimationParams): string {
+    this.assertNotDestroyed();
+    return this.strokeAnimator.addAnimation(strokeIds, params);
+  }
+
+  /** Stop a specific animation by its ID */
+  stopAnimation(animationId: string): void {
+    this.assertNotDestroyed();
+    this.strokeAnimator.removeAnimation(animationId);
+  }
+
+  /** Stop all active stroke animations */
+  stopAllAnimations(): void {
+    this.assertNotDestroyed();
+    this.strokeAnimator.clear();
+  }
+
   // ── Renderer ───────────────────────────────────────
   /** Switch the rendering backend ('canvas2d' | 'webgpu' | 'auto') */
   async setRenderer(mode: RendererMode): Promise<void> {
@@ -371,6 +396,7 @@ export class Glymo {
     setTimeout(() => {
       this.strokes = [];
       this.accumulatedStrokes = [];
+      this.strokeAnimator.clear();
       this.renderer.clearAll();
       this.pipeline.reset();
       this.pipeline2.reset();
@@ -383,6 +409,7 @@ export class Glymo {
     const removed = this.renderer.removeLastStroke();
     if (removed) {
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
+      this.strokeAnimator.removeByStrokeId(removed.id);
     }
   }
 
@@ -442,6 +469,7 @@ export class Glymo {
     this.destroyed = true;
     if (this.overlayTimer) { clearTimeout(this.overlayTimer); this.overlayTimer = null; }
     this.cancelMorph();
+    this.strokeAnimator.clear();
     this.stateMachine.destroy();
     this.unbind();
     this.renderer.destroy();
@@ -497,6 +525,13 @@ export class Glymo {
     this.eventBus.on('text:overlay', (overlayData) => {
       this.renderer.setOverlayText(overlayData);
     });
+  }
+
+  /** Connect the StrokeAnimator to the current renderer (CanvasRenderer only) */
+  private wireStrokeAnimator(): void {
+    if (this.renderer instanceof CanvasRenderer) {
+      this.renderer.setStrokeAnimator(this.strokeAnimator);
+    }
   }
 
   private handlePenDown(): void {
@@ -738,6 +773,7 @@ export class Glymo {
     this.renderer.setEventBus(this.eventBus);
     this.renderer.setEffect(this.currentEffect);
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
+    this.wireStrokeAnimator();
     for (const s of strokes) this.renderer.addCompletedStroke(s);
 
     // Re-connect FontMorphAnimator if one is still running after the renderer swap

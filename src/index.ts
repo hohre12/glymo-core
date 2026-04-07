@@ -123,6 +123,17 @@ export {
   GESTURE_DEACTIVATE_FRAMES,
 } from './gesture/constants.js';
 
+// ── Stroke Animation ────────────────────────────────
+
+export type {
+  AnimationType,
+  AnimationParams,
+  StrokeAnimation,
+  AnimationTransform,
+} from './animation/index.js';
+
+export { StrokeAnimator } from './animation/index.js';
+
 // ── CreateOptions (Glymo.create) ───────────────────
 
 export type { CreateOptions } from './types.js';

@@ -7,6 +7,7 @@ import { PerformanceMonitor } from '../util/PerformanceMonitor.js';
 import type { EventBus } from '../state/EventBus.js';
 import type { IRenderer, RendererType } from './IRenderer.js';
 import type { OverlayText } from '../text/types.js';
+import type { StrokeAnimator } from '../animation/StrokeAnimator.js';
 
 import { renderBackground } from './layers/background.js';
 import { renderCompletedStrokes } from './layers/completed.js';
@@ -47,11 +48,15 @@ export class CanvasRenderer implements IRenderer {
   private fontMorphAnimator: FontMorphAnimator | null = null;
   private backgroundMode: 'solid' | 'transparent' = 'solid';
   private morphBurstFired = false;
+  private lastSparkleSpawn = 0;
+  private static readonly SPARKLE_INTERVAL = 120; // ms between sparkle particle spawns
 
   // Offscreen canvas cache for completed strokes — avoids re-rendering static strokes every frame
   private completedCache: OffscreenCanvas | null = null;
   private completedCacheCtx: OffscreenCanvasRenderingContext2D | null = null;
   private completedCacheDirty = true;
+
+  private strokeAnimator: StrokeAnimator | null = null;
 
   private getActivePointsFn: (() => ReadonlyArray<StrokePoint>) | null = null;
 
@@ -104,6 +109,11 @@ export class CanvasRenderer implements IRenderer {
   /** Set or clear the FontMorphAnimator for text morph rendering */
   setFontMorphAnimator(animator: FontMorphAnimator | null): void {
     this.fontMorphAnimator = animator;
+  }
+
+  /** Set the StrokeAnimator for per-stroke animation transforms */
+  setStrokeAnimator(animator: StrokeAnimator | null): void {
+    this.strokeAnimator = animator;
   }
 
   /** Set background rendering mode — 'transparent' skips the black fill */
@@ -223,13 +233,14 @@ export class CanvasRenderer implements IRenderer {
     // Layer 0 — Background
     renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode);
 
-    // Layer 10 — Completed strokes (offscreen cache)
+    // Layer 10 — Completed strokes (offscreen cache + animation transforms)
     this.completedCacheDirty = renderCompletedStrokes(
       this.ctx,
       this.completedStrokes,
       this.completedCache,
       this.completedCacheCtx,
       this.completedCacheDirty,
+      this.strokeAnimator,
     );
 
     // Layer 20 — Morphing stroke
@@ -246,6 +257,9 @@ export class CanvasRenderer implements IRenderer {
 
     // Layer 30 — Active stroke
     renderActiveStroke(this.ctx, this.activePoints, EFFECT_PRESETS[this.activeEffect]);
+
+    // Sparkle particle spawning (throttled)
+    this.spawnSparkleParticles(timestamp);
 
     // Layer 40 — Particles
     this.particleSystem.updateAndRender(this.ctx, dt, degraded);
@@ -298,6 +312,22 @@ export class CanvasRenderer implements IRenderer {
     if (!frame || frame.points.length === 0) return;
 
     renderTextMorph(this.ctx, frame);
+  }
+
+  /** Spawn sparkle particles along strokes with active sparkle animations */
+  private spawnSparkleParticles(now: number): void {
+    if (!this.strokeAnimator?.hasAnimations()) return;
+    if (now - this.lastSparkleSpawn < CanvasRenderer.SPARKLE_INTERVAL) return;
+
+    this.lastSparkleSpawn = now;
+    const sparkleIds = this.strokeAnimator.getSparkleStrokeIds(now);
+
+    for (const id of sparkleIds) {
+      const stroke = this.completedStrokes.find((s) => s.id === id);
+      if (!stroke || stroke.smoothed.length < 2) continue;
+      const style = EFFECT_PRESETS[stroke.effect];
+      this.particleSystem.spawnSparkleAlongStroke(stroke.smoothed, style.particleColor);
+    }
   }
 
   private emitDegradedIfNeeded(degraded: boolean): void {
