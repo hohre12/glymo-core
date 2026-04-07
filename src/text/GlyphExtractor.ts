@@ -53,7 +53,9 @@ export class GlyphExtractor {
         return font;
       }
     } catch {
-      // Timeout — fall through to system font
+      // Intentionally silent: font loading can time out for web fonts that
+      // are unavailable or slow to fetch. We fall through to the system font
+      // fallback below, which is always available.
     }
 
     // Fallback to system font
@@ -71,7 +73,9 @@ export class GlyphExtractor {
         const outline = this.extractChar(char, actualFont);
         glyphs.push(outline);
       } catch {
-        // Skip characters that fail extraction — graceful degradation
+        // Intentionally silent: certain characters (e.g. rare Unicode codepoints,
+        // emoji, or glyphs missing from the font) can fail canvas rendering or
+        // border detection. Skipping them is the correct graceful degradation.
         continue;
       }
     }

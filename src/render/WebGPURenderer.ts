@@ -33,7 +33,12 @@ export async function requestGPUDevice(): Promise<{ device: GPUDevice } | null> 
       new Promise<null>((r) => setTimeout(() => r(null), INIT_TIMEOUT_MS)),
     ]);
     return result ?? null;
-  } catch { return null; }
+  } catch {
+    // Intentionally silent: GPU initialisation is expected to fail on
+    // browsers/devices that do not support WebGPU. Caller treats null as
+    // "unavailable" and falls back to Canvas 2D.
+    return null;
+  }
 }
 
 // ── Base stroke shader (renders strokes as thick lines) ─

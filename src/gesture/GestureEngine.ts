@@ -148,6 +148,8 @@ export class GestureEngine {
     try {
       return detector(hand, secondHand);
     } catch {
+      // Intentionally silent: a broken detector must not crash the per-frame
+      // update loop. Returning false safely deactivates the gesture.
       return false;
     }
   }

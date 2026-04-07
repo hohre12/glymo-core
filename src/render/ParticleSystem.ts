@@ -55,12 +55,19 @@ export class ParticleSystem {
   ): void {
     const decay = dt > 0 ? dt / 16 : 1; // Normalize to 60fps
 
-    this.particles = this.particles.filter((p) => {
+    // In-place removal: iterate backwards and swap-remove dead particles to avoid
+    // allocating a new array every frame.
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i]!;
       p.x += p.vx * decay;
       p.y += p.vy * decay;
       p.life -= p.decay * decay;
-      return p.life > 0;
-    });
+      if (p.life <= 0) {
+        // Swap with last element and pop (O(1) removal)
+        this.particles[i] = this.particles[this.particles.length - 1]!;
+        this.particles.pop();
+      }
+    }
 
     // In degraded mode, render every other particle to reduce draw calls
     const step = degraded ? 2 : 1;
