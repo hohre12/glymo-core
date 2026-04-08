@@ -476,6 +476,15 @@ export class CameraCapture implements InputCapture {
   private workerDetectErrors = 0;
   private static readonly MAX_WORKER_ERRORS = 3;
 
+  // ── Adaptive mode selection ──
+  // Measure first N roundtrips; if avg exceeds threshold, GPU contention is
+  // too high (e.g. M1 Pro unified GPU) and sync mode is faster.
+  private static readonly CALIBRATION_FRAMES = 10;
+  private static readonly ROUNDTRIP_THRESHOLD_MS = 60;
+  private calibrationRoundtrips: number[] = [];
+  private workerSendTime = 0;
+  private calibrationDone = false;
+
   private handleWorkerMessage = (e: MessageEvent): void => {
     // Discard all messages after stop() to prevent re-entrant initialization
     if (!this.active) return;
@@ -493,6 +502,32 @@ export class CameraCapture implements InputCapture {
     } else if (msg.type === 'result') {
       this.workerBusy = false;
       this.workerDetectErrors = 0;
+
+      // ── Adaptive calibration: measure roundtrip for first N frames ──
+      if (!this.calibrationDone && this.workerSendTime > 0) {
+        const roundtrip = performance.now() - this.workerSendTime;
+        this.calibrationRoundtrips.push(roundtrip);
+
+        if (this.calibrationRoundtrips.length >= CameraCapture.CALIBRATION_FRAMES) {
+          this.calibrationDone = true;
+          const avg = this.calibrationRoundtrips.reduce((a, b) => a + b, 0) / this.calibrationRoundtrips.length;
+
+          if (avg > CameraCapture.ROUNDTRIP_THRESHOLD_MS) {
+            // GPU contention detected — sync mode is faster on this device
+            console.log(`[CameraCapture] Worker roundtrip ${Math.round(avg)}ms > ${CameraCapture.ROUNDTRIP_THRESHOLD_MS}ms threshold → switching to sync mode`);
+            this.processDetectionResult({
+              landmarks: msg.landmarks ?? [],
+              worldLandmarks: msg.worldLandmarks ?? [],
+            });
+            this.cancelAnimationFrame();
+            this.terminateWorker();
+            this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
+            return;
+          }
+          console.log(`[CameraCapture] Worker roundtrip ${Math.round(avg)}ms ≤ ${CameraCapture.ROUNDTRIP_THRESHOLD_MS}ms → keeping Worker mode`);
+        }
+      }
+
       this.processDetectionResult({
         landmarks: msg.landmarks ?? [],
         worldLandmarks: msg.worldLandmarks ?? [],
@@ -534,6 +569,7 @@ export class CameraCapture implements InputCapture {
         return;
       }
       const ts = performance.now();
+      this.workerSendTime = ts;
       this.worker.postMessage(
         { type: 'detect', frame: bitmap, timestamp: ts },
         [bitmap],
@@ -562,6 +598,9 @@ export class CameraCapture implements InputCapture {
     }
     this.workerBusy = false;
     this.workerDetectErrors = 0;
+    this.calibrationRoundtrips = [];
+    this.workerSendTime = 0;
+    this.calibrationDone = false;
   }
 
   // ── Private: detection loop (sync fallback) ─────────
@@ -569,11 +608,9 @@ export class CameraCapture implements InputCapture {
   private startDetectionLoop(): void {
     const detect = (): void => {
       if (!this.active) return;
-
       this.processFrameSync();
       this.animFrameId = requestAnimationFrame(detect);
     };
-
     this.animFrameId = requestAnimationFrame(detect);
   }
 
