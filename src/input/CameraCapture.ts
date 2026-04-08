@@ -461,6 +461,7 @@ export class CameraCapture implements InputCapture {
         bundleUrl: VISION_BUNDLE_URL,
         wasmUrl: WASM_URL,
         modelUrl: MODEL_URL,
+        delegate: 'GPU',
       });
 
       return true;
@@ -491,7 +492,7 @@ export class CameraCapture implements InputCapture {
       this.onSuccess();
     } else if (msg.type === 'result') {
       this.workerBusy = false;
-      this.workerDetectErrors = 0; // reset on success
+      this.workerDetectErrors = 0;
       this.processDetectionResult({
         landmarks: msg.landmarks ?? [],
         worldLandmarks: msg.worldLandmarks ?? [],
@@ -532,12 +533,10 @@ export class CameraCapture implements InputCapture {
         this.workerBusy = false;
         return;
       }
-      // Capture timestamp at dispatch time (not before createImageBitmap)
-      // so MediaPipe's temporal tracking matches the actual frame moment.
       const ts = performance.now();
       this.worker.postMessage(
         { type: 'detect', frame: bitmap, timestamp: ts },
-        [bitmap], // Transfer (zero-copy)
+        [bitmap],
       );
     }).catch(() => {
       this.workerBusy = false;
@@ -547,8 +546,6 @@ export class CameraCapture implements InputCapture {
   private startWorkerDetectionLoop(): void {
     const loop = (): void => {
       if (!this.active) return;
-      // workerBusy flag naturally throttles to Worker's processing speed (~20-30fps).
-      // No additional frame skipping — it would increase gesture detection latency.
       this.sendFrameToWorker();
       this.animFrameId = requestAnimationFrame(loop);
     };
