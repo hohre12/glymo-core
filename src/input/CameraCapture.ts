@@ -144,7 +144,6 @@ export class CameraCapture implements InputCapture {
   // ── Worker off-thread detection ──
   private worker: Worker | null = null;
   private workerBusy = false;
-  private workerFrameCount = 0;
   private workerReady = false;
   private workerInitTimeout: ReturnType<typeof setTimeout> | null = null;
   /** External worker URL — when set, uses a same-origin module worker instead of inline Blob */
@@ -548,10 +547,9 @@ export class CameraCapture implements InputCapture {
   private startWorkerDetectionLoop(): void {
     const loop = (): void => {
       if (!this.active) return;
-      // Only send every other frame (~30fps detection is sufficient)
-      if (++this.workerFrameCount % 2 === 0) {
-        this.sendFrameToWorker();
-      }
+      // workerBusy flag naturally throttles to Worker's processing speed (~20-30fps).
+      // No additional frame skipping — it would increase gesture detection latency.
+      this.sendFrameToWorker();
       this.animFrameId = requestAnimationFrame(loop);
     };
     this.animFrameId = requestAnimationFrame(loop);
@@ -566,7 +564,6 @@ export class CameraCapture implements InputCapture {
       this.worker = null;
     }
     this.workerBusy = false;
-    this.workerFrameCount = 0;
     this.workerDetectErrors = 0;
   }
 
