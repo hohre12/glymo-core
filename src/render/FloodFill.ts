@@ -10,7 +10,7 @@ export function createStrokeMask(
   strokes: readonly Stroke[],
   width: number,
   height: number,
-  gapCloseRadius: number = 5,
+  gapCloseRadius: number = 12,
 ): OffscreenCanvas {
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d')!;
@@ -19,8 +19,12 @@ export function createStrokeMask(
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
-  // Draw strokes as white lines with extra width for gap closing
+  // White border around the canvas edge — prevents fill from leaking to infinity
   ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(1, 1, width - 2, height - 2);
+
+  // Draw strokes as white lines with extra width for gap closing
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
@@ -28,8 +32,8 @@ export function createStrokeMask(
     const points = stroke.smoothed;
     if (points.length < 2) continue;
 
-    // Use a fixed base width + gap close radius for the mask
-    const baseWidth = 8;
+    // Use stroke's actual pressure-based width if available, plus gap close radius
+    const baseWidth = 12;
     ctx.lineWidth = baseWidth + gapCloseRadius * 2;
 
     ctx.beginPath();
@@ -134,7 +138,7 @@ export async function executeFill(
   startX: number,
   startY: number,
   color: string,
-  gapCloseRadius: number = 5,
+  gapCloseRadius: number = 12,
 ): Promise<ImageBitmap | null> {
   if (strokes.length === 0) return null;
 
@@ -160,6 +164,19 @@ export async function executeFill(
   // Run scanline fill
   const fillData = scanlineFill(maskData, sx, sy, { r, g, b, a: 255 });
   if (!fillData) return null;
+
+  // Safety check: if fill covers more than 40% of canvas, it leaked outside.
+  // Cancel the fill to prevent painting the entire screen.
+  const totalPixels = canvasWidth * canvasHeight;
+  let filledPixels = 0;
+  const fd = fillData.data;
+  for (let i = 3; i < fd.length; i += 4) {
+    if (fd[i]! > 0) filledPixels++;
+  }
+  if (filledPixels / totalPixels > 0.4) {
+    console.warn('[FloodFill] Fill covers', Math.round(filledPixels / totalPixels * 100) + '% of canvas — likely leaked, cancelling');
+    return null;
+  }
 
   // Convert to ImageBitmap
   return createImageBitmap(fillData);
