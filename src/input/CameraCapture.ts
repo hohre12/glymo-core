@@ -359,6 +359,16 @@ export class CameraCapture implements InputCapture {
     await this.startCamera();
     if (!this.active) return;
 
+    // Detect GPU type to choose optimal mode upfront (avoid double init)
+    const preferSync = await CameraCapture.shouldPreferSync();
+    if (!this.active) return;
+
+    if (preferSync) {
+      console.log('[CameraCapture] Unified GPU detected → starting in sync mode directly');
+      await this.initMediaPipeSync();
+      return;
+    }
+
     // Try Worker path: MediaPipe runs off main thread
     if (this.tryCreateWorker()) {
       // Worker is loading MediaPipe asynchronously.
@@ -376,6 +386,55 @@ export class CameraCapture implements InputCapture {
 
     // Sync fallback: load MediaPipe on main thread (original behavior)
     await this.initMediaPipeSync();
+  }
+
+  /**
+   * Detect if the device has a unified GPU (shared CPU/GPU memory)
+   * where Worker mode causes GPU contention. Returns true for sync preference.
+   *
+   * Uses WebGPU adapter info when available, falls back to heuristics.
+   */
+  private static async shouldPreferSync(): Promise<boolean> {
+    // Check localStorage cache first
+    const cached = typeof localStorage !== 'undefined' ? localStorage.getItem('glymo-mp-mode') : null;
+    if (cached === 'sync') return true;
+    if (cached === 'worker') return false;
+
+    // Try WebGPU adapter detection
+    if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
+      try {
+        const adapter = await (navigator as any).gpu.requestAdapter();
+        if (adapter) {
+          const info = await adapter.requestAdapterInfo?.() ?? adapter.info;
+          const desc = (info?.description ?? info?.device ?? '').toLowerCase();
+          const arch = (info?.architecture ?? '').toLowerCase();
+
+          // Apple Silicon unified GPU: M1, M2, M3 (not M4 Pro/Max which are faster)
+          const isAppleSilicon = desc.includes('apple') || arch.includes('apple');
+          const isBaseTier = /m[123]\b/.test(desc) || /m[123]\b/.test(arch)
+            || desc.includes('m1 pro') || desc.includes('m2 pro');
+          // M4 Pro and above have enough GPU headroom for Worker
+          const isHighTier = desc.includes('m4') || desc.includes('m3 max') || desc.includes('m3 ultra');
+
+          if (isAppleSilicon && isBaseTier && !isHighTier) {
+            console.log(`[CameraCapture] GPU detected: ${desc || arch} → unified, prefer sync`);
+            localStorage?.setItem('glymo-mp-mode', 'sync');
+            return true;
+          }
+
+          if (isAppleSilicon && isHighTier) {
+            console.log(`[CameraCapture] GPU detected: ${desc || arch} → high-tier, prefer worker`);
+            localStorage?.setItem('glymo-mp-mode', 'worker');
+            return false;
+          }
+        }
+      } catch {
+        // WebGPU not available or blocked
+      }
+    }
+
+    // No detection available — keep calibration-based fallback
+    return false;
   }
 
   /** Fallback: load MediaPipe on main thread and start sync detection loop */
