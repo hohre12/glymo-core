@@ -43,7 +43,7 @@ export const LANDMARK_COUNT = 21;
  * a pinch gesture is considered active.
  * Source: empirically tuned for MediaPipe normalized coords.
  */
-export const PINCH_THRESHOLD = 0.08;
+export const PINCH_THRESHOLD = 0.055;
 
 /**
  * Finger extension score below this value → finger is considered folded.

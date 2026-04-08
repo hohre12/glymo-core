@@ -317,6 +317,12 @@ export class Glymo {
     this.instantComplete = skip;
   }
 
+  /** Set external Worker URL for off-thread MediaPipe detection. Must be called before bindCamera(). */
+  setWorkerUrl(url: string): void {
+    this.assertNotDestroyed();
+    this.inputManager.setWorkerUrl(url);
+  }
+
   /** Enable gesture-based draw mode: ☝️ point = draw, ✊ fist = don't draw */
   setCameraAlwaysDrawMode(enabled: boolean): void {
     this.assertNotDestroyed();

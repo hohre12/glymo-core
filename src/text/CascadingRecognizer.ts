@@ -1,21 +1,15 @@
 /**
- * CascadingRecognizer — framework-agnostic cascading handwriting recognition.
+ * CascadingRecognizer — spatial-grouping handwriting recognition.
  *
- * Two-layer recognition pipeline:
+ * Strokes are grouped by spatial proximity. Each group is recognized
+ * independently. When the user moves to a new location, the previous
+ * group finalizes and converts to a font character.
  *
- *   Net 1 (instant): Each stroke is recognized independently the moment it
- *         completes. Fast (~200ms) but low accuracy. Confidence: 0.6.
- *
- *   Net 2 (context): After each Net 1, ALL accumulated strokes are re-sent
- *         to the API. The full context dramatically improves accuracy.
- *         Mismatches are emitted as corrections. Confidence: 0.95.
- *
- * Usage:
- *   const recognizer = new CascadingRecognizer({ onChar, onCorrection, onRecognizing });
- *   recognizer.feedStroke(rawPoints, boundingBox);
- *   recognizer.removeChar(id);   // eraser
- *   recognizer.clear();          // reset
- *   recognizer.destroy();        // cleanup
+ * Flow:
+ *   1. Stroke arrives → check if near current group's bounding box
+ *   2. Near → add to group, re-recognize group
+ *   3. Far  → finalize previous group, start new group
+ *   4. Finalized group → short timer → display font + fade handwritten strokes
  */
 
 import type { StrokePoint } from '../types.js';
@@ -32,7 +26,6 @@ export interface RecognizedChar {
   height: number;
   confidence: number;
   strokeIndex: number;
-  /** Stroke points relative to char center (for morph/particle animations) */
   strokePoints?: { x: number; y: number }[];
 }
 
@@ -43,27 +36,48 @@ export interface CharCorrection {
 }
 
 export interface CascadingRecognizerOptions {
-  /** Called when Net 1 recognizes a new character */
   onChar: (char: RecognizedChar) => void;
-  /** Called when Net 2 corrects an existing character */
   onCorrection: (correction: CharCorrection) => void;
-  /** Called when recognizing state changes */
   onRecognizing?: (busy: boolean) => void;
-  /** Force uppercase output (default: true — air writing is naturally uppercase) */
+  /** Called before font display — consumer should fade out handwritten strokes for the group */
+  onDisplayFlush?: (strokeCount: number) => void;
   uppercase?: boolean;
-  /** Rolling window size for height normalization (default: 5) */
   heightWindowSize?: number;
 }
 
+// ── Internal types ────────────────────────────────────────────────────────
+
 interface Bbox { x: number; y: number; width: number; height: number }
 
-interface StrokeRecord {
-  raw: StrokePoint[];
+interface StrokeGroup {
+  strokes: { raw: StrokePoint[]; bbox: Bbox }[];
   bbox: Bbox;
-  charId: string;
+  generation: number;
+  result: string;
+  displayed: boolean;
+  displayTimer: ReturnType<typeof setTimeout> | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+function combineBbox(a: Bbox, b: Bbox): Bbox {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.width, b.x + b.width);
+  const bottom = Math.max(a.y + a.height, b.y + b.height);
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+function bboxNear(a: Bbox, b: Bbox, threshold: number): boolean {
+  // Expand b by threshold and check overlap with a
+  const ex = b.x - threshold;
+  const ey = b.y - threshold;
+  const ew = b.width + threshold * 2;
+  const eh = b.height + threshold * 2;
+
+  return !(a.x + a.width < ex || a.x > ex + ew ||
+           a.y + a.height < ey || a.y > ey + eh);
+}
 
 function rollingAvg(window: number[], value: number, maxLen: number): number {
   window.push(value);
@@ -71,39 +85,53 @@ function rollingAvg(window: number[], value: number, maxLen: number): number {
   return window.reduce((a, b) => a + b, 0) / window.length;
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────
+
+/** Language-specific recognition parameters */
+const LANG_PARAMS: Record<string, { proximityFactor: number; minProximityPx: number; finalizeDelay: number }> = {
+  en: { proximityFactor: 0.8, minProximityPx: 40, finalizeDelay: 600 },
+  ko: { proximityFactor: 1.2, minProximityPx: 80, finalizeDelay: 1200 },
+};
+const DEFAULT_PARAMS = LANG_PARAMS.en!;
+
 // ── Class ─────────────────────────────────────────────────────────────────
 
 export class CascadingRecognizer {
   private readonly opts: Required<CascadingRecognizerOptions>;
   private idCounter = 0;
-  private generation = 0;
-  private sweepId = 0;
-  private inflight = 0;
-  private net2Disabled = false;
   private destroyed = false;
+  private inflight = 0;
 
-  private strokeHistory: StrokeRecord[] = [];
+  private groups: StrokeGroup[] = [];
   private heightWindow: number[] = [];
-
-  /** Map of all recognized chars (source of truth for Net 2 diffing) */
   private chars = new Map<string, RecognizedChar>();
+
+  private language: string = 'en';
 
   constructor(options: CascadingRecognizerOptions) {
     this.opts = {
       onChar: options.onChar,
       onCorrection: options.onCorrection,
       onRecognizing: options.onRecognizing ?? (() => {}),
+      onDisplayFlush: options.onDisplayFlush ?? (() => {}),
       uppercase: options.uppercase ?? true,
       heightWindowSize: options.heightWindowSize ?? 5,
     };
   }
 
-  /**
-   * Feed a completed stroke for recognition.
-   * @param raw       Raw stroke points (canvas-pixel coordinates)
-   * @param bbox      Bounding box of the stroke (canvas-pixel coordinates)
-   * @param dpr       Device pixel ratio — used to convert to CSS pixels
-   */
+  setLanguage(lang: string): void {
+    this.language = lang;
+  }
+
+  notifyStrokeStart(): void {
+    // Cancel display timer on the active (last) group — user is still drawing
+    const active = this.groups[this.groups.length - 1];
+    if (active?.displayTimer) {
+      clearTimeout(active.displayTimer);
+      active.displayTimer = null;
+    }
+  }
+
   feedStroke(raw: StrokePoint[], bbox: Bbox, dpr = 1): void {
     if (this.destroyed) return;
 
@@ -114,167 +142,165 @@ export class CascadingRecognizer {
       height: bbox.height / dpr,
     };
 
-    const strokeIndex = this.strokeHistory.length;
-    const record: StrokeRecord = { raw, bbox: cssBbox, charId: '' };
-    this.strokeHistory.push(record);
+    const activeGroup = this.groups[this.groups.length - 1];
 
-    const normHeight = rollingAvg(
-      this.heightWindow, cssBbox.height, this.opts.heightWindowSize,
-    );
+    if (activeGroup && !activeGroup.displayed) {
+      // Check if new stroke is near the active group
+      const params = LANG_PARAMS[this.language] ?? DEFAULT_PARAMS;
+      const threshold = Math.max(
+        Math.max(activeGroup.bbox.width, activeGroup.bbox.height) * params.proximityFactor,
+        params.minProximityPx,
+      );
+
+      if (bboxNear(cssBbox, activeGroup.bbox, threshold)) {
+        // Add to existing group
+        activeGroup.strokes.push({ raw, bbox: cssBbox });
+        activeGroup.bbox = combineBbox(activeGroup.bbox, cssBbox);
+        // Cancel any pending display timer (still writing this char)
+        if (activeGroup.displayTimer) {
+          clearTimeout(activeGroup.displayTimer);
+          activeGroup.displayTimer = null;
+        }
+        this.recognizeGroup(activeGroup, dpr);
+        // Start finalize timer
+        this.scheduleFinalize(activeGroup, dpr);
+        return;
+      }
+
+      // New stroke is far away → finalize previous group immediately
+      this.finalizeGroup(activeGroup, dpr);
+    }
+
+    // Start new group
+    const newGroup: StrokeGroup = {
+      strokes: [{ raw, bbox: cssBbox }],
+      bbox: { ...cssBbox },
+      generation: 0,
+      result: '',
+      displayed: false,
+      displayTimer: null,
+    };
+    this.groups.push(newGroup);
+    this.recognizeGroup(newGroup, dpr);
+    this.scheduleFinalize(newGroup, dpr);
+  }
+
+  /** Trigger recognition for a group's strokes */
+  private recognizeGroup(group: StrokeGroup, dpr: number): void {
+    const gen = ++group.generation;
+    const strokes = group.strokes.map(s => s.raw);
 
     this.inflight++;
     this.opts.onRecognizing(true);
 
-    const gen = this.generation;
+    recognizeHandwriting(strokes, this.language).then(result => {
+      if (this.destroyed || group.generation !== gen) return;
+      if (!result?.text?.trim()) return;
 
-    // ── Net 1: instant per-stroke ─────────────────────────────────────
-    recognizeHandwriting([raw]).then(result => {
-      if (this.destroyed || this.generation !== gen) return;
+      let text = result.text.trim().replace(/\s+/g, '');
+      if (this.opts.uppercase) text = text.toUpperCase();
 
-      if (result && result.text.trim()) {
-        let firstChar = result.text.trim()[0]!;
-        if (this.opts.uppercase) firstChar = firstChar.toUpperCase();
-
-        const charId = `char-${++this.idCounter}`;
-        record.charId = charId;
-
-        const cx = cssBbox.x + cssBbox.width / 2;
-        const cy = cssBbox.y + cssBbox.height / 2;
-        const strokePts = raw.map(p => ({
-          x: (p.x / dpr) - cx,
-          y: (p.y / dpr) - cy,
-        }));
-
-        const char: RecognizedChar = {
-          id: charId,
-          char: firstChar,
-          x: cx,
-          y: cy,
-          width: cssBbox.width,
-          height: normHeight,
-          confidence: 0.6,
-          strokeIndex,
-          strokePoints: strokePts,
-        };
-
-        this.chars.set(charId, char);
-        this.opts.onChar(char);
-
-        // ── Fire Net 2 ────────────────────────────────────────────────
-        this.fireContextSweep();
-      }
-    }).catch(() => {
-      // Error propagated via onRecognizing(false) in finally
-    }).finally(() => {
+      // Take first character only (this group = one character)
+      group.result = text[0] ?? '';
+      console.log('[CascadingRecognizer] Group recognized:', group.result, '(full:', text, ')');
+    }).catch(() => {}).finally(() => {
       this.inflight--;
-      if (this.inflight === 0) {
-        this.opts.onRecognizing(false);
-      }
+      if (this.inflight === 0) this.opts.onRecognizing(false);
     });
   }
 
-  /** Remove a character (e.g. eraser). Disables Net 2 to prevent cycling. */
+  /** Schedule finalize timer — fires if no more strokes arrive */
+  private scheduleFinalize(group: StrokeGroup, dpr: number): void {
+    if (group.displayTimer) clearTimeout(group.displayTimer);
+    group.displayTimer = setTimeout(() => {
+      group.displayTimer = null;
+      this.finalizeGroup(group, dpr);
+    }, (LANG_PARAMS[this.language] ?? DEFAULT_PARAMS).finalizeDelay);
+  }
+
+  /** Finalize a group: display font character, fade handwritten strokes */
+  private finalizeGroup(group: StrokeGroup, dpr: number): void {
+    if (group.displayed) return;
+    group.displayed = true;
+
+    if (group.displayTimer) {
+      clearTimeout(group.displayTimer);
+      group.displayTimer = null;
+    }
+
+    if (!group.result) return;
+
+    // Fade out handwritten strokes for this group
+    this.opts.onDisplayFlush(group.strokes.length);
+
+    const normHeight = rollingAvg(
+      this.heightWindow, group.bbox.height, this.opts.heightWindowSize,
+    );
+
+    const charId = `char-${++this.idCounter}`;
+    const cx = group.bbox.x + group.bbox.width / 2;
+    const cy = group.bbox.y + group.bbox.height / 2;
+
+    const strokePts = group.strokes.flatMap(s =>
+      s.raw.map(p => ({ x: (p.x / dpr) - cx, y: (p.y / dpr) - cy })),
+    );
+
+    const char: RecognizedChar = {
+      id: charId,
+      char: group.result,
+      x: cx,
+      y: cy,
+      width: group.bbox.width,
+      height: normHeight,
+      confidence: 0.8,
+      strokeIndex: this.groups.indexOf(group),
+      strokePoints: strokePts,
+    };
+
+    this.chars.set(charId, char);
+    this.opts.onChar(char);
+    console.log('[CascadingRecognizer] Displayed:', group.result, 'at', Math.round(cx), Math.round(cy));
+  }
+
   removeChar(id: string): void {
-    this.strokeHistory = this.strokeHistory.filter(r => r.charId !== id);
-    this.net2Disabled = true;
-    this.sweepId++; // invalidate in-flight Net 2
     this.chars.delete(id);
   }
 
-  /** Undo the most recently added character */
   undo(): string | undefined {
-    // Find the char with highest strokeIndex
-    let lastId: string | undefined;
-    let maxIdx = -1;
-    for (const [id, ch] of this.chars) {
-      if (ch.strokeIndex > maxIdx) {
-        maxIdx = ch.strokeIndex;
-        lastId = id;
+    // Find last displayed group and remove its char
+    for (let i = this.groups.length - 1; i >= 0; i--) {
+      const g = this.groups[i]!;
+      if (!g.displayed) {
+        // Remove undisplayed group
+        if (g.displayTimer) clearTimeout(g.displayTimer);
+        this.groups.splice(i, 1);
+        return undefined;
       }
     }
+    // Remove last char
+    const lastId = [...this.chars.keys()].pop();
     if (lastId) {
-      this.removeChar(lastId);
+      this.chars.delete(lastId);
+      return lastId;
     }
-    return lastId;
+    return undefined;
   }
 
-  /** Reset all state */
   clear(): void {
-    this.strokeHistory = [];
+    for (const g of this.groups) {
+      if (g.displayTimer) clearTimeout(g.displayTimer);
+    }
+    this.groups = [];
     this.heightWindow = [];
-    this.generation++;
-    this.sweepId++;
-    this.net2Disabled = false;
     this.chars.clear();
   }
 
-  /** Get current character count */
   get charCount(): number {
     return this.chars.size;
   }
 
-  /** Cleanup — discard all pending results */
   destroy(): void {
     this.destroyed = true;
-    this.generation++;
-    this.sweepId++;
-  }
-
-  // ── Net 2: context sweep ────────────────────────────────────────────
-
-  private fireContextSweep(): void {
-    if (this.net2Disabled) return;
-    const history = this.strokeHistory;
-    if (history.length < 2) return;
-
-    const sweepId = ++this.sweepId;
-    const allStrokes = history.map(r => r.raw);
-
-    recognizeHandwriting(allStrokes).then(result => {
-      if (this.destroyed || this.sweepId !== sweepId) return;
-      if (!result || !result.text.trim()) return;
-
-      const fullText = result.text.trim();
-      let netChars = fullText.replace(/\s/g, '').split('');
-      if (this.opts.uppercase) netChars = netChars.map(c => c.toUpperCase());
-
-      // Safety: only apply when counts match (1:1 stroke→char mapping)
-      if (netChars.length !== history.length) return;
-
-      for (let i = 0; i < history.length; i++) {
-        const rec = history[i]!;
-        if (!rec.charId) continue;
-
-        const existing = this.chars.get(rec.charId);
-        if (!existing) continue;
-
-        const newChar = netChars[i]!;
-
-        // Same letter (case-insensitive) → boost confidence only
-        if (newChar.toUpperCase() === existing.char.toUpperCase()) {
-          existing.confidence = 0.95;
-          existing.char = newChar;
-          continue;
-        }
-
-        // Already confirmed → don't re-correct (prevents cycling)
-        if (existing.confidence >= 0.9) continue;
-
-        // Never degrade letter → digit
-        if (/[A-Z]/i.test(existing.char) && /\d/.test(newChar)) {
-          existing.confidence = 0.85;
-          continue;
-        }
-
-        // Apply correction
-        const oldChar = existing.char;
-        existing.char = newChar;
-        existing.confidence = 0.95;
-
-        this.opts.onCorrection({ id: rec.charId, oldChar, newChar });
-      }
-    }).catch(() => {
-      // Error silenced — corrections are best-effort
-    });
+    this.clear();
   }
 }

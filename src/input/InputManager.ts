@@ -20,6 +20,7 @@ export class InputManager {
   private onError: ErrorCallback = () => {};
   private onSuccess: () => void = () => {};
   private alwaysDrawMode = false;
+  private workerUrl: string | null = null;
   private onHandVisibility: ((visible: boolean) => void) | null = null;
 
   /** Set the callback for incoming points */
@@ -63,7 +64,10 @@ export class InputManager {
       (err) => this.onError(err),
       () => this.onSuccess(),
     );
-    // Apply stored always-draw mode to new camera instance
+    // Apply stored settings to new camera instance
+    if (this.workerUrl) {
+      this.cameraCapture.setWorkerUrl(this.workerUrl);
+    }
     if (this.alwaysDrawMode) {
       this.cameraCapture.setAlwaysDrawMode(true);
     }
@@ -100,6 +104,12 @@ export class InputManager {
   setHandVisibilityCallback(cb: ((visible: boolean) => void) | null): void {
     this.onHandVisibility = cb;
     this.cameraCapture?.setHandVisibilityCallback(cb);
+  }
+
+  /** Set external Worker URL for off-thread MediaPipe detection */
+  setWorkerUrl(url: string): void {
+    this.workerUrl = url;
+    this.cameraCapture?.setWorkerUrl(url);
   }
 
   /** Enable gesture-based draw mode on camera */

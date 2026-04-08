@@ -29,13 +29,17 @@ export const MODEL_URL =
 export const WASM_URL =
   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
 
-/** MediaPipe ESM bundle URL (used by the detection Worker to load the library) */
+/** MediaPipe bundle URL (used by the detection Worker via importScripts) */
 const VISION_BUNDLE_URL =
   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs';
 
 // ── Inline Worker script ─────────────────────────────
-// Loaded as a Blob URL module worker. Runs MediaPipe detectForVideo off the
+// Loaded as a Blob URL classic worker. Runs MediaPipe detectForVideo off the
 // main thread so rendering/recording never stalls.
+//
+// Uses importScripts() instead of dynamic import() for reliable cross-browser
+// loading from Blob URL workers (module workers + import() fail on some browsers
+// because the Blob origin is opaque).
 
 function buildWorkerScript(): string {
   return `
@@ -46,9 +50,9 @@ self.onmessage = async (e) => {
 
   if (msg.type === 'init') {
     try {
-      const mp = await import(msg.bundleUrl);
-      const vision = await mp.FilesetResolver.forVisionTasks(msg.wasmUrl);
-      handLandmarker = await mp.HandLandmarker.createFromOptions(vision, {
+      importScripts(msg.bundleUrl);
+      const vision = await self.FilesetResolver.forVisionTasks(msg.wasmUrl);
+      handLandmarker = await self.HandLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: msg.modelUrl, delegate: 'GPU' },
         numHands: 2,
         runningMode: 'VIDEO',
@@ -140,6 +144,10 @@ export class CameraCapture implements InputCapture {
   // ── Worker off-thread detection ──
   private worker: Worker | null = null;
   private workerBusy = false;
+  private workerReady = false;
+  private workerInitTimeout: ReturnType<typeof setTimeout> | null = null;
+  /** External worker URL — when set, uses a same-origin module worker instead of inline Blob */
+  private externalWorkerUrl: string | null = null;
   private penDown = false;
 
   // Gesture-based draw mode: ☝️ point = draw, ✊ fist/other = don't draw
@@ -212,6 +220,15 @@ export class CameraCapture implements InputCapture {
     this.onPenState = onPenState;
     this.onError = onError;
     this.onSuccess = onSuccess;
+  }
+
+  /**
+   * Set an external worker URL for off-thread MediaPipe detection.
+   * The file must be served from the same origin (e.g. /mediapipe-worker.mjs in public/).
+   * Must be called before start().
+   */
+  setWorkerUrl(url: string): void {
+    this.externalWorkerUrl = url;
   }
 
   /** Enable gesture-based draw mode: ☝️ point = draw, ✊ fist/other = don't draw */
@@ -346,7 +363,14 @@ export class CameraCapture implements InputCapture {
     if (this.tryCreateWorker()) {
       // Worker is loading MediaPipe asynchronously.
       // handleWorkerMessage('ready') will start the detection loop + call onSuccess.
-      // handleWorkerMessage('error') will fall back to sync.
+      // Timeout fallback: if Worker doesn't become ready in 10s, fall back to sync.
+      this.workerInitTimeout = setTimeout(() => {
+        if (!this.active) return;
+        if (this.workerReady) return; // already ready, no-op
+        console.warn('[CameraCapture] Worker init timed out after 10s, falling back to sync');
+        this.terminateWorker();
+        this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
+      }, 10_000);
       return;
     }
 
@@ -396,11 +420,12 @@ export class CameraCapture implements InputCapture {
   // ── Private: Worker management ────────────────────────
 
   /**
-   * Try to create a module Worker from inline Blob.
+   * Try to create a Worker for off-thread MediaPipe detection.
+   * Prefers external same-origin URL (module worker) over inline Blob (classic worker).
    * Returns true if Worker was created and init message sent.
    */
   private tryCreateWorker(): boolean {
-    // Feature detection: Worker + module workers + createImageBitmap
+    // Feature detection: Worker + createImageBitmap
     if (
       typeof Worker === 'undefined' ||
       typeof createImageBitmap === 'undefined'
@@ -409,10 +434,18 @@ export class CameraCapture implements InputCapture {
     }
 
     try {
-      const blob = new Blob([buildWorkerScript()], { type: 'text/javascript' });
-      const url = URL.createObjectURL(blob);
-      this.worker = new Worker(url, { type: 'module' });
-      URL.revokeObjectURL(url);
+      if (this.externalWorkerUrl) {
+        // Same-origin classic worker — uses importScripts() with patched MediaPipe bundle
+        const workerUrl = this.externalWorkerUrl + '?v=' + Date.now();
+        console.log('[CameraCapture] Creating classic worker from:', workerUrl);
+        this.worker = new Worker(workerUrl);
+      } else {
+        // Fallback: inline Blob classic worker (importScripts — may fail with .mjs)
+        const blob = new Blob([buildWorkerScript()], { type: 'text/javascript' });
+        const url = URL.createObjectURL(blob);
+        this.worker = new Worker(url);
+        URL.revokeObjectURL(url);
+      }
 
       this.worker.onmessage = this.handleWorkerMessage;
       this.worker.onerror = () => {
@@ -449,6 +482,11 @@ export class CameraCapture implements InputCapture {
     const msg = e.data as { type: string; error?: string; landmarks?: Landmark[][]; worldLandmarks?: Landmark[][] };
 
     if (msg.type === 'ready') {
+      this.workerReady = true;
+      if (this.workerInitTimeout) {
+        clearTimeout(this.workerInitTimeout);
+        this.workerInitTimeout = null;
+      }
       this.startWorkerDetectionLoop();
       this.onSuccess();
     } else if (msg.type === 'result') {
@@ -460,6 +498,16 @@ export class CameraCapture implements InputCapture {
       });
     } else if (msg.type === 'error') {
       this.workerBusy = false;
+
+      // Init-phase error: Worker failed to load MediaPipe → immediate sync fallback
+      if (!this.workerReady) {
+        console.warn('[CameraCapture] Worker init failed:', msg.error, '→ falling back to sync');
+        if (this.workerInitTimeout) { clearTimeout(this.workerInitTimeout); this.workerInitTimeout = null; }
+        this.terminateWorker();
+        this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
+        return;
+      }
+
       this.workerDetectErrors++;
 
       // Only fall back to sync after repeated consecutive failures.
@@ -628,50 +676,18 @@ export class CameraCapture implements InputCapture {
     }
 
     if (this.alwaysDrawMode) {
-      // ── Dual-signal pen control ─────────────────────────
+      // ── Pinch-to-draw (industry standard) ──────────────
       //
-      // Pen DOWN: gesture detector says "pointing" (index extended)
-      // Pen UP:   pinch detected (thumb touches index) — INSTANT, no EMA delay
+      // Pinch (thumb+index touch) = pen DOWN — start drawing
+      // Pinch release              = pen UP  — stop drawing
+      // Default state (no pinch)   = free movement
       //
-      // Why pinch for pen-up? When making a fist, the thumb naturally touches
-      // the index finger first. Pinch distance is MediaPipe's most reliable
-      // signal — works perfectly regardless of finger orientation.
-      //
-      // The gesture detector (with slow EMA) is used ONLY for pen-down,
-      // where a small delay (2-frame debounce) is acceptable.
-
-      const isPointing = this.gestureDetector.update(landmarks, worldLandmarks);
-      const pinchDist = computePinchDistance(landmarks[4]!, landmarks[8]!);
-      const isPinching = pinchDist < PINCH_THRESHOLD;
-
-      if (this.penDown) {
-        // ── While drawing: pinch = INSTANT pen-up ──
-        if (isPinching) {
-          this.penDown = false;
-    
-          this.lastDrawPos = null;
-          this.pauseFrames = 0;
-          this.pausedAt = null;
-          this.onPenState(false);
-        }
-      } else {
-        // ── While not drawing: pointing + NOT pinching = pen-down ──
-        // Both conditions required: finger must be extended AND thumb not touching
-        if (isPointing && !isPinching) {
-          this.penDown = true;
-    
-          this.lastDrawPos = null;
-          this.pauseFrames = 0;
-          this.pausedAt = null;
-          this.xFilter.reset();
-          this.yFilter.reset();
-          this.onPenState(true);
-        }
-      }
-
-      isPenDown = this.penDown;
+      // Matches Apple Vision Pro / Meta Quest interaction model.
+      // Enables natural multi-stroke drawing for Korean handwriting
+      // (ㄱ+ㅏ+ㄴ) and complex drawings (car body + wheels).
+      isPenDown = this.detectPenState(landmarks, worldLandmarks);
     } else {
-      // Pinch mode (original behavior)
+      // Pinch mode (original behavior — same logic, kept for API compat)
       isPenDown = this.detectPenState(landmarks, worldLandmarks);
     }
 
