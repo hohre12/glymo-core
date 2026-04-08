@@ -1,4 +1,4 @@
-import type { EffectPresetName, Stroke, StrokePoint } from '../types.js';
+import type { EffectPresetName, Fill, Stroke, StrokePoint } from '../types.js';
 import { EFFECT_PRESETS, GPU_EFFECT_NAMES } from '../types.js';
 import { hexToRgb } from '../util/math.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
@@ -225,9 +225,22 @@ export class WebGPURenderer implements IRenderer {
   setOverlayText(_overlay: OverlayText | null): void {}
   /** No-op — overlay text rendering is not supported in WebGPU mode */
   clearOverlayText(): void {}
+  /** No-op — fill rendering is not yet supported in WebGPU mode */
+  addFill(_fill: Fill): void {}
+  /** No-op — fill rendering is not yet supported in WebGPU mode */
+  removeLastFill(): Fill | undefined { return undefined; }
+  /** No-op — fill rendering is not yet supported in WebGPU mode */
+  clearFills(): void {}
+  /** No-op — fill rendering is not yet supported in WebGPU mode */
+  getFillCount(): number { return 0; }
   addCompletedStroke(s: Stroke): void { this.completedStrokes.push(s); }
   removeLastStroke(): Stroke | undefined { return this.completedStrokes.pop(); }
   fadeOutLastStroke(_durationMs: number): Stroke | undefined { return this.completedStrokes.pop(); }
+  fadeOutStrokeById(strokeId: string, _durationMs: number): Stroke | undefined {
+    const idx = this.completedStrokes.findIndex(s => s.id === strokeId);
+    if (idx === -1) return undefined;
+    return this.completedStrokes.splice(idx, 1)[0];
+  }
   clearAll(): void { this.completedStrokes = []; }
   setEffect(name: EffectPresetName): void { this.activeEffect = name; }
   getEffect(): EffectPresetName { return this.activeEffect; }

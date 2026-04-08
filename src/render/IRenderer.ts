@@ -1,4 +1,4 @@
-import type { EffectPresetName, Stroke, StrokePoint } from '../types.js';
+import type { EffectPresetName, Fill, Stroke, StrokePoint } from '../types.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
 import type { FontMorphAnimator } from '../text/FontMorphAnimator.js';
 import type { EventBus } from '../state/EventBus.js';
@@ -47,7 +47,22 @@ export interface IRenderer {
   /** Fade out the last completed stroke over the given duration (ms), then remove it */
   fadeOutLastStroke(durationMs: number): Stroke | undefined;
 
-  /** Clear all strokes and particles */
+  /** Fade out a specific stroke by ID over the given duration (ms), then remove it */
+  fadeOutStrokeById(strokeId: string, durationMs: number): Stroke | undefined;
+
+  /** Add a fill bitmap to render below strokes */
+  addFill(fill: Fill): void;
+
+  /** Remove the last fill (undo) */
+  removeLastFill(): Fill | undefined;
+
+  /** Clear all fills */
+  clearFills(): void;
+
+  /** Get current fill count */
+  getFillCount(): number;
+
+  /** Clear all strokes, fills, and particles */
   clearAll(): void;
 
   /** Set the current effect preset */

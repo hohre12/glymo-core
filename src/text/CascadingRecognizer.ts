@@ -14,6 +14,12 @@
 
 import type { StrokePoint } from '../types.js';
 import { recognizeHandwriting } from './HandwritingRecognizer.js';
+import {
+  SpatialGrouper,
+  type Bbox,
+  type GroupedStroke,
+  type SpatialGroup,
+} from '../grouping/SpatialGrouper.js';
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -39,45 +45,23 @@ export interface CascadingRecognizerOptions {
   onChar: (char: RecognizedChar) => void;
   onCorrection: (correction: CharCorrection) => void;
   onRecognizing?: (busy: boolean) => void;
-  /** Called before font display — consumer should fade out handwritten strokes for the group */
-  onDisplayFlush?: (strokeCount: number) => void;
+  /** Called before font display — consumer should fade out specific strokes by ID */
+  onDisplayFlush?: (strokeIds: string[]) => void;
   uppercase?: boolean;
   heightWindowSize?: number;
 }
 
 // ── Internal types ────────────────────────────────────────────────────────
 
-interface Bbox { x: number; y: number; width: number; height: number }
-
-interface StrokeGroup {
-  strokes: { raw: StrokePoint[]; bbox: Bbox }[];
-  bbox: Bbox;
+interface RecognitionState {
   generation: number;
   result: string;
   displayed: boolean;
-  displayTimer: ReturnType<typeof setTimeout> | null;
+  /** Stroke count when the API last returned exactly 1 character */
+  lastSingleCharStrokeCount: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
-function combineBbox(a: Bbox, b: Bbox): Bbox {
-  const x = Math.min(a.x, b.x);
-  const y = Math.min(a.y, b.y);
-  const right = Math.max(a.x + a.width, b.x + b.width);
-  const bottom = Math.max(a.y + a.height, b.y + b.height);
-  return { x, y, width: right - x, height: bottom - y };
-}
-
-function bboxNear(a: Bbox, b: Bbox, threshold: number): boolean {
-  // Expand b by threshold and check overlap with a
-  const ex = b.x - threshold;
-  const ey = b.y - threshold;
-  const ew = b.width + threshold * 2;
-  const eh = b.height + threshold * 2;
-
-  return !(a.x + a.width < ex || a.x > ex + ew ||
-           a.y + a.height < ey || a.y > ey + eh);
-}
 
 function rollingAvg(window: number[], value: number, maxLen: number): number {
   window.push(value);
@@ -88,9 +72,9 @@ function rollingAvg(window: number[], value: number, maxLen: number): number {
 // ── Constants ─────────────────────────────────────────────────────────────
 
 /** Language-specific recognition parameters */
-const LANG_PARAMS: Record<string, { proximityFactor: number; minProximityPx: number; finalizeDelay: number }> = {
-  en: { proximityFactor: 0.8, minProximityPx: 40, finalizeDelay: 600 },
-  ko: { proximityFactor: 1.2, minProximityPx: 80, finalizeDelay: 1200 },
+const LANG_PARAMS: Record<string, { proximityFactor: number; minProximityPx: number; maxProximityPx: number; finalizeDelay: number }> = {
+  en: { proximityFactor: 0.8, minProximityPx: 40, maxProximityPx: 300, finalizeDelay: 1200 },
+  ko: { proximityFactor: 1.0, minProximityPx: 60, maxProximityPx: 300, finalizeDelay: 1500 },
 };
 const DEFAULT_PARAMS = LANG_PARAMS.en!;
 
@@ -102,9 +86,14 @@ export class CascadingRecognizer {
   private destroyed = false;
   private inflight = 0;
 
-  private groups: StrokeGroup[] = [];
+  private readonly grouper: SpatialGrouper;
+  /** Recognition state per spatial group id */
+  private groupState = new Map<number, RecognitionState>();
   private heightWindow: number[] = [];
   private chars = new Map<string, RecognizedChar>();
+
+  /** Tracks dpr per group so finalize callback can use it */
+  private groupDpr = new Map<number, number>();
 
   private language: string = 'en';
 
@@ -117,121 +106,124 @@ export class CascadingRecognizer {
       uppercase: options.uppercase ?? true,
       heightWindowSize: options.heightWindowSize ?? 5,
     };
+
+    const params = LANG_PARAMS[this.language] ?? DEFAULT_PARAMS;
+    this.grouper = new SpatialGrouper({
+      proximityFactor: params.proximityFactor,
+      minProximityPx: params.minProximityPx,
+      finalizeDelay: params.finalizeDelay,
+      onGroupUpdated: (group) => this.handleGroupUpdated(group),
+      onGroupFinalized: (group) => this.handleGroupFinalized(group),
+    });
   }
 
   setLanguage(lang: string): void {
     this.language = lang;
+    const params = LANG_PARAMS[lang] ?? DEFAULT_PARAMS;
+    this.grouper.setParams(params);
   }
 
   notifyStrokeStart(): void {
-    // Cancel display timer on the active (last) group — user is still drawing
-    const active = this.groups[this.groups.length - 1];
-    if (active?.displayTimer) {
-      clearTimeout(active.displayTimer);
-      active.displayTimer = null;
-    }
+    this.grouper.notifyStrokeStart();
   }
 
-  feedStroke(raw: StrokePoint[], bbox: Bbox, dpr = 1): void {
+  feedStroke(raw: StrokePoint[], bbox: Bbox, dpr = 1, strokeId?: string): void {
     if (this.destroyed) return;
 
-    const cssBbox: Bbox = {
-      x: bbox.x / dpr,
-      y: bbox.y / dpr,
-      width: bbox.width / dpr,
-      height: bbox.height / dpr,
+    const stroke: GroupedStroke = {
+      id: strokeId ?? `stroke-${++this.idCounter}`,
+      raw,
+      bbox,
     };
 
-    const activeGroup = this.groups[this.groups.length - 1];
+    // Store dpr for this feed — grouper callback will need it
+    // We track it via a temporary field; the grouper's onGroupUpdated/onGroupFinalized
+    // will fire synchronously during feedStroke for the "far away" finalize case,
+    // and asynchronously (via timer) for the timer finalize case.
+    this._currentDpr = dpr;
+    this.grouper.feedStroke(stroke, dpr);
+  }
 
-    if (activeGroup && !activeGroup.displayed) {
-      // Check if new stroke is near the active group
-      const params = LANG_PARAMS[this.language] ?? DEFAULT_PARAMS;
-      const threshold = Math.max(
-        Math.max(activeGroup.bbox.width, activeGroup.bbox.height) * params.proximityFactor,
-        params.minProximityPx,
-      );
+  /** Temporary dpr storage for the current feedStroke call */
+  private _currentDpr = 1;
 
-      if (bboxNear(cssBbox, activeGroup.bbox, threshold)) {
-        // Add to existing group
-        activeGroup.strokes.push({ raw, bbox: cssBbox });
-        activeGroup.bbox = combineBbox(activeGroup.bbox, cssBbox);
-        // Cancel any pending display timer (still writing this char)
-        if (activeGroup.displayTimer) {
-          clearTimeout(activeGroup.displayTimer);
-          activeGroup.displayTimer = null;
-        }
-        this.recognizeGroup(activeGroup, dpr);
-        // Start finalize timer
-        this.scheduleFinalize(activeGroup, dpr);
-        return;
-      }
+  private handleGroupUpdated(group: SpatialGroup): void {
+    const dpr = this._currentDpr;
+    this.groupDpr.set(group.id, dpr);
 
-      // New stroke is far away → finalize previous group immediately
-      this.finalizeGroup(activeGroup, dpr);
+    let state = this.groupState.get(group.id);
+    if (!state) {
+      state = { generation: 0, result: '', displayed: false, lastSingleCharStrokeCount: 0 };
+      this.groupState.set(group.id, state);
     }
 
-    // Start new group
-    const newGroup: StrokeGroup = {
-      strokes: [{ raw, bbox: cssBbox }],
-      bbox: { ...cssBbox },
-      generation: 0,
-      result: '',
-      displayed: false,
-      displayTimer: null,
-    };
-    this.groups.push(newGroup);
-    this.recognizeGroup(newGroup, dpr);
-    this.scheduleFinalize(newGroup, dpr);
+    this.recognizeGroup(group, state, dpr);
+  }
+
+  private handleGroupFinalized(group: SpatialGroup): void {
+    const dpr = this.groupDpr.get(group.id) ?? 1;
+    let state = this.groupState.get(group.id);
+    if (!state) {
+      state = { generation: 0, result: '', displayed: false, lastSingleCharStrokeCount: 0 };
+      this.groupState.set(group.id, state);
+    }
+    this.finalizeGroup(group, state, dpr);
   }
 
   /** Trigger recognition for a group's strokes */
-  private recognizeGroup(group: StrokeGroup, dpr: number): void {
-    const gen = ++group.generation;
-    const strokes = group.strokes.map(s => s.raw);
+  private recognizeGroup(group: SpatialGroup, state: RecognitionState, dpr: number): void {
+    const gen = ++state.generation;
+    const strokeCountNow = group.strokes.length;
+    // raw is typed loosely in GroupedStroke, but we know it's StrokePoint[]
+    const strokes = group.strokes.map(s => s.raw as StrokePoint[]);
 
     this.inflight++;
     this.opts.onRecognizing(true);
 
     recognizeHandwriting(strokes, this.language).then(result => {
-      if (this.destroyed || group.generation !== gen) return;
+      if (this.destroyed || state.generation !== gen) return;
       if (!result?.text?.trim()) return;
 
       let text = result.text.trim().replace(/\s+/g, '');
       if (this.opts.uppercase) text = text.toUpperCase();
 
-      // Take first character only (this group = one character)
-      group.result = text[0] ?? '';
-      console.log('[CascadingRecognizer] Group recognized:', group.result, '(full:', text, ')');
+      console.log('[CascadingRecognizer] Group recognized:', text[0], '(full:', text, ')');
+
+      if (text.length > 1 && state.lastSingleCharStrokeCount > 0) {
+        // Character boundary detected! Split the group.
+        // Keep the strokes that produced 1 char, re-feed the rest.
+        const keepCount = state.lastSingleCharStrokeCount;
+        state.result = text[0] ?? '';
+
+        console.log('[CascadingRecognizer] Split detected! Keeping', keepCount, 'strokes, re-feeding rest');
+        const overflow = this.grouper.splitGroup(group.id, keepCount);
+        if (overflow && overflow.length > 0) {
+          // Re-feed all overflow strokes as a single new group (not one-by-one,
+          // which would cause tiny threshold → further splits)
+          this.grouper.createGroup(overflow);
+        }
+      } else {
+        // Single character result — track stroke count for future split detection
+        state.result = text[0] ?? '';
+        if (text.length === 1) {
+          state.lastSingleCharStrokeCount = strokeCountNow;
+        }
+      }
     }).catch(() => {}).finally(() => {
       this.inflight--;
       if (this.inflight === 0) this.opts.onRecognizing(false);
     });
   }
 
-  /** Schedule finalize timer — fires if no more strokes arrive */
-  private scheduleFinalize(group: StrokeGroup, dpr: number): void {
-    if (group.displayTimer) clearTimeout(group.displayTimer);
-    group.displayTimer = setTimeout(() => {
-      group.displayTimer = null;
-      this.finalizeGroup(group, dpr);
-    }, (LANG_PARAMS[this.language] ?? DEFAULT_PARAMS).finalizeDelay);
-  }
-
   /** Finalize a group: display font character, fade handwritten strokes */
-  private finalizeGroup(group: StrokeGroup, dpr: number): void {
-    if (group.displayed) return;
-    group.displayed = true;
+  private finalizeGroup(group: SpatialGroup, state: RecognitionState, dpr: number): void {
+    if (state.displayed) return;
+    state.displayed = true;
 
-    if (group.displayTimer) {
-      clearTimeout(group.displayTimer);
-      group.displayTimer = null;
-    }
+    if (!state.result) return;
 
-    if (!group.result) return;
-
-    // Fade out handwritten strokes for this group
-    this.opts.onDisplayFlush(group.strokes.length);
+    // Fade out handwritten strokes for this group (by specific IDs, not "last N")
+    this.opts.onDisplayFlush(group.strokes.map(s => s.id));
 
     const normHeight = rollingAvg(
       this.heightWindow, group.bbox.height, this.opts.heightWindowSize,
@@ -247,19 +239,23 @@ export class CascadingRecognizer {
 
     const char: RecognizedChar = {
       id: charId,
-      char: group.result,
+      char: state.result,
       x: cx,
       y: cy,
       width: group.bbox.width,
       height: normHeight,
       confidence: 0.8,
-      strokeIndex: this.groups.indexOf(group),
+      strokeIndex: group.id - 1,
       strokePoints: strokePts,
     };
 
     this.chars.set(charId, char);
     this.opts.onChar(char);
-    console.log('[CascadingRecognizer] Displayed:', group.result, 'at', Math.round(cx), Math.round(cy));
+    console.log('[CascadingRecognizer] Displayed:', state.result, 'at', Math.round(cx), Math.round(cy));
+
+    // Clean up per-group maps to prevent memory leak
+    this.groupState.delete(group.id);
+    this.groupDpr.delete(group.id);
   }
 
   removeChar(id: string): void {
@@ -267,16 +263,6 @@ export class CascadingRecognizer {
   }
 
   undo(): string | undefined {
-    // Find last displayed group and remove its char
-    for (let i = this.groups.length - 1; i >= 0; i--) {
-      const g = this.groups[i]!;
-      if (!g.displayed) {
-        // Remove undisplayed group
-        if (g.displayTimer) clearTimeout(g.displayTimer);
-        this.groups.splice(i, 1);
-        return undefined;
-      }
-    }
     // Remove last char
     const lastId = [...this.chars.keys()].pop();
     if (lastId) {
@@ -287,10 +273,9 @@ export class CascadingRecognizer {
   }
 
   clear(): void {
-    for (const g of this.groups) {
-      if (g.displayTimer) clearTimeout(g.displayTimer);
-    }
-    this.groups = [];
+    this.grouper.clear();
+    this.groupState.clear();
+    this.groupDpr.clear();
     this.heightWindow = [];
     this.chars.clear();
   }
@@ -301,6 +286,10 @@ export class CascadingRecognizer {
 
   destroy(): void {
     this.destroyed = true;
-    this.clear();
+    this.grouper.destroy();
+    this.groupState.clear();
+    this.groupDpr.clear();
+    this.heightWindow = [];
+    this.chars.clear();
   }
 }

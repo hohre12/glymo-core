@@ -82,8 +82,9 @@ export class StrokeAnimator {
     let rotation = 0;
     let opacity = 1;
     let glowIntensity = 1;
+    const completedIds: string[] = [];
 
-    for (const [_id, anim] of this.animations) {
+    for (const [animId, anim] of this.animations) {
       if (!anim.active) continue;
       if (!anim.strokeIds.includes(strokeId)) continue;
 
@@ -104,6 +105,7 @@ export class StrokeAnimator {
         t = Math.min(elapsed / duration, 1);
         if (t >= 1) {
           anim.active = false;
+          completedIds.push(animId);
         }
       }
 
@@ -116,6 +118,11 @@ export class StrokeAnimator {
       rotation += transform.rotation;
       opacity *= transform.opacity;
       glowIntensity *= transform.glowIntensity;
+    }
+
+    // Purge completed non-repeating animations to prevent memory leaks
+    for (const id of completedIds) {
+      this.animations.delete(id);
     }
 
     if (!hasMatch) return null;
@@ -144,6 +151,17 @@ export class StrokeAnimator {
       }
     }
     return ids;
+  }
+
+  /** Get the animation params for a stroke (first active animation found) */
+  getAnimationParams(strokeId: string): AnimationParams | null {
+    for (const [, anim] of this.animations) {
+      if (!anim.active) continue;
+      if (anim.strokeIds.includes(strokeId)) {
+        return anim.params;
+      }
+    }
+    return null;
   }
 
   /** Remove all animations */

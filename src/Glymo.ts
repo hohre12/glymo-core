@@ -1,6 +1,6 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { EffectPresetName, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
+import type { EffectPresetName, Fill, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES, EFFECT_PRESETS } from './types.js';
 import { InputManager } from './input/InputManager.js';
 import { PipelineEngine } from './pipeline/PipelineEngine.js';
@@ -51,6 +51,11 @@ export class Glymo {
   private pendingStroke: FinalizedStroke | null = null;
   private destroyed = false;
   private instantComplete = false;
+  private _customColor: string | null = null;
+  private _customWidth: number | null = null;
+  private _pendingCustomColor: string | null = null;
+  private _pendingCustomWidth: number | null = null;
+  private _pausedAnimations: Map<string, AnimationParams> = new Map();
 
   // Second-hand drawing pipeline — runs fully independently from hand 0.
   // Always uses instant-complete (no morph) to avoid state machine conflicts.
@@ -370,6 +375,125 @@ export class Glymo {
     this.strokeAnimator.clear();
   }
 
+  /** Stop all animations targeting the given stroke IDs */
+  stopAnimations(strokeIds: string[]): void {
+    this.assertNotDestroyed();
+    for (const id of strokeIds) {
+      this.strokeAnimator.removeByStrokeId(id);
+    }
+  }
+
+  // ── Per-stroke Custom Color/Width ────────────────────
+
+  /** Store a custom color for newly created strokes. Pass null to clear. */
+  setCustomColor(color: string | null): void {
+    this.assertNotDestroyed();
+    this._customColor = color;
+  }
+
+  /** Store a custom width for newly created strokes. Pass null to clear. */
+  setCustomWidth(width: number | null): void {
+    this.assertNotDestroyed();
+    this._customWidth = width;
+  }
+
+  // ── Hit Testing ──────────────────────────────────────
+
+  /**
+   * Find which completed stroke is at the given (x, y) canvas coordinate.
+   * Iterates strokes in reverse order (most recent on top).
+   * Returns the stroke id if min distance from (x,y) to any smoothed point < radius, else null.
+   */
+  hitTestStroke(x: number, y: number, radius: number = 20): string | null {
+    this.assertNotDestroyed();
+    const dpr = this.options.pixelRatio;
+    const px = x * dpr;
+    const py = y * dpr;
+    const r2 = (radius * dpr) * (radius * dpr);
+
+    for (let i = this.strokes.length - 1; i >= 0; i--) {
+      const stroke = this.strokes[i]!;
+      const points = stroke.smoothed;
+      for (let j = 0; j < points.length; j++) {
+        const dx = points[j]!.x - px;
+        const dy = points[j]!.y - py;
+        if (dx * dx + dy * dy < r2) {
+          return stroke.id;
+        }
+      }
+    }
+    return null;
+  }
+
+  // ── Fill Tool ────────────────────────────────────────
+
+  /** Add a fill to the canvas */
+  addFill(fill: Fill): void {
+    this.assertNotDestroyed();
+    this.renderer.addFill(fill);
+  }
+
+  /** Remove the last fill (undo) */
+  undoFill(): Fill | undefined {
+    this.assertNotDestroyed();
+    return this.renderer.removeLastFill();
+  }
+
+  /** Clear all fills */
+  clearFills(): void {
+    this.assertNotDestroyed();
+    this.renderer.clearFills();
+  }
+
+  /** Get all completed strokes (read-only, for external use like fill mask) */
+  getStrokes(): readonly Stroke[] {
+    this.assertNotDestroyed();
+    return this.strokes;
+  }
+
+  /** Get canvas dimensions */
+  getCanvasSize(): { width: number; height: number; dpr: number } {
+    return {
+      width: this.canvas.width,
+      height: this.canvas.height,
+      dpr: this.options.pixelRatio,
+    };
+  }
+
+  // ── Toggle Stroke Animation ──────────────────────────
+
+  /**
+   * Toggle a default sparkle animation on a specific stroke.
+   * If the stroke already has an animation, stop it and return false.
+   * If it doesn't, add a sparkle animation and return true.
+   */
+  toggleStrokeAnimation(strokeId: string, params?: AnimationParams): boolean {
+    this.assertNotDestroyed();
+
+    // Check if this stroke currently has an active animation
+    const hasActive = this.strokeAnimator.getTransform(strokeId, performance.now()) !== null;
+
+    if (hasActive) {
+      // Save the current animation params before removing
+      const currentParams = this.strokeAnimator.getAnimationParams(strokeId);
+      if (currentParams) {
+        this._pausedAnimations.set(strokeId, currentParams);
+      }
+      this.strokeAnimator.removeByStrokeId(strokeId);
+      return false;
+    }
+
+    // Restore paused animation, or use provided params, or default sparkle
+    const animParams: AnimationParams =
+      this._pausedAnimations.get(strokeId) ??
+      params ??
+      { type: 'sparkle', duration: 2000, repeat: true };
+
+    this._pausedAnimations.delete(strokeId);
+    this.strokeAnimator.addAnimation([strokeId], animParams);
+    return true;
+  }
+
   // ── Renderer ───────────────────────────────────────
   /** Switch the rendering backend ('canvas2d' | 'webgpu' | 'auto') */
   async setRenderer(mode: RendererMode): Promise<void> {
@@ -403,6 +527,8 @@ export class Glymo {
       this.strokes = [];
       this.accumulatedStrokes = [];
       this.strokeAnimator.clear();
+      this._pausedAnimations.clear();
+      this.renderer.clearFills();
       this.renderer.clearAll();
       this.pipeline.reset();
       this.pipeline2.reset();
@@ -416,6 +542,7 @@ export class Glymo {
     if (removed) {
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
       this.strokeAnimator.removeByStrokeId(removed.id);
+      this._pausedAnimations.delete(removed.id);
     }
   }
 
@@ -424,11 +551,30 @@ export class Glymo {
     const removed = this.renderer.fadeOutLastStroke(durationMs);
     if (removed) {
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
+      this.strokeAnimator.removeByStrokeId(removed.id);
+      this._pausedAnimations.delete(removed.id);
+    }
+  }
+
+  /** Fade out a specific stroke by ID */
+  fadeOutStrokeById(strokeId: string, durationMs = 500): void {
+    this.assertNotDestroyed();
+    const removed = this.renderer.fadeOutStrokeById(strokeId, durationMs);
+    if (removed) {
+      this.strokes = this.strokes.filter((s) => s.id !== removed.id);
+      this.strokeAnimator.removeByStrokeId(removed.id);
+      this._pausedAnimations.delete(removed.id);
     }
   }
 
   getStrokeCount(): number {
     return this.strokes.length;
+  }
+
+  /** Get IDs of all completed strokes */
+  getStrokeIds(): string[] {
+    this.assertNotDestroyed();
+    return this.strokes.map(s => s.id);
   }
 
   getState(): SessionState {
@@ -476,6 +622,7 @@ export class Glymo {
     if (this.overlayTimer) { clearTimeout(this.overlayTimer); this.overlayTimer = null; }
     this.cancelMorph();
     this.strokeAnimator.clear();
+    this._pausedAnimations.clear();
     this.stateMachine.destroy();
     this.unbind();
     this.renderer.destroy();
@@ -560,6 +707,12 @@ export class Glymo {
     const result = this.pipeline.penUp();
     const pointCount = result?.raw.length ?? 0;
 
+    // Capture custom color/width at pen-up time so that completeMorph
+    // uses the values the user had set when the stroke was drawn, not
+    // whatever they might change to during the morph delay.
+    this._pendingCustomColor = this._customColor;
+    this._pendingCustomWidth = this._customWidth;
+
     // Instant complete mode: skip morph animation entirely
     if (this.instantComplete && result && pointCount >= 3) {
       // Must transition state machine so it stays in sync
@@ -573,6 +726,8 @@ export class Glymo {
         state: 'effected',
         effect: this.currentEffect,
         createdAt: Date.now(),
+        ...(this._customColor != null && { customColor: this._customColor }),
+        ...(this._customWidth != null && { customWidth: this._customWidth }),
       };
       this.strokes.push(stroke);
       this.enforceMaxStrokes();
@@ -644,6 +799,8 @@ export class Glymo {
       state: 'effected',
       effect: this.currentEffect,
       createdAt: Date.now(),
+      ...(this._customColor != null && { customColor: this._customColor }),
+      ...(this._customWidth != null && { customWidth: this._customWidth }),
     };
     this.strokes.push(stroke);
     this.enforceMaxStrokes();
@@ -721,6 +878,8 @@ export class Glymo {
       state: 'effected',
       effect: this.currentEffect,
       createdAt: Date.now(),
+      ...(this._pendingCustomColor != null && { customColor: this._pendingCustomColor }),
+      ...(this._pendingCustomWidth != null && { customWidth: this._pendingCustomWidth }),
     };
 
     this.strokes.push(stroke);

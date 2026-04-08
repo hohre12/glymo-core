@@ -2,6 +2,7 @@
 
 export type {
   EffectPresetName,
+  Fill,
   GlymoEvent,
   GlymoEventMap,
   GlymoOptions,
@@ -65,6 +66,10 @@ export { DEFAULT_TEXT_MODE_CONFIG, DEFAULT_LAYOUT_OPTIONS } from './text/types.j
 export { TextRecognizer } from './text/TextRecognizer.js';
 export { GlyphExtractor } from './text/GlyphExtractor.js';
 export { recognizeHandwriting } from './text/HandwritingRecognizer.js';
+
+// ── Spatial Grouping ────────────────────────────────
+export { SpatialGrouper, combineBbox, bboxNear } from './grouping/SpatialGrouper.js';
+export type { Bbox, GroupedStroke, SpatialGroup, SpatialGrouperOptions } from './grouping/SpatialGrouper.js';
 
 // ── Cascading Recognition ────────────────────────────
 
@@ -137,6 +142,9 @@ export { StrokeAnimator } from './animation/index.js';
 // ── CreateOptions (Glymo.create) ───────────────────
 
 export type { CreateOptions } from './types.js';
+
+// ── Fill Tool ──────────────────────────────────────
+export { executeFill } from './render/FloodFill.js';
 
 // ── Main Class ──────────────────────────────────────
 

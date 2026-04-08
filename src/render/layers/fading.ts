@@ -27,10 +27,13 @@ export function renderFadingStrokes(
 
     const alpha = 1.0 - (elapsed / fadeDuration);
     const style = EFFECT_PRESETS[stroke.effect];
+    const overrides = (stroke.customColor != null || stroke.customWidth != null)
+      ? { customColor: stroke.customColor, customWidth: stroke.customWidth }
+      : undefined;
     ctx.save();
     ctx.globalAlpha = alpha;
-    renderGlowPass(ctx, stroke.smoothed, style);
-    renderMainStroke(ctx, stroke.smoothed, style);
+    renderGlowPass(ctx, stroke.smoothed, style, 1.0, overrides);
+    renderMainStroke(ctx, stroke.smoothed, style, overrides);
     ctx.restore();
     return true;
   });

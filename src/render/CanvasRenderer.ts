@@ -1,4 +1,4 @@
-import type { EffectPresetName, Stroke, StrokePoint } from '../types.js';
+import type { EffectPresetName, Fill, Stroke, StrokePoint } from '../types.js';
 import { EFFECT_PRESETS } from '../types.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
@@ -17,6 +17,7 @@ import { renderFadingStrokes } from './layers/fading.js';
 import type { FadingStroke } from './layers/fading.js';
 import { renderOverlayText } from './layers/overlay.js';
 import { renderActiveStroke } from './layers/active.js';
+import { renderFills } from './layers/fill.js';
 
 // ── CanvasRenderer ───────────────────────────────────
 
@@ -55,6 +56,8 @@ export class CanvasRenderer implements IRenderer {
   private completedCache: OffscreenCanvas | null = null;
   private completedCacheCtx: OffscreenCanvasRenderingContext2D | null = null;
   private completedCacheDirty = true;
+
+  private fills: Fill[] = [];
 
   private strokeAnimator: StrokeAnimator | null = null;
 
@@ -149,11 +152,26 @@ export class CanvasRenderer implements IRenderer {
     return removed;
   }
 
-  /** Clear all strokes and particles */
+  /** Fade out a specific stroke by ID over durationMs, then auto-remove */
+  fadeOutStrokeById(strokeId: string, durationMs: number): Stroke | undefined {
+    const idx = this.completedStrokes.findIndex(s => s.id === strokeId);
+    if (idx === -1) return undefined;
+    const [removed] = this.completedStrokes.splice(idx, 1);
+    this.fadingStrokes.push({
+      stroke: removed!,
+      fadeStart: performance.now(),
+      fadeDuration: durationMs,
+    });
+    this.completedCacheDirty = true;
+    return removed;
+  }
+
+  /** Clear all strokes, fills, and particles */
   clearAll(): void {
     this.completedStrokes = [];
     this.overlayTexts = [];
     this.fadingStrokes = [];
+    this.clearFills();
     this.particleSystem.clear();
     this.completedCacheDirty = true;
   }
@@ -200,6 +218,28 @@ export class CanvasRenderer implements IRenderer {
     return this.completedStrokes.length;
   }
 
+  // ── Fill Methods ───────────────────────────────────
+
+  /** Add a fill bitmap to render below strokes */
+  addFill(fill: Fill): void {
+    this.fills.push(fill);
+  }
+
+  /** Remove the last fill (undo) */
+  removeLastFill(): Fill | undefined {
+    return this.fills.pop();
+  }
+
+  /** Clear all fills */
+  clearFills(): void {
+    this.fills = [];
+  }
+
+  /** Get current fill count */
+  getFillCount(): number {
+    return this.fills.length;
+  }
+
   /** Destroy renderer and release resources */
   destroy(): void {
     this.stop();
@@ -232,6 +272,9 @@ export class CanvasRenderer implements IRenderer {
 
     // Layer 0 — Background
     renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode);
+
+    // Layer 5 — Fills (below strokes)
+    renderFills(this.ctx, this.fills);
 
     // Layer 10 — Completed strokes (offscreen cache + animation transforms)
     this.completedCacheDirty = renderCompletedStrokes(

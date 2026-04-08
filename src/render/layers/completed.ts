@@ -3,9 +3,16 @@
 import type { Stroke } from '../../types.js';
 import { EFFECT_PRESETS } from '../../types.js';
 import { renderGlowPass, renderMainStroke } from '../StrokeRenderer.js';
+import type { StrokeOverrides } from '../StrokeRenderer.js';
 import type { StrokeAnimator } from '../../animation/StrokeAnimator.js';
 import type { AnimationTransform } from '../../animation/types.js';
 import { computeBounds } from '../../util/math.js';
+
+/** Extract per-stroke overrides from a Stroke (returns undefined if none set) */
+function getOverrides(stroke: Stroke): StrokeOverrides | undefined {
+  if (stroke.customColor == null && stroke.customWidth == null) return undefined;
+  return { customColor: stroke.customColor, customWidth: stroke.customWidth };
+}
 
 /**
  * Re-render completed strokes into the offscreen cache when dirty,
@@ -51,8 +58,9 @@ export function renderCompletedStrokes(
     for (const stroke of staticStrokes) {
       if (stroke.smoothed.length < 2) continue;
       const style = EFFECT_PRESETS[stroke.effect];
-      renderGlowPass(cacheCtx, stroke.smoothed, style);
-      renderMainStroke(cacheCtx, stroke.smoothed, style);
+      const overrides = getOverrides(stroke);
+      renderGlowPass(cacheCtx, stroke.smoothed, style, 1.0, overrides);
+      renderMainStroke(cacheCtx, stroke.smoothed, style, overrides);
     }
   }
 
@@ -69,6 +77,7 @@ export function renderCompletedStrokes(
       if (stroke.smoothed.length < 2) continue;
 
       const style = EFFECT_PRESETS[stroke.effect];
+      const overrides = getOverrides(stroke);
       const bounds = computeBounds(stroke.smoothed);
       const cx = bounds.x + bounds.width / 2;
       const cy = bounds.y + bounds.height / 2;
@@ -79,8 +88,8 @@ export function renderCompletedStrokes(
       ctx.rotate(transform.rotation);
       ctx.scale(transform.scale, transform.scale);
       ctx.translate(-cx, -cy);
-      renderGlowPass(ctx, stroke.smoothed, style, transform.glowIntensity);
-      renderMainStroke(ctx, stroke.smoothed, style);
+      renderGlowPass(ctx, stroke.smoothed, style, transform.glowIntensity, overrides);
+      renderMainStroke(ctx, stroke.smoothed, style, overrides);
       ctx.restore();
     }
   }

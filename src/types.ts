@@ -113,6 +113,16 @@ export interface RenderLayer {
   isVisible: boolean;
 }
 
+// ── Fill ─────────────────────────────────────────────
+
+/** A filled region produced by the paint-bucket / flood-fill tool */
+export interface Fill {
+  id: string;
+  color: string;
+  bitmap: ImageBitmap;
+  createdAt: number;
+}
+
 // ── Session State ────────────────────────────────────
 
 /** A completed or in-progress stroke */
@@ -123,6 +133,8 @@ export interface Stroke {
   state: 'drawing' | 'smoothing' | 'effected';
   effect: EffectPresetName;
   createdAt: number;
+  customColor?: string;          // Per-stroke color override (takes precedence over EffectStyle)
+  customWidth?: number;          // Per-stroke fixed width override (ignores pressure)
 }
 
 /** Session-level canvas state */
