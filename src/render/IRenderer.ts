@@ -91,4 +91,7 @@ export interface IRenderer {
 
   /** Clear all overlay texts and fading strokes */
   clearOverlayText(): void;
+
+  /** Mark completed strokes cache as dirty (triggers re-render) */
+  markDirty(): void;
 }

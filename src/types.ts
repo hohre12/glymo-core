@@ -136,6 +136,49 @@ export interface GlymoObject {
   metadata?: Record<string, unknown>;
 }
 
+// ── Stroke Correction ────────────────────────────────
+
+/** Options for stroke correction algorithms */
+export interface CorrectionOptions {
+  /** Snapping threshold in canvas-space pixels (default 15) */
+  snapThreshold?: number;
+  /** Whether to apply endpoint snapping (default true) */
+  endpointSnap?: boolean;
+  /** Whether to apply overshoot trimming (default true) */
+  overshootTrim?: boolean;
+}
+
+/** Result of endpoint snapping on a single stroke */
+export interface SnapResult {
+  snapped: boolean;
+  /** Which end was snapped */
+  end: 'start' | 'end' | 'both' | 'none';
+  /** IDs of strokes that were snapped to */
+  targetStrokeIds: string[];
+  /** The corrected raw points */
+  correctedRaw: StrokePoint[];
+}
+
+/** Result of overshoot trimming on a single stroke */
+export interface TrimResult {
+  trimmed: boolean;
+  /** Number of points removed from the end */
+  pointsRemoved: number;
+  /** The corrected raw points */
+  correctedRaw: StrokePoint[];
+}
+
+/** Correction metadata stored in GlymoObject.metadata.correction */
+export interface CorrectionMetadata {
+  corrected: boolean;
+  /** Pre-correction raw points keyed by stroke ID */
+  originalRaw: Record<string, StrokePoint[]>;
+  /** Pre-correction smoothed points keyed by stroke ID */
+  originalSmoothed: Record<string, StrokePoint[]>;
+  /** Which corrections were applied */
+  appliedCorrections: string[];
+}
+
 // ── Session State ────────────────────────────────────
 
 /** A completed or in-progress stroke */
@@ -237,6 +280,11 @@ export interface GlymoEventMap {
   'renderer:fallback': [];
   'hand:lost': [];
   'hand:found': [];
+  'object:selected': [{ objectId: string }];
+  'object:deselected': [{ objectId: string }];
+  'selection:changed': [{ selectedIds: string[] }];
+  'correction:applied': [{ objectId: string; corrections: string[] }];
+  'correction:reverted': [{ objectId: string }];
   [key: `gesture:${string}`]: [import('./gesture/types.js').GestureEvent];
 }
 

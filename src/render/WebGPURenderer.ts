@@ -225,6 +225,8 @@ export class WebGPURenderer implements IRenderer {
   setOverlayText(_overlay: OverlayText | null): void {}
   /** No-op — overlay text rendering is not supported in WebGPU mode */
   clearOverlayText(): void {}
+  /** No-op — selection rendering is not yet supported in WebGPU mode */
+  markDirty(): void {}
   /** No-op — fill rendering is not yet supported in WebGPU mode */
   addFill(_fill: Fill): void {}
   /** No-op — fill rendering is not yet supported in WebGPU mode */

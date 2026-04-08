@@ -147,6 +147,13 @@ export type { CreateOptions } from './types.js';
 // ── Object Store ──────────────────────────────────
 export { ObjectStore } from './store/ObjectStore.js';
 
+// ── Selection ──────────────────────────────────────
+export { SelectionManager } from './selection/SelectionManager.js';
+
+// ── Stroke Correction ──────────────────────────────
+export { StrokeCorrector, snapEndpoints, trimOvershoot } from './correction/index.js';
+export type { CorrectionOptions, CorrectionMetadata, SnapResult, TrimResult } from './types.js';
+
 // ── Fill Tool ──────────────────────────────────────
 export { executeFill } from './render/FloodFill.js';
 

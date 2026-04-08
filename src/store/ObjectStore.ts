@@ -125,6 +125,15 @@ export class ObjectStore {
     return this.objects.size;
   }
 
+  /** Update a metadata key on an object */
+  updateMetadata(objectId: string, key: string, value: unknown): boolean {
+    const obj = this.objects.get(objectId);
+    if (!obj) return false;
+    if (!obj.metadata) obj.metadata = {};
+    obj.metadata[key] = value;
+    return true;
+  }
+
   /** Clear all objects and index maps */
   clear(): void {
     this.objects.clear();

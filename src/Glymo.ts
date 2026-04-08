@@ -1,6 +1,6 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
+import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES, EFFECT_PRESETS } from './types.js';
 import { InputManager } from './input/InputManager.js';
 import { PipelineEngine } from './pipeline/PipelineEngine.js';
@@ -25,6 +25,9 @@ import { GestureEngine } from './gesture/GestureEngine.js';
 import type { GestureDetectorFn } from './gesture/types.js';
 import type { HandStyleName } from './input/hand-styles/types.js';
 import { computeBounds } from './util/math.js';
+import { SelectionManager } from './selection/SelectionManager.js';
+import { StrokeCorrector } from './correction/StrokeCorrector.js';
+import { SmoothStage } from './pipeline/stages/SmoothStage.js';
 
 // ── Constants ────────────────────────────────────────
 
@@ -72,6 +75,12 @@ export class Glymo {
   // Preset text overlay timer — bypasses the morph pipeline entirely
   private overlayTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Selection & Correction
+  private readonly selectionManager: SelectionManager;
+  private readonly strokeCorrector = new StrokeCorrector();
+  private readonly smoothStageRef = new SmoothStage();
+  private autoCorrectEnabled = false;
+
   // Text mode
   private textPipeline: TextPipelineController;
   private accumulatedStrokes: FinalizedStroke[] = [];
@@ -91,6 +100,7 @@ export class Glymo {
     this.pipeline2 = new PipelineEngine(this.eventBus);
     this.strokeAnimator = new StrokeAnimator();
     this.objectStore = new ObjectStore();
+    this.selectionManager = new SelectionManager(this.eventBus);
     this.renderer = new CanvasRenderer(canvas, this.options.pixelRatio);
     this.inputManager = new InputManager();
     this.stateMachine = new SessionStateMachine(this.eventBus);
@@ -115,6 +125,7 @@ export class Glymo {
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
     this.wireStrokeAnimator();
     this.wireObjectStore();
+    this.wireSelectionManager();
     this.renderer.start();
     this.stateMachine.transition('init');
 
@@ -587,6 +598,7 @@ export class Glymo {
       this.strokeAnimator.removeAnimation(obj.animationId);
     }
     this._pausedObjectAnimations.delete(obj.id);
+    this.selectionManager.removeIfSelected(obj.id);
 
     // Remove strokes
     for (const sid of obj.strokeIds) {
@@ -603,6 +615,194 @@ export class Glymo {
     }
 
     return obj;
+  }
+
+  // ── Selection ─────────────────────────────────────
+
+  /** Hit-test a point and toggle selection on the object at that position */
+  selectObjectAtPoint(x: number, y: number): GlymoObject | undefined {
+    this.assertNotDestroyed();
+    const strokeId = this.hitTestStroke(x, y);
+    if (!strokeId) {
+      this.selectionManager.clearSelection();
+      return undefined;
+    }
+    const obj = this.objectStore.getObjectByStrokeId(strokeId);
+    if (!obj) {
+      this.selectionManager.clearSelection();
+      return undefined;
+    }
+    this.selectionManager.toggle(obj.id);
+    return obj;
+  }
+
+  /** Toggle selection on a specific object */
+  toggleObjectSelection(objectId: string): void {
+    this.assertNotDestroyed();
+    this.selectionManager.toggle(objectId);
+  }
+
+  /** Clear all selection */
+  clearSelection(): void {
+    this.assertNotDestroyed();
+    this.selectionManager.clearSelection();
+  }
+
+  /** Get IDs of all selected objects */
+  getSelectedObjectIds(): string[] {
+    return [...this.selectionManager.getSelectedIds()];
+  }
+
+  /** Check if any objects are currently selected */
+  hasSelection(): boolean {
+    return this.selectionManager.count > 0;
+  }
+
+  // ── Correction ────────────────────────────────────
+
+  /** Apply endpoint snapping + overshoot trimming to a specific object */
+  polishObject(objectId: string, options?: CorrectionOptions): boolean {
+    this.assertNotDestroyed();
+    const obj = this.objectStore.getObject(objectId);
+    if (!obj) return false;
+
+    // Already corrected — skip
+    const existing = obj.metadata?.correction as CorrectionMetadata | undefined;
+    if (existing?.corrected) return false;
+
+    const originalRaw: Record<string, StrokePoint[]> = {};
+    const originalSmoothed: Record<string, StrokePoint[]> = {};
+    const allCorrections: string[] = [];
+
+    const dpr = this.options.pixelRatio;
+    // Adaptive snap threshold: use 60% of object diagonal for manual Polish.
+    // Hand tracking endpoints can be 200-400px apart; a fixed 15px is too small.
+    const bboxDiag = Math.sqrt(obj.bbox.width ** 2 + obj.bbox.height ** 2);
+    const adaptiveThreshold = Math.max(60 * dpr, bboxDiag * 0.6);
+    const snapThreshold = options?.snapThreshold
+      ? options.snapThreshold * dpr
+      : adaptiveThreshold;
+
+    // Step 1: Remove tiny artifact strokes (< 6 raw points or tiny bbox)
+    // These are accidental pinch taps that create dots, not intentional strokes.
+    const tinyStrokeIds: string[] = [];
+    const TINY_THRESHOLD = 10 * dpr; // 10px CSS
+    for (const sid of obj.strokeIds) {
+      const stroke = this.strokes.find(s => s.id === sid);
+      if (!stroke || stroke.raw.length >= 6) continue;
+      const bounds = computeBounds(stroke.raw);
+      if (bounds.width < TINY_THRESHOLD && bounds.height < TINY_THRESHOLD) {
+        tinyStrokeIds.push(sid);
+      }
+    }
+
+    // Remove tiny strokes
+    for (const sid of tinyStrokeIds) {
+      originalRaw[sid] = this.strokes.find(s => s.id === sid)?.raw.map(p => ({ ...p })) ?? [];
+      originalSmoothed[sid] = this.strokes.find(s => s.id === sid)?.smoothed.map(p => ({ ...p })) ?? [];
+      this.renderer.removeStrokeById(sid);
+      this.strokes = this.strokes.filter(s => s.id !== sid);
+      this.strokeAnimator.removeByStrokeId(sid);
+      allCorrections.push('remove-artifact');
+      console.log(`[Polish] Removed tiny stroke ${sid.slice(0,8)}`);
+    }
+
+    // Step 2: Correct remaining strokes (self-close + cross-snap)
+    const remainingStrokeIds = obj.strokeIds.filter(id => !tinyStrokeIds.includes(id));
+    for (const sid of remainingStrokeIds) {
+      const stroke = this.strokes.find(s => s.id === sid);
+      if (!stroke) continue;
+
+      // Save originals before correction
+      originalRaw[sid] = [...stroke.raw.map(p => ({ ...p }))];
+      originalSmoothed[sid] = [...stroke.smoothed.map(p => ({ ...p }))];
+
+      // Get other strokes in this object (excluding current one and removed ones)
+      const others = this.strokes.filter(s => s.id !== sid);
+      const dprOptions: CorrectionOptions = {
+        ...options,
+        snapThreshold,
+      };
+      const { correctedRaw, correctedSmoothed, corrections } = this.strokeCorrector.correctAndSmooth(
+        stroke.raw, others, this.smoothStageRef, dprOptions,
+      );
+
+      // Debug: self-close distance
+      const selfDist = stroke.raw.length >= 2
+        ? Math.sqrt((stroke.raw[0]!.x - stroke.raw[stroke.raw.length-1]!.x)**2 + (stroke.raw[0]!.y - stroke.raw[stroke.raw.length-1]!.y)**2)
+        : 0;
+      console.log(`[Polish] stroke=${sid.slice(0,8)} raw=${stroke.raw.length}pts | threshold=${snapThreshold.toFixed(0)}px | selfClose=${selfDist.toFixed(1)}px | corrections=[${corrections.join(',')}]`);
+
+      if (corrections.length > 0) {
+        stroke.raw = correctedRaw;
+        stroke.smoothed = correctedSmoothed;
+        for (const c of corrections) {
+          if (!allCorrections.includes(c)) allCorrections.push(c);
+        }
+      }
+    }
+
+    if (allCorrections.length === 0) return false;
+
+    // Store correction metadata for revert
+    const meta: CorrectionMetadata = {
+      corrected: true,
+      originalRaw,
+      originalSmoothed,
+      appliedCorrections: allCorrections,
+    };
+    this.objectStore.updateMetadata(objectId, 'correction', meta);
+    this.renderer.markDirty();
+    this.eventBus.emit('correction:applied', { objectId, corrections: allCorrections });
+    return true;
+  }
+
+  /** Apply correction to all selected objects */
+  polishSelectedObjects(options?: CorrectionOptions): void {
+    for (const id of this.selectionManager.getSelectedIds()) {
+      this.polishObject(id, options);
+    }
+  }
+
+  /** Revert correction on a specific object, restoring original raw + smoothed */
+  revertObject(objectId: string): boolean {
+    this.assertNotDestroyed();
+    const obj = this.objectStore.getObject(objectId);
+    if (!obj) return false;
+
+    const meta = obj.metadata?.correction as CorrectionMetadata | undefined;
+    if (!meta?.corrected) return false;
+
+    // Restore original points
+    for (const sid of obj.strokeIds) {
+      const stroke = this.strokes.find(s => s.id === sid);
+      if (!stroke) continue;
+      if (meta.originalRaw[sid]) stroke.raw = meta.originalRaw[sid];
+      if (meta.originalSmoothed[sid]) stroke.smoothed = meta.originalSmoothed[sid];
+    }
+
+    // Clear correction metadata
+    this.objectStore.updateMetadata(objectId, 'correction', undefined);
+    this.renderer.markDirty();
+    this.eventBus.emit('correction:reverted', { objectId });
+    return true;
+  }
+
+  /** Revert correction on all selected objects */
+  revertSelectedObjects(): void {
+    for (const id of this.selectionManager.getSelectedIds()) {
+      this.revertObject(id);
+    }
+  }
+
+  /** Enable/disable auto-correction on new strokes */
+  setAutoCorrect(enabled: boolean): void {
+    this.autoCorrectEnabled = enabled;
+  }
+
+  /** Check if auto-correction is enabled */
+  isAutoCorrectEnabled(): boolean {
+    return this.autoCorrectEnabled;
   }
 
   // ── Renderer ───────────────────────────────────────
@@ -654,10 +854,16 @@ export class Glymo {
   undo(): void {
     const removed = this.renderer.removeLastStroke();
     if (removed) {
+      // Clean up selection before removing from object store
+      const ownerObj = this.objectStore.getObjectByStrokeId(removed.id);
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
       this.strokeAnimator.removeByStrokeId(removed.id);
       this._pausedAnimations.delete(removed.id);
       this.objectStore.removeStrokeFromObject(removed.id);
+      // If the owning object now has no strokes, remove it from selection
+      if (ownerObj && ownerObj.strokeIds.length === 0) {
+        this.selectionManager.removeIfSelected(ownerObj.id);
+      }
     }
   }
 
@@ -741,6 +947,7 @@ export class Glymo {
     this.strokeAnimator.clear();
     this._pausedAnimations.clear();
     this._pausedObjectAnimations.clear();
+    this.selectionManager.clearSelection();
     this.objectStore.clear();
     this.stateMachine.destroy();
     this.unbind();
@@ -814,6 +1021,12 @@ export class Glymo {
     }
   }
 
+  private wireSelectionManager(): void {
+    if (this.renderer instanceof CanvasRenderer) {
+      this.renderer.setSelectionManager(this.selectionManager);
+    }
+  }
+
   private handlePenDown(): void {
     // Cancel preset text overlay timer on new pen-down
     if (this.overlayTimer) {
@@ -846,10 +1059,22 @@ export class Glymo {
       this.stateMachine.transition('penUp');
       this.stateMachine.transition('timeout');
 
+      // Auto-correct if enabled
+      let raw = result.raw;
+      let smoothed = result.smoothed;
+      if (this.autoCorrectEnabled) {
+        const corrected = this.strokeCorrector.correctAndSmooth(
+          raw, this.strokes, this.smoothStageRef,
+          { snapThreshold: 15 * this.options.pixelRatio },
+        );
+        raw = corrected.correctedRaw;
+        smoothed = corrected.correctedSmoothed;
+      }
+
       const stroke: Stroke = {
         id: crypto.randomUUID(),
-        raw: result.raw,
-        smoothed: result.smoothed,
+        raw,
+        smoothed,
         state: 'effected',
         effect: this.currentEffect,
         createdAt: Date.now(),
@@ -998,10 +1223,22 @@ export class Glymo {
   private completeMorph(): void {
     if (!this.pendingStroke || !this.morphAnimator) return;
 
+    // Auto-correct if enabled
+    let raw = this.pendingStroke.raw;
+    let smoothed = this.morphAnimator.getSmoothedPoints();
+    if (this.autoCorrectEnabled) {
+      const corrected = this.strokeCorrector.correctAndSmooth(
+        raw, this.strokes, this.smoothStageRef,
+        { snapThreshold: 15 * this.options.pixelRatio },
+      );
+      raw = corrected.correctedRaw;
+      smoothed = corrected.correctedSmoothed;
+    }
+
     const stroke: Stroke = {
       id: crypto.randomUUID(),
-      raw: this.pendingStroke.raw,
-      smoothed: this.morphAnimator.getSmoothedPoints(),
+      raw,
+      smoothed,
       state: 'effected',
       effect: this.currentEffect,
       createdAt: Date.now(),
@@ -1078,6 +1315,7 @@ export class Glymo {
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
     this.wireStrokeAnimator();
     this.wireObjectStore();
+    this.wireSelectionManager();
     for (const s of strokes) this.renderer.addCompletedStroke(s);
     for (const f of this.fills) this.renderer.addFill(f);
 

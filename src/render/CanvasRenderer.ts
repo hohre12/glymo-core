@@ -19,6 +19,8 @@ import type { FadingStroke } from './layers/fading.js';
 import { renderOverlayText } from './layers/overlay.js';
 import { renderActiveStroke } from './layers/active.js';
 import { renderFills } from './layers/fill.js';
+import { renderSelection } from './layers/selection.js';
+import type { SelectionManager } from '../selection/SelectionManager.js';
 
 // ── CanvasRenderer ───────────────────────────────────
 
@@ -62,6 +64,7 @@ export class CanvasRenderer implements IRenderer {
 
   private strokeAnimator: StrokeAnimator | null = null;
   private objectStore: ObjectStore | null = null;
+  private selectionManager: SelectionManager | null = null;
 
   private getActivePointsFn: (() => ReadonlyArray<StrokePoint>) | null = null;
 
@@ -124,6 +127,16 @@ export class CanvasRenderer implements IRenderer {
   /** Set the ObjectStore for object-aware fill rendering */
   setObjectStore(store: ObjectStore | null): void {
     this.objectStore = store;
+  }
+
+  /** Set the SelectionManager for rendering selection highlights */
+  setSelectionManager(manager: SelectionManager | null): void {
+    this.selectionManager = manager;
+  }
+
+  /** Mark completed strokes cache as dirty (triggers re-render) */
+  markDirty(): void {
+    this.completedCacheDirty = true;
   }
 
   /** Set background rendering mode — 'transparent' skips the black fill */
@@ -310,6 +323,18 @@ export class CanvasRenderer implements IRenderer {
       this.strokeAnimator,
       this.objectStore,
     );
+
+    // Layer 15 — Selection highlights (marching ants)
+    if (this.selectionManager && this.selectionManager.count > 0 && this.objectStore) {
+      renderSelection(
+        this.ctx,
+        this.selectionManager.getSelectedIds(),
+        this.objectStore,
+        EFFECT_PRESETS[this.activeEffect].color,
+        timestamp,
+        this.dpr,
+      );
+    }
 
     // Layer 20 — Morphing stroke
     this.renderMorphLayer(dt);
