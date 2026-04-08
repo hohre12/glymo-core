@@ -29,6 +29,69 @@ export const MODEL_URL =
 export const WASM_URL =
   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
 
+/** MediaPipe ESM bundle URL (used by the detection Worker to load the library) */
+const VISION_BUNDLE_URL =
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs';
+
+// ── Inline Worker script ─────────────────────────────
+// Loaded as a Blob URL module worker. Runs MediaPipe detectForVideo off the
+// main thread so rendering/recording never stalls.
+
+function buildWorkerScript(): string {
+  return `
+let handLandmarker = null;
+
+self.onmessage = async (e) => {
+  const msg = e.data;
+
+  if (msg.type === 'init') {
+    try {
+      const mp = await import(msg.bundleUrl);
+      const vision = await mp.FilesetResolver.forVisionTasks(msg.wasmUrl);
+      handLandmarker = await mp.HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: msg.modelUrl, delegate: 'GPU' },
+        numHands: 2,
+        runningMode: 'VIDEO',
+        minHandDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.5,
+      });
+      self.postMessage({ type: 'ready' });
+    } catch (err) {
+      self.postMessage({ type: 'error', error: String(err) });
+    }
+  }
+
+  if (msg.type === 'detect') {
+    if (!handLandmarker) {
+      if (msg.frame && msg.frame.close) msg.frame.close();
+      return;
+    }
+    try {
+      const result = handLandmarker.detectForVideo(msg.frame, msg.timestamp);
+      if (msg.frame && msg.frame.close) msg.frame.close();
+      const landmarks = [];
+      const worldLandmarks = [];
+      for (const hand of (result.landmarks || [])) {
+        landmarks.push(hand.map(function(lm) { return { x: lm.x, y: lm.y, z: lm.z }; }));
+      }
+      for (const hand of (result.worldLandmarks || [])) {
+        worldLandmarks.push(hand.map(function(lm) { return { x: lm.x, y: lm.y, z: lm.z }; }));
+      }
+      self.postMessage({ type: 'result', landmarks: landmarks, worldLandmarks: worldLandmarks });
+    } catch (err) {
+      if (msg.frame && msg.frame.close) msg.frame.close();
+      self.postMessage({ type: 'error', error: String(err) });
+    }
+  }
+
+  if (msg.type === 'destroy') {
+    if (handLandmarker) { handLandmarker.close(); handLandmarker = null; }
+    self.close();
+  }
+};
+`;
+}
+
 // ── Types for MediaPipe (avoid hard dependency) ──────
 
 export interface Landmark {
@@ -73,6 +136,10 @@ export class CameraCapture implements InputCapture {
   private handLandmarker: HandLandmarkerInstance | null = null;
   private animFrameId: number | null = null;
   private active = false;
+
+  // ── Worker off-thread detection ──
+  private worker: Worker | null = null;
+  private workerBusy = false;
   private penDown = false;
 
   // Gesture-based draw mode: ☝️ point = draw, ✊ fist/other = don't draw
@@ -239,6 +306,7 @@ export class CameraCapture implements InputCapture {
     this.active = false;
 
     this.cancelAnimationFrame();
+    this.terminateWorker();
     this.releaseCamera();
     this.releaseHandLandmarker();
 
@@ -270,6 +338,24 @@ export class CameraCapture implements InputCapture {
   // ── Private: initialization ──────────────────────────
 
   private async initAsync(): Promise<void> {
+    // Start camera first (needed for both Worker and sync paths)
+    await this.startCamera();
+    if (!this.active) return;
+
+    // Try Worker path: MediaPipe runs off main thread
+    if (this.tryCreateWorker()) {
+      // Worker is loading MediaPipe asynchronously.
+      // handleWorkerMessage('ready') will start the detection loop + call onSuccess.
+      // handleWorkerMessage('error') will fall back to sync.
+      return;
+    }
+
+    // Sync fallback: load MediaPipe on main thread (original behavior)
+    await this.initMediaPipeSync();
+  }
+
+  /** Fallback: load MediaPipe on main thread and start sync detection loop */
+  private async initMediaPipeSync(): Promise<void> {
     const mediapipe = await loadMediaPipe();
     if (!this.active) return;
 
@@ -283,9 +369,6 @@ export class CameraCapture implements InputCapture {
       minHandDetectionConfidence: 0.7,
       minTrackingConfidence: 0.5,
     }) as HandLandmarkerInstance;
-    if (!this.active) return;
-
-    await this.startCamera();
     if (!this.active) return;
 
     this.startDetectionLoop();
@@ -310,24 +393,159 @@ export class CameraCapture implements InputCapture {
     this.onError(error);
   }
 
-  // ── Private: detection loop ──────────────────────────
+  // ── Private: Worker management ────────────────────────
+
+  /**
+   * Try to create a module Worker from inline Blob.
+   * Returns true if Worker was created and init message sent.
+   */
+  private tryCreateWorker(): boolean {
+    // Feature detection: Worker + module workers + createImageBitmap
+    if (
+      typeof Worker === 'undefined' ||
+      typeof createImageBitmap === 'undefined'
+    ) {
+      return false;
+    }
+
+    try {
+      const blob = new Blob([buildWorkerScript()], { type: 'text/javascript' });
+      const url = URL.createObjectURL(blob);
+      this.worker = new Worker(url, { type: 'module' });
+      URL.revokeObjectURL(url);
+
+      this.worker.onmessage = this.handleWorkerMessage;
+      this.worker.onerror = () => {
+        if (!this.active) return;
+        // Worker failed to load — fall back to sync
+        this.terminateWorker();
+        this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
+      };
+
+      // Tell Worker to load MediaPipe
+      this.worker.postMessage({
+        type: 'init',
+        bundleUrl: VISION_BUNDLE_URL,
+        wasmUrl: WASM_URL,
+        modelUrl: MODEL_URL,
+      });
+
+      return true;
+    } catch {
+      // Worker construction failed (e.g. CSP, blob URL blocked)
+      this.terminateWorker();
+      return false;
+    }
+  }
+
+  /** Count of consecutive detection-time Worker errors. */
+  private workerDetectErrors = 0;
+  private static readonly MAX_WORKER_ERRORS = 3;
+
+  private handleWorkerMessage = (e: MessageEvent): void => {
+    // Discard all messages after stop() to prevent re-entrant initialization
+    if (!this.active) return;
+
+    const msg = e.data as { type: string; error?: string; landmarks?: Landmark[][]; worldLandmarks?: Landmark[][] };
+
+    if (msg.type === 'ready') {
+      this.startWorkerDetectionLoop();
+      this.onSuccess();
+    } else if (msg.type === 'result') {
+      this.workerBusy = false;
+      this.workerDetectErrors = 0; // reset on success
+      this.processDetectionResult({
+        landmarks: msg.landmarks ?? [],
+        worldLandmarks: msg.worldLandmarks ?? [],
+      });
+    } else if (msg.type === 'error') {
+      this.workerBusy = false;
+      this.workerDetectErrors++;
+
+      // Only fall back to sync after repeated consecutive failures.
+      // A single bad frame (e.g. corrupt bitmap) is transient and recoverable.
+      if (this.workerDetectErrors >= CameraCapture.MAX_WORKER_ERRORS) {
+        this.terminateWorker();
+        this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
+      }
+    }
+  };
+
+  /** Send one video frame to the Worker (non-blocking). */
+  private sendFrameToWorker(): void {
+    if (this.workerBusy || !this.video || !this.worker) return;
+    if (this.video.readyState < 2) return;
+
+    this.workerBusy = true;
+
+    createImageBitmap(this.video).then((bitmap) => {
+      if (!this.active || !this.worker) {
+        bitmap.close();
+        this.workerBusy = false;
+        return;
+      }
+      // Capture timestamp at dispatch time (not before createImageBitmap)
+      // so MediaPipe's temporal tracking matches the actual frame moment.
+      const ts = performance.now();
+      this.worker.postMessage(
+        { type: 'detect', frame: bitmap, timestamp: ts },
+        [bitmap], // Transfer (zero-copy)
+      );
+    }).catch(() => {
+      this.workerBusy = false;
+    });
+  }
+
+  private startWorkerDetectionLoop(): void {
+    const loop = (): void => {
+      if (!this.active) return;
+      this.sendFrameToWorker();
+      this.animFrameId = requestAnimationFrame(loop);
+    };
+    this.animFrameId = requestAnimationFrame(loop);
+  }
+
+  private terminateWorker(): void {
+    if (this.worker) {
+      this.worker.onmessage = null;
+      this.worker.onerror = null;
+      try { this.worker.postMessage({ type: 'destroy' }); } catch { /* already closed */ }
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.workerBusy = false;
+    this.workerDetectErrors = 0;
+  }
+
+  // ── Private: detection loop (sync fallback) ─────────
 
   private startDetectionLoop(): void {
     const detect = (): void => {
       if (!this.active) return;
 
-      this.processFrame();
+      this.processFrameSync();
       this.animFrameId = requestAnimationFrame(detect);
     };
 
     this.animFrameId = requestAnimationFrame(detect);
   }
 
-  private processFrame(): void {
+  /** Sync fallback: detect + process in one blocking call. */
+  private processFrameSync(): void {
     if (!this.video || !this.handLandmarker || !this.canvas) return;
     if (this.video.readyState < 2) return;
 
     const result = this.handLandmarker.detectForVideo(this.video, performance.now());
+    this.processDetectionResult(result);
+  }
+
+  /**
+   * Process a detection result (from Worker or sync fallback).
+   * All landmark processing, gesture detection, filtering, and callbacks.
+   */
+  private processDetectionResult(result: HandLandmarkerResult): void {
+    if (!this.canvas || !this.video) return;
+
     const hasHand = (result.landmarks?.length ?? 0) > 0;
 
     // Handle hand disappearance → pen-up + hand:lost
