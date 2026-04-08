@@ -44,6 +44,9 @@ export interface IRenderer {
   /** Remove the last completed stroke (undo) */
   removeLastStroke(): Stroke | undefined;
 
+  /** Remove a specific stroke by ID (immediate removal, no fade) */
+  removeStrokeById(strokeId: string): Stroke | undefined;
+
   /** Fade out the last completed stroke over the given duration (ms), then remove it */
   fadeOutLastStroke(durationMs: number): Stroke | undefined;
 
@@ -55,6 +58,9 @@ export interface IRenderer {
 
   /** Remove the last fill (undo) */
   removeLastFill(): Fill | undefined;
+
+  /** Remove a specific fill by ID */
+  removeFillById(fillId: string): Fill | undefined;
 
   /** Clear all fills */
   clearFills(): void;

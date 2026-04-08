@@ -1,6 +1,6 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { EffectPresetName, Fill, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
+import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES, EFFECT_PRESETS } from './types.js';
 import { InputManager } from './input/InputManager.js';
 import { PipelineEngine } from './pipeline/PipelineEngine.js';
@@ -13,6 +13,7 @@ import { SessionStateMachine } from './state/SessionStateMachine.js';
 import { MorphAnimator } from './animate/MorphAnimator.js';
 import { StrokeAnimator } from './animation/StrokeAnimator.js';
 import type { AnimationParams } from './animation/types.js';
+import { ObjectStore } from './store/ObjectStore.js';
 import { exportPNG } from './export/PNGExporter.js';
 import { exportGIF as exportGIFImpl } from './export/GIFExporter.js';
 import type { GIFExportOptions } from './export/GIFExporter.js';
@@ -45,9 +46,11 @@ export class Glymo {
   private webgpuAvailable = false;
 
   private strokes: Stroke[] = [];
+  private fills: Fill[] = [];
   private currentEffect: EffectPresetName;
   private morphAnimator: MorphAnimator | null = null;
   private readonly strokeAnimator: StrokeAnimator;
+  private readonly objectStore: ObjectStore;
   private pendingStroke: FinalizedStroke | null = null;
   private destroyed = false;
   private instantComplete = false;
@@ -56,6 +59,7 @@ export class Glymo {
   private _pendingCustomColor: string | null = null;
   private _pendingCustomWidth: number | null = null;
   private _pausedAnimations: Map<string, AnimationParams> = new Map();
+  private _pausedObjectAnimations: Map<string, AnimationParams> = new Map();
 
   // Second-hand drawing pipeline — runs fully independently from hand 0.
   // Always uses instant-complete (no morph) to avoid state machine conflicts.
@@ -86,6 +90,7 @@ export class Glymo {
     this.pipeline = new PipelineEngine(this.eventBus);
     this.pipeline2 = new PipelineEngine(this.eventBus);
     this.strokeAnimator = new StrokeAnimator();
+    this.objectStore = new ObjectStore();
     this.renderer = new CanvasRenderer(canvas, this.options.pixelRatio);
     this.inputManager = new InputManager();
     this.stateMachine = new SessionStateMachine(this.eventBus);
@@ -109,6 +114,7 @@ export class Glymo {
     this.renderer.setEffect(this.currentEffect);
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
     this.wireStrokeAnimator();
+    this.wireObjectStore();
     this.renderer.start();
     this.stateMachine.transition('init');
 
@@ -430,18 +436,24 @@ export class Glymo {
   /** Add a fill to the canvas */
   addFill(fill: Fill): void {
     this.assertNotDestroyed();
+    this.fills.push(fill);
     this.renderer.addFill(fill);
   }
 
   /** Remove the last fill (undo) */
   undoFill(): Fill | undefined {
     this.assertNotDestroyed();
-    return this.renderer.removeLastFill();
+    const removed = this.renderer.removeLastFill();
+    if (removed) {
+      this.fills = this.fills.filter(f => f.id !== removed.id);
+    }
+    return removed;
   }
 
   /** Clear all fills */
   clearFills(): void {
     this.assertNotDestroyed();
+    this.fills = [];
     this.renderer.clearFills();
   }
 
@@ -494,6 +506,105 @@ export class Glymo {
     return true;
   }
 
+  // ── GlymoObject API ─────────────────────────────────
+
+  /** Create a GlymoObject grouping existing strokes. Returns the new object. */
+  createObject(
+    strokeIds: string[],
+    bbox?: { x: number; y: number; width: number; height: number },
+  ): GlymoObject {
+    this.assertNotDestroyed();
+    const effectiveBbox = bbox ?? this.computeStrokeBoundsForIds(strokeIds);
+    return this.objectStore.createObject(strokeIds, effectiveBbox);
+  }
+
+  /** Add a fill to an existing object (fill follows the object's animation) */
+  addFillToObject(objectId: string, fill: Fill): void {
+    this.assertNotDestroyed();
+    this.fills.push(fill);
+    this.renderer.addFill(fill);
+    this.objectStore.addFillToObject(objectId, fill.id);
+  }
+
+  /** Find the GlymoObject that contains a specific stroke */
+  getObjectByStrokeId(strokeId: string): GlymoObject | undefined {
+    return this.objectStore.getObjectByStrokeId(strokeId);
+  }
+
+  /** Find the nearest GlymoObject at a canvas point (hit tests strokes) */
+  getObjectByPoint(x: number, y: number, radius = 20): GlymoObject | undefined {
+    this.assertNotDestroyed();
+    const hitId = this.hitTestStroke(x, y, radius);
+    if (!hitId) return undefined;
+    return this.objectStore.getObjectByStrokeId(hitId);
+  }
+
+  /** Get direct access to the ObjectStore */
+  getObjectStore(): ObjectStore { return this.objectStore; }
+
+  /**
+   * Toggle animation on an entire object (all strokes animated together).
+   * Returns true if animation was turned ON, false if turned OFF.
+   */
+  toggleObjectAnimation(objectId: string, params?: AnimationParams): boolean {
+    this.assertNotDestroyed();
+    const obj = this.objectStore.getObject(objectId);
+    if (!obj || obj.strokeIds.length === 0) return false;
+
+    if (obj.animationId) {
+      // Currently animated → pause: save params and remove
+      const currentParams = this.strokeAnimator.getAnimationParams(obj.strokeIds[0]!);
+      if (currentParams) {
+        this._pausedObjectAnimations.set(objectId, currentParams);
+      }
+      this.strokeAnimator.removeAnimation(obj.animationId);
+      this.objectStore.setAnimationId(objectId, undefined);
+      return false;
+    }
+
+    // Not animated → resume or start
+    const animParams: AnimationParams =
+      this._pausedObjectAnimations.get(objectId) ??
+      params ??
+      { type: 'sparkle', duration: 2000, repeat: true };
+    this._pausedObjectAnimations.delete(objectId);
+    const animId = this.strokeAnimator.addAnimation(obj.strokeIds, animParams);
+    this.objectStore.setAnimationId(objectId, animId);
+    return true;
+  }
+
+  /**
+   * Undo the last GlymoObject: removes its strokes, fills, and animations.
+   * Returns the removed object or undefined if no objects exist.
+   */
+  undoObject(): GlymoObject | undefined {
+    this.assertNotDestroyed();
+    const obj = this.objectStore.removeLastObject();
+    if (!obj) return undefined;
+
+    // Remove animation
+    if (obj.animationId) {
+      this.strokeAnimator.removeAnimation(obj.animationId);
+    }
+    this._pausedObjectAnimations.delete(obj.id);
+
+    // Remove strokes
+    for (const sid of obj.strokeIds) {
+      this.renderer.removeStrokeById(sid);
+      this.strokes = this.strokes.filter(s => s.id !== sid);
+      this.strokeAnimator.removeByStrokeId(sid);
+      this._pausedAnimations.delete(sid);
+    }
+
+    // Remove fills
+    for (const fid of obj.fillIds) {
+      this.renderer.removeFillById(fid);
+      this.fills = this.fills.filter(f => f.id !== fid);
+    }
+
+    return obj;
+  }
+
   // ── Renderer ───────────────────────────────────────
   /** Switch the rendering backend ('canvas2d' | 'webgpu' | 'auto') */
   async setRenderer(mode: RendererMode): Promise<void> {
@@ -525,9 +636,12 @@ export class Glymo {
 
     setTimeout(() => {
       this.strokes = [];
+      this.fills = [];
       this.accumulatedStrokes = [];
       this.strokeAnimator.clear();
       this._pausedAnimations.clear();
+      this._pausedObjectAnimations.clear();
+      this.objectStore.clear();
       this.renderer.clearFills();
       this.renderer.clearAll();
       this.pipeline.reset();
@@ -543,6 +657,7 @@ export class Glymo {
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
       this.strokeAnimator.removeByStrokeId(removed.id);
       this._pausedAnimations.delete(removed.id);
+      this.objectStore.removeStrokeFromObject(removed.id);
     }
   }
 
@@ -553,6 +668,7 @@ export class Glymo {
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
       this.strokeAnimator.removeByStrokeId(removed.id);
       this._pausedAnimations.delete(removed.id);
+      this.objectStore.removeStrokeFromObject(removed.id);
     }
   }
 
@@ -564,6 +680,7 @@ export class Glymo {
       this.strokes = this.strokes.filter((s) => s.id !== removed.id);
       this.strokeAnimator.removeByStrokeId(removed.id);
       this._pausedAnimations.delete(removed.id);
+      this.objectStore.removeStrokeFromObject(removed.id);
     }
   }
 
@@ -623,11 +740,14 @@ export class Glymo {
     this.cancelMorph();
     this.strokeAnimator.clear();
     this._pausedAnimations.clear();
+    this._pausedObjectAnimations.clear();
+    this.objectStore.clear();
     this.stateMachine.destroy();
     this.unbind();
     this.renderer.destroy();
     this.eventBus.clear();
     this.strokes = [];
+    this.fills = [];
     this.accumulatedStrokes = [];
     this.textPipeline.dispose();
   }
@@ -684,6 +804,13 @@ export class Glymo {
   private wireStrokeAnimator(): void {
     if (this.renderer instanceof CanvasRenderer) {
       this.renderer.setStrokeAnimator(this.strokeAnimator);
+    }
+  }
+
+  /** Connect the ObjectStore to the current renderer (CanvasRenderer only) */
+  private wireObjectStore(): void {
+    if (this.renderer instanceof CanvasRenderer) {
+      this.renderer.setObjectStore(this.objectStore);
     }
   }
 
@@ -920,6 +1047,17 @@ export class Glymo {
     return computeBounds(strokeArrays.flat());
   }
 
+  /** Compute combined bounding box for strokes by their IDs */
+  private computeStrokeBoundsForIds(strokeIds: string[]): { x: number; y: number; width: number; height: number } {
+    const points: StrokePoint[] = [];
+    for (const sid of strokeIds) {
+      const stroke = this.strokes.find(s => s.id === sid);
+      if (stroke) points.push(...stroke.smoothed);
+    }
+    if (points.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
+    return computeBounds(points);
+  }
+
   private enforceMaxStrokes(): void {
     while (this.strokes.length > this.options.maxStrokes) {
       this.strokes.shift();
@@ -939,7 +1077,9 @@ export class Glymo {
     this.renderer.setEffect(this.currentEffect);
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
     this.wireStrokeAnimator();
+    this.wireObjectStore();
     for (const s of strokes) this.renderer.addCompletedStroke(s);
+    for (const f of this.fills) this.renderer.addFill(f);
 
     // Re-connect FontMorphAnimator if one is still running after the renderer swap
     const fontAnimator = this.textPipeline.getMorphAnimator();

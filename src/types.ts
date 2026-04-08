@@ -123,6 +123,19 @@ export interface Fill {
   createdAt: number;
 }
 
+// ── GlymoObject ─────────────────────────────────────
+
+/** A grouped drawing object: strokes + fills animated as a single unit */
+export interface GlymoObject {
+  id: string;
+  strokeIds: string[];
+  fillIds: string[];
+  bbox: { x: number; y: number; width: number; height: number };
+  createdAt: number;
+  animationId?: string;
+  metadata?: Record<string, unknown>;
+}
+
 // ── Session State ────────────────────────────────────
 
 /** A completed or in-progress stroke */

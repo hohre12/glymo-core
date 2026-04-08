@@ -129,6 +129,85 @@ export function scanlineFill(
 }
 
 /**
+ * Morphological dilation: expand filled pixels outward by `radius`.
+ * Uses a fast two-pass separable box filter (horizontal then vertical).
+ * This pushes the fill edge under the stroke lines so no gap is visible.
+ */
+function dilateFill(src: ImageData, radius: number): ImageData {
+  const { width, height } = src;
+  const sd = src.data;
+
+  // Build a 1-bit alpha mask (1 = filled, 0 = empty)
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < mask.length; i++) {
+    mask[i] = sd[i * 4 + 3]! > 0 ? 1 : 0;
+  }
+
+  // Horizontal pass: for each pixel, if any pixel within ±radius on the same row is filled → mark
+  const hPass = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const rowOff = y * width;
+    // Sliding window count of filled pixels in the row
+    let count = 0;
+    // Initialize window for x=0
+    for (let k = 0; k <= radius && k < width; k++) {
+      count += mask[rowOff + k]!;
+    }
+    for (let x = 0; x < width; x++) {
+      if (count > 0) hPass[rowOff + x] = 1;
+      // Slide window: remove left edge, add right edge
+      const removeIdx = x - radius;
+      const addIdx = x + radius + 1;
+      if (removeIdx >= 0) count -= mask[rowOff + removeIdx]!;
+      if (addIdx < width) count += mask[rowOff + addIdx]!;
+    }
+  }
+
+  // Vertical pass on hPass result
+  const dilated = new Uint8Array(width * height);
+  for (let x = 0; x < width; x++) {
+    let count = 0;
+    for (let k = 0; k <= radius && k < height; k++) {
+      count += hPass[k * width + x]!;
+    }
+    for (let y = 0; y < height; y++) {
+      if (count > 0) dilated[y * width + x] = 1;
+      const removeIdx = y - radius;
+      const addIdx = y + radius + 1;
+      if (removeIdx >= 0) count -= hPass[removeIdx * width + x]!;
+      if (addIdx < height) count += hPass[addIdx * width + x]!;
+    }
+  }
+
+  // Sample color from the original fill (first non-transparent pixel)
+  let fr = 0, fg = 0, fb = 0, fa = 255;
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i]) {
+      fr = sd[i * 4]!;
+      fg = sd[i * 4 + 1]!;
+      fb = sd[i * 4 + 2]!;
+      fa = sd[i * 4 + 3]!;
+      break;
+    }
+  }
+
+  // Write output
+  const out = new ImageData(width, height);
+  const od = out.data;
+  for (let i = 0; i < dilated.length; i++) {
+    if (dilated[i]) {
+      const px = i * 4;
+      od[px] = fr;
+      od[px + 1] = fg;
+      od[px + 2] = fb;
+      od[px + 3] = fa;
+    }
+  }
+
+  return out;
+}
+
+/**
  * High-level fill API: create mask, run scanline fill, return ImageBitmap.
  */
 export async function executeFill(
@@ -165,13 +244,18 @@ export async function executeFill(
   const fillData = scanlineFill(maskData, sx, sy, { r, g, b, a: 255 });
   if (!fillData) return null;
 
+  // Dilate the fill outward so it extends under the stroke lines.
+  // The gap-closing mask makes boundaries thicker than the visible strokes,
+  // so without dilation the fill stops short, leaving visible gaps.
+  const dilated = dilateFill(fillData, gapCloseRadius + 4);
+
   // Safety check: if fill covers more than 40% of canvas, it leaked outside.
   // Cancel the fill to prevent painting the entire screen.
   const totalPixels = canvasWidth * canvasHeight;
   let filledPixels = 0;
-  const fd = fillData.data;
-  for (let i = 3; i < fd.length; i += 4) {
-    if (fd[i]! > 0) filledPixels++;
+  const dd = dilated.data;
+  for (let i = 3; i < dd.length; i += 4) {
+    if (dd[i]! > 0) filledPixels++;
   }
   if (filledPixels / totalPixels > 0.4) {
     console.warn('[FloodFill] Fill covers', Math.round(filledPixels / totalPixels * 100) + '% of canvas — likely leaked, cancelling');
@@ -179,5 +263,5 @@ export async function executeFill(
   }
 
   // Convert to ImageBitmap
-  return createImageBitmap(fillData);
+  return createImageBitmap(dilated);
 }

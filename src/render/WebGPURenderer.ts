@@ -230,11 +230,18 @@ export class WebGPURenderer implements IRenderer {
   /** No-op — fill rendering is not yet supported in WebGPU mode */
   removeLastFill(): Fill | undefined { return undefined; }
   /** No-op — fill rendering is not yet supported in WebGPU mode */
+  removeFillById(_fillId: string): Fill | undefined { return undefined; }
+  /** No-op — fill rendering is not yet supported in WebGPU mode */
   clearFills(): void {}
   /** No-op — fill rendering is not yet supported in WebGPU mode */
   getFillCount(): number { return 0; }
   addCompletedStroke(s: Stroke): void { this.completedStrokes.push(s); }
   removeLastStroke(): Stroke | undefined { return this.completedStrokes.pop(); }
+  removeStrokeById(strokeId: string): Stroke | undefined {
+    const idx = this.completedStrokes.findIndex(s => s.id === strokeId);
+    if (idx === -1) return undefined;
+    return this.completedStrokes.splice(idx, 1)[0];
+  }
   fadeOutLastStroke(_durationMs: number): Stroke | undefined { return this.completedStrokes.pop(); }
   fadeOutStrokeById(strokeId: string, _durationMs: number): Stroke | undefined {
     const idx = this.completedStrokes.findIndex(s => s.id === strokeId);

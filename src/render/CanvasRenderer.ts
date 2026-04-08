@@ -8,6 +8,7 @@ import type { EventBus } from '../state/EventBus.js';
 import type { IRenderer, RendererType } from './IRenderer.js';
 import type { OverlayText } from '../text/types.js';
 import type { StrokeAnimator } from '../animation/StrokeAnimator.js';
+import type { ObjectStore } from '../store/ObjectStore.js';
 
 import { renderBackground } from './layers/background.js';
 import { renderCompletedStrokes } from './layers/completed.js';
@@ -60,6 +61,7 @@ export class CanvasRenderer implements IRenderer {
   private fills: Fill[] = [];
 
   private strokeAnimator: StrokeAnimator | null = null;
+  private objectStore: ObjectStore | null = null;
 
   private getActivePointsFn: (() => ReadonlyArray<StrokePoint>) | null = null;
 
@@ -119,6 +121,11 @@ export class CanvasRenderer implements IRenderer {
     this.strokeAnimator = animator;
   }
 
+  /** Set the ObjectStore for object-aware fill rendering */
+  setObjectStore(store: ObjectStore | null): void {
+    this.objectStore = store;
+  }
+
   /** Set background rendering mode — 'transparent' skips the black fill */
   setBackgroundMode(mode: 'solid' | 'transparent'): void {
     this.backgroundMode = mode;
@@ -134,6 +141,15 @@ export class CanvasRenderer implements IRenderer {
   /** Remove the last completed stroke (undo) */
   removeLastStroke(): Stroke | undefined {
     const removed = this.completedStrokes.pop();
+    this.completedCacheDirty = true;
+    return removed;
+  }
+
+  /** Remove a specific completed stroke by ID (immediate, no fade) */
+  removeStrokeById(strokeId: string): Stroke | undefined {
+    const idx = this.completedStrokes.findIndex(s => s.id === strokeId);
+    if (idx === -1) return undefined;
+    const [removed] = this.completedStrokes.splice(idx, 1);
     this.completedCacheDirty = true;
     return removed;
   }
@@ -230,6 +246,14 @@ export class CanvasRenderer implements IRenderer {
     return this.fills.pop();
   }
 
+  /** Remove a specific fill by ID */
+  removeFillById(fillId: string): Fill | undefined {
+    const idx = this.fills.findIndex(f => f.id === fillId);
+    if (idx === -1) return undefined;
+    const [removed] = this.fills.splice(idx, 1);
+    return removed;
+  }
+
   /** Clear all fills */
   clearFills(): void {
     this.fills = [];
@@ -273,8 +297,8 @@ export class CanvasRenderer implements IRenderer {
     // Layer 0 — Background
     renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode);
 
-    // Layer 5 — Fills (below strokes)
-    renderFills(this.ctx, this.fills);
+    // Layer 5 — Fills (below strokes, with object animation transforms)
+    renderFills(this.ctx, this.fills, this.objectStore, this.strokeAnimator);
 
     // Layer 10 — Completed strokes (offscreen cache + animation transforms)
     this.completedCacheDirty = renderCompletedStrokes(
@@ -284,6 +308,7 @@ export class CanvasRenderer implements IRenderer {
       this.completedCacheCtx,
       this.completedCacheDirty,
       this.strokeAnimator,
+      this.objectStore,
     );
 
     // Layer 20 — Morphing stroke

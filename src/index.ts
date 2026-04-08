@@ -7,6 +7,7 @@ export type {
   GlymoEventMap,
   GlymoOptions,
   GIFOptions,
+  GlymoObject,
   StrokePoint,
   Point,
   Point3D,
@@ -142,6 +143,9 @@ export { StrokeAnimator } from './animation/index.js';
 // ── CreateOptions (Glymo.create) ───────────────────
 
 export type { CreateOptions } from './types.js';
+
+// ── Object Store ──────────────────────────────────
+export { ObjectStore } from './store/ObjectStore.js';
 
 // ── Fill Tool ──────────────────────────────────────
 export { executeFill } from './render/FloodFill.js';
