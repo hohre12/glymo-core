@@ -122,13 +122,6 @@ export class SpatialGrouper {
       );
 
       const near = bboxNear(cssBbox, active.bbox, threshold);
-      console.log('[SpatialGrouper] feedStroke:', {
-        strokeBbox: { x: Math.round(cssBbox.x), y: Math.round(cssBbox.y), w: Math.round(cssBbox.width), h: Math.round(cssBbox.height) },
-        groupBbox: { x: Math.round(active.bbox.x), y: Math.round(active.bbox.y), w: Math.round(active.bbox.width), h: Math.round(active.bbox.height) },
-        threshold: Math.round(threshold),
-        near,
-        groupStrokes: active.strokes.length,
-      });
 
       if (near) {
         // Add to existing group

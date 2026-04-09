@@ -704,7 +704,6 @@ export class Glymo {
       this.strokes = this.strokes.filter(s => s.id !== sid);
       this.strokeAnimator.removeByStrokeId(sid);
       allCorrections.push('remove-artifact');
-      console.log(`[Polish] Removed tiny stroke ${sid.slice(0,8)}`);
     }
 
     // Step 2: Correct remaining strokes (self-close + cross-snap)
@@ -726,12 +725,6 @@ export class Glymo {
       const { correctedRaw, correctedSmoothed, corrections } = this.strokeCorrector.correctAndSmooth(
         stroke.raw, others, this.smoothStageRef, dprOptions,
       );
-
-      // Debug: self-close distance
-      const selfDist = stroke.raw.length >= 2
-        ? Math.sqrt((stroke.raw[0]!.x - stroke.raw[stroke.raw.length-1]!.x)**2 + (stroke.raw[0]!.y - stroke.raw[stroke.raw.length-1]!.y)**2)
-        : 0;
-      console.log(`[Polish] stroke=${sid.slice(0,8)} raw=${stroke.raw.length}pts | threshold=${snapThreshold.toFixed(0)}px | selfClose=${selfDist.toFixed(1)}px | corrections=[${corrections.join(',')}]`);
 
       if (corrections.length > 0) {
         stroke.raw = correctedRaw;

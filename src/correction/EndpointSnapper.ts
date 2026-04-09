@@ -41,12 +41,10 @@ export function snapEndpoints(
     const trimIdx = findClosestApproach(correctedRaw, startPt, 'end', threshold);
     if (trimIdx !== null && trimIdx < correctedRaw.length - 1) {
       correctedRaw = correctedRaw.slice(0, trimIdx + 1);
-      console.log(`[Snap] Self-close trim: removed ${raw.length - correctedRaw.length} pts`);
     }
     const lastIdx = correctedRaw.length - 1;
     correctedRaw[lastIdx] = { ...correctedRaw[lastIdx]!, x: startPt.x, y: startPt.y };
     endSnapped = true;
-    console.log(`[Snap] END self-close: ${selfCloseDist.toFixed(1)}px (cross was ${crossEndDist.toFixed(1)}px)`);
   } else if (crossEnd && crossEndDist < selfCloseDist) {
     // Cross-stroke wins: trim + snap
     const endResult = snapOneSide(correctedRaw, otherStrokes, 'end', t2, threshold);
@@ -56,7 +54,6 @@ export function snapEndpoints(
       if (!targetStrokeIds.includes(endResult.strokeId)) {
         targetStrokeIds.push(endResult.strokeId);
       }
-      console.log(`[Snap] END cross: trimmed=${endResult.trimCount} dist=${endResult.dist.toFixed(1)}px →${endResult.strokeId.slice(0,8)} (self was ${selfCloseDist.toFixed(1)}px)`);
     }
   }
 
@@ -68,7 +65,6 @@ export function snapEndpoints(
     if (!targetStrokeIds.includes(startResult.strokeId)) {
       targetStrokeIds.push(startResult.strokeId);
     }
-    console.log(`[Snap] START cross: trimmed=${startResult.trimCount} dist=${startResult.dist.toFixed(1)}px →${startResult.strokeId.slice(0,8)}`);
   }
 
   const snapped = startSnapped || endSnapped;

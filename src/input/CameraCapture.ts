@@ -364,7 +364,6 @@ export class CameraCapture implements InputCapture {
     if (!this.active) return;
 
     if (preferSync) {
-      console.log('[CameraCapture] Unified GPU detected → starting in sync mode directly');
       await this.initMediaPipeSync();
       return;
     }
@@ -417,13 +416,11 @@ export class CameraCapture implements InputCapture {
           const isHighTier = desc.includes('m4') || desc.includes('m3 max') || desc.includes('m3 ultra');
 
           if (isAppleSilicon && isBaseTier && !isHighTier) {
-            console.log(`[CameraCapture] GPU detected: ${desc || arch} → unified, prefer sync`);
             localStorage?.setItem('glymo-mp-mode', 'sync');
             return true;
           }
 
           if (isAppleSilicon && isHighTier) {
-            console.log(`[CameraCapture] GPU detected: ${desc || arch} → high-tier, prefer worker`);
             localStorage?.setItem('glymo-mp-mode', 'worker');
             return false;
           }
@@ -496,7 +493,6 @@ export class CameraCapture implements InputCapture {
       if (this.externalWorkerUrl) {
         // Same-origin classic worker — uses importScripts() with patched MediaPipe bundle
         const workerUrl = this.externalWorkerUrl + '?v=' + Date.now();
-        console.log('[CameraCapture] Creating classic worker from:', workerUrl);
         this.worker = new Worker(workerUrl);
       } else {
         // Fallback: inline Blob classic worker (importScripts — may fail with .mjs)
@@ -573,7 +569,6 @@ export class CameraCapture implements InputCapture {
 
           if (avg > CameraCapture.ROUNDTRIP_THRESHOLD_MS) {
             // GPU contention detected — sync mode is faster on this device
-            console.log(`[CameraCapture] Worker roundtrip ${Math.round(avg)}ms > ${CameraCapture.ROUNDTRIP_THRESHOLD_MS}ms threshold → switching to sync mode`);
             this.processDetectionResult({
               landmarks: msg.landmarks ?? [],
               worldLandmarks: msg.worldLandmarks ?? [],
@@ -583,7 +578,6 @@ export class CameraCapture implements InputCapture {
             this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
             return;
           }
-          console.log(`[CameraCapture] Worker roundtrip ${Math.round(avg)}ms ≤ ${CameraCapture.ROUNDTRIP_THRESHOLD_MS}ms → keeping Worker mode`);
         }
       }
 

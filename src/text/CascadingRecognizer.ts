@@ -117,6 +117,10 @@ export class CascadingRecognizer {
     });
   }
 
+  setUppercase(value: boolean): void {
+    this.opts.uppercase = value;
+  }
+
   setLanguage(lang: string): void {
     this.language = lang;
     const params = LANG_PARAMS[lang] ?? DEFAULT_PARAMS;
@@ -187,15 +191,12 @@ export class CascadingRecognizer {
       let text = result.text.trim().replace(/\s+/g, '');
       if (this.opts.uppercase) text = text.toUpperCase();
 
-      console.log('[CascadingRecognizer] Group recognized:', text[0], '(full:', text, ')');
-
       if (text.length > 1 && state.lastSingleCharStrokeCount > 0) {
         // Character boundary detected! Split the group.
         // Keep the strokes that produced 1 char, re-feed the rest.
         const keepCount = state.lastSingleCharStrokeCount;
         state.result = text[0] ?? '';
 
-        console.log('[CascadingRecognizer] Split detected! Keeping', keepCount, 'strokes, re-feeding rest');
         const overflow = this.grouper.splitGroup(group.id, keepCount);
         if (overflow && overflow.length > 0) {
           // Re-feed all overflow strokes as a single new group (not one-by-one,
@@ -251,7 +252,6 @@ export class CascadingRecognizer {
 
     this.chars.set(charId, char);
     this.opts.onChar(char);
-    console.log('[CascadingRecognizer] Displayed:', state.result, 'at', Math.round(cx), Math.round(cy));
 
     // Clean up per-group maps to prevent memory leak
     this.groupState.delete(group.id);
