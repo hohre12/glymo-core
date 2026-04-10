@@ -78,6 +78,7 @@ export type {
   RecognizedChar as CascadingChar,
   CharCorrection,
   CascadingRecognizerOptions,
+  CaseMode,
 } from './text/CascadingRecognizer.js';
 export { CascadingRecognizer } from './text/CascadingRecognizer.js';
 

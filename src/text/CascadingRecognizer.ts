@@ -41,13 +41,15 @@ export interface CharCorrection {
   newChar: string;
 }
 
+export type CaseMode = 'upper' | 'lower' | 'auto';
+
 export interface CascadingRecognizerOptions {
   onChar: (char: RecognizedChar) => void;
   onCorrection: (correction: CharCorrection) => void;
   onRecognizing?: (busy: boolean) => void;
   /** Called before font display — consumer should fade out specific strokes by ID */
   onDisplayFlush?: (strokeIds: string[]) => void;
-  uppercase?: boolean;
+  caseMode?: CaseMode;
   heightWindowSize?: number;
 }
 
@@ -103,7 +105,7 @@ export class CascadingRecognizer {
       onCorrection: options.onCorrection,
       onRecognizing: options.onRecognizing ?? (() => {}),
       onDisplayFlush: options.onDisplayFlush ?? (() => {}),
-      uppercase: options.uppercase ?? true,
+      caseMode: options.caseMode ?? 'upper',
       heightWindowSize: options.heightWindowSize ?? 5,
     };
 
@@ -117,8 +119,8 @@ export class CascadingRecognizer {
     });
   }
 
-  setUppercase(value: boolean): void {
-    this.opts.uppercase = value;
+  setCaseMode(mode: CaseMode): void {
+    this.opts.caseMode = mode;
   }
 
   setLanguage(lang: string): void {
@@ -189,7 +191,8 @@ export class CascadingRecognizer {
       if (!result?.text?.trim()) return;
 
       let text = result.text.trim().replace(/\s+/g, '');
-      if (this.opts.uppercase) text = text.toUpperCase();
+      if (this.opts.caseMode === 'upper') text = text.toUpperCase();
+      else if (this.opts.caseMode === 'lower') text = text.toLowerCase();
 
       if (text.length > 1 && state.lastSingleCharStrokeCount > 0) {
         // Character boundary detected! Split the group.
