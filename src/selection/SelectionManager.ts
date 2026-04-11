@@ -58,9 +58,11 @@ export class SelectionManager {
     return this.selected.size;
   }
 
-  /** Remove an object from selection without emitting (for cleanup on delete). */
+  /** Remove an object from selection during cleanup (e.g. object deletion). */
   removeIfSelected(objectId: string): void {
-    this.selected.delete(objectId);
+    if (!this.selected.delete(objectId)) return;
+    this.eventBus.emit('object:deselected', { objectId });
+    this.emitChanged();
   }
 
   private emitChanged(): void {

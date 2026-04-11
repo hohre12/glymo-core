@@ -13,7 +13,7 @@ export default defineConfig({
       fileName: (format) => format === 'es' ? 'glymo.mjs' : 'glymo.js',
     },
     rollupOptions: {
-      external: ['@mediapipe/tasks-vision'],
+      external: ['@mediapipe/tasks-vision', 'three', /^three\//],
     },
     target: 'es2022',
     minify: 'esbuild',

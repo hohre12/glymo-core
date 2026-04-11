@@ -696,14 +696,29 @@ export class Glymo {
       }
     }
 
-    // Remove tiny strokes
+    // Remove tiny strokes (preserve full Stroke for revert)
+    const removedStrokes: import('./types.js').Stroke[] = [];
     for (const sid of tinyStrokeIds) {
-      originalRaw[sid] = this.strokes.find(s => s.id === sid)?.raw.map(p => ({ ...p })) ?? [];
-      originalSmoothed[sid] = this.strokes.find(s => s.id === sid)?.smoothed.map(p => ({ ...p })) ?? [];
+      const stroke = this.strokes.find(s => s.id === sid);
+      if (stroke) {
+        // Deep clone the full stroke for revert restoration
+        removedStrokes.push({
+          ...stroke,
+          raw: stroke.raw.map(p => ({ ...p })),
+          smoothed: stroke.smoothed.map(p => ({ ...p })),
+        });
+      }
+      originalRaw[sid] = stroke?.raw.map(p => ({ ...p })) ?? [];
+      originalSmoothed[sid] = stroke?.smoothed.map(p => ({ ...p })) ?? [];
       this.renderer.removeStrokeById(sid);
       this.strokes = this.strokes.filter(s => s.id !== sid);
       this.strokeAnimator.removeByStrokeId(sid);
       allCorrections.push('remove-artifact');
+    }
+
+    // Remove phantom stroke IDs from the object and stroke-to-object map
+    for (const sid of tinyStrokeIds) {
+      this.objectStore.removeStrokeFromObject(sid);
     }
 
     // Step 2: Correct remaining strokes (self-close + cross-snap)
@@ -742,6 +757,7 @@ export class Glymo {
       corrected: true,
       originalRaw,
       originalSmoothed,
+      removedStrokes: removedStrokes.length > 0 ? removedStrokes : undefined,
       appliedCorrections: allCorrections,
     };
     this.objectStore.updateMetadata(objectId, 'correction', meta);
@@ -766,12 +782,28 @@ export class Glymo {
     const meta = obj.metadata?.correction as CorrectionMetadata | undefined;
     if (!meta?.corrected) return false;
 
-    // Restore original points
+    // Restore removed strokes first
+    if (meta.removedStrokes) {
+      for (const removedStroke of meta.removedStrokes) {
+        const restoredStroke = {
+          ...removedStroke,
+          raw: removedStroke.raw.map(p => ({ ...p })),
+          smoothed: removedStroke.smoothed.map(p => ({ ...p })),
+        };
+        this.strokes.push(restoredStroke);
+        // Re-register stroke in the object and stroke-to-object map
+        this.objectStore.addStrokeToObject(objectId, restoredStroke.id);
+        // Add stroke back to the renderer so it becomes visible again
+        this.renderer.addCompletedStroke(restoredStroke);
+      }
+    }
+
+    // Restore original points on remaining strokes
     for (const sid of obj.strokeIds) {
       const stroke = this.strokes.find(s => s.id === sid);
       if (!stroke) continue;
-      if (meta.originalRaw[sid]) stroke.raw = meta.originalRaw[sid];
-      if (meta.originalSmoothed[sid]) stroke.smoothed = meta.originalSmoothed[sid];
+      if (meta.originalRaw[sid]) stroke.raw = meta.originalRaw[sid].map(p => ({ ...p }));
+      if (meta.originalSmoothed[sid]) stroke.smoothed = meta.originalSmoothed[sid].map(p => ({ ...p }));
     }
 
     // Clear correction metadata

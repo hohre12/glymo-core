@@ -36,7 +36,8 @@ export function snapEndpoints(
   const crossEnd = findNearestOnPath(endPt, otherStrokes, t2);
   const crossEndDist = crossEnd?.dist ?? Infinity;
 
-  if (selfCloseDist > 0 && selfCloseDist < crossEndDist && selfCloseDist * selfCloseDist < t2) {
+  // Apply 0.8x preference multiplier for self-close to prevent flickery behavior
+  if (selfCloseDist > 0 && selfCloseDist * 0.8 < crossEndDist && selfCloseDist * selfCloseDist < t2) {
     // Self-close wins: trim overshoot at end, snap to start
     const trimIdx = findClosestApproach(correctedRaw, startPt, 'end', threshold);
     if (trimIdx !== null && trimIdx < correctedRaw.length - 1) {
@@ -191,10 +192,3 @@ function dist(a: StrokePoint, b: StrokePoint): number {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
 }
 
-function computePathLength(points: readonly StrokePoint[]): number {
-  let len = 0;
-  for (let i = 1; i < points.length; i++) {
-    len += dist(points[i - 1]!, points[i]!);
-  }
-  return len;
-}

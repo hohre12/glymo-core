@@ -175,6 +175,8 @@ export interface CorrectionMetadata {
   originalRaw: Record<string, StrokePoint[]>;
   /** Pre-correction smoothed points keyed by stroke ID */
   originalSmoothed: Record<string, StrokePoint[]>;
+  /** Full Stroke objects that were removed during polish (for revert restoration) */
+  removedStrokes?: Stroke[];
   /** Which corrections were applied */
   appliedCorrections: string[];
 }

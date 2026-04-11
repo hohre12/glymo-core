@@ -69,8 +69,11 @@ export function trimOvershoot(
     if (velocities[i]! <= avgSpeed * VELOCITY_SPIKE_FACTOR) continue;
 
     // Check direction reversal around this point
+    // Need at least 2 samples in the "after" window for reliable direction detection
+    const afterEnd = Math.min(directions.length, i + windowSize);
+    if (afterEnd - i < 2) continue;
     const angleBefore = averageAngle(directions, Math.max(0, i - windowSize), i);
-    const angleAfter = averageAngle(directions, i, Math.min(directions.length, i + windowSize));
+    const angleAfter = averageAngle(directions, i, afterEnd);
     const angleDiff = Math.abs(normalizeAngle(angleAfter - angleBefore));
 
     if (angleDiff < DIRECTION_REVERSAL_RAD) continue;

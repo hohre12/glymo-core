@@ -77,7 +77,7 @@ export class StrokeCorrector {
 
   /** Check if a stroke appears to be a closed shape (end near start relative to path length) */
   private checkSelfClosing(raw: readonly StrokePoint[], threshold: number): boolean {
-    if (raw.length < 4) return false;
+    if (raw.length < 6) return false;
     const start = raw[0]!;
     const end = raw[raw.length - 1]!;
     const dx = end.x - start.x;
@@ -88,12 +88,14 @@ export class StrokeCorrector {
     if (selfDist < threshold) return true;
 
     // Method 2: ratio-based — stroke traveled far but came back
+    // Tightened from 0.5 to 0.2 to avoid catching U-shaped strokes
     let pathLen = 0;
     for (let i = 1; i < raw.length; i++) {
       const px = raw[i]!.x - raw[i - 1]!.x;
       const py = raw[i]!.y - raw[i - 1]!.y;
       pathLen += Math.sqrt(px * px + py * py);
     }
-    return pathLen > 0 && (selfDist / pathLen) < 0.5;
+    if (pathLen === 0) return false;
+    return (selfDist / pathLen) < 0.2;
   }
 }

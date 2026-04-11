@@ -158,6 +158,19 @@ export type { CorrectionOptions, CorrectionMetadata, SnapResult, TrimResult } fr
 // ── Fill Tool ──────────────────────────────────────
 export { executeFill } from './render/FloodFill.js';
 
+// ── Hologram 3D ──────────────────────────────────────
+
+export { Hologram3DRenderer } from './hologram/index.js';
+export type {
+  HologramChar,
+  Hologram3DRendererOptions,
+  HitTestResult,
+  HologramGestureState,
+} from './hologram/index.js';
+
+export { HologramGesture } from './gesture/HologramGesture.js';
+export type { LandmarkPoint } from './gesture/HologramGesture.js';
+
 // ── Main Class ──────────────────────────────────────
 
 export { Glymo } from './Glymo.js';

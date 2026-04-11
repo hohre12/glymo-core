@@ -103,6 +103,25 @@ export class ObjectStore {
     return this.removeObject(lastId);
   }
 
+  /** Add a stroke to an existing object (used when restoring removed strokes on revert) */
+  addStrokeToObject(objectId: string, strokeId: string): boolean {
+    const obj = this.objects.get(objectId);
+    if (!obj) return false;
+    // Remove from any previous owner
+    const existingOid = this.strokeToObject.get(strokeId);
+    if (existingOid && existingOid !== objectId) {
+      const existingObj = this.objects.get(existingOid);
+      if (existingObj) {
+        existingObj.strokeIds = existingObj.strokeIds.filter(s => s !== strokeId);
+      }
+    }
+    if (!obj.strokeIds.includes(strokeId)) {
+      obj.strokeIds.push(strokeId);
+    }
+    this.strokeToObject.set(strokeId, objectId);
+    return true;
+  }
+
   /** Remove a single stroke from its owning object (used when undo/fadeOut removes a stroke) */
   removeStrokeFromObject(strokeId: string): void {
     const oid = this.strokeToObject.get(strokeId);
