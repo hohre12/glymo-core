@@ -35,6 +35,8 @@ export interface SpatialGrouperOptions {
 
 interface InternalGroup extends SpatialGroup {
   finalizeTimer: ReturnType<typeof setTimeout> | null;
+  /** performance.now() timestamp when the most recent stroke joined this group */
+  lastStrokeEndMs: number;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -111,34 +113,50 @@ export class SpatialGrouper {
     const active = this.lastActiveGroup();
 
     if (active) {
-      // Check if new stroke is near the active group
-      // Capped to prevent snowball: bigger group → bigger threshold → catches more → repeat
-      const threshold = Math.min(
-        Math.max(
-          Math.max(active.bbox.width, active.bbox.height) * this.opts.proximityFactor,
-          this.opts.minProximityPx,
-        ),
-        this.opts.maxProximityPx,
-      );
+      // Time-based boundary: if the inter-stroke pause exceeds half the
+      // finalize delay, the user has visibly paused and is probably starting
+      // a new character. Finalize the current group immediately and fall
+      // through to the "start new group" branch, regardless of spatial
+      // proximity. This prevents the first stroke of the next character
+      // from being merged into the previous group (stroke-loss bug).
+      const nowMs = performance.now();
+      const gapMs = nowMs - active.lastStrokeEndMs;
+      const boundaryGapMs = this.opts.finalizeDelay / 2;
 
-      const near = bboxNear(cssBbox, active.bbox, threshold);
+      if (gapMs > boundaryGapMs) {
+        this.doFinalize(active);
+        // fall through to "start new group" below
+      } else {
+        // Check if new stroke is near the active group
+        // Capped to prevent snowball: bigger group → bigger threshold → catches more → repeat
+        const threshold = Math.min(
+          Math.max(
+            Math.max(active.bbox.width, active.bbox.height) * this.opts.proximityFactor,
+            this.opts.minProximityPx,
+          ),
+          this.opts.maxProximityPx,
+        );
 
-      if (near) {
-        // Add to existing group
-        active.strokes.push(cssStroke);
-        active.bbox = combineBbox(active.bbox, cssBbox);
-        // Cancel pending finalize timer
-        if (active.finalizeTimer) {
-          clearTimeout(active.finalizeTimer);
-          active.finalizeTimer = null;
+        const near = bboxNear(cssBbox, active.bbox, threshold);
+
+        if (near) {
+          // Add to existing group
+          active.strokes.push(cssStroke);
+          active.bbox = combineBbox(active.bbox, cssBbox);
+          active.lastStrokeEndMs = nowMs;
+          // Cancel pending finalize timer
+          if (active.finalizeTimer) {
+            clearTimeout(active.finalizeTimer);
+            active.finalizeTimer = null;
+          }
+          this.opts.onGroupUpdated?.(active);
+          this.scheduleFinalizeTimer(active);
+          return;
         }
-        this.opts.onGroupUpdated?.(active);
-        this.scheduleFinalizeTimer(active);
-        return;
-      }
 
-      // New stroke is far away — finalize previous group immediately
-      this.doFinalize(active);
+        // New stroke is far away — finalize previous group immediately
+        this.doFinalize(active);
+      }
     }
 
     // Start new group
@@ -148,6 +166,7 @@ export class SpatialGrouper {
       bbox: { ...cssBbox },
       finalized: false,
       finalizeTimer: null,
+      lastStrokeEndMs: performance.now(),
     };
     this.groups.push(newGroup);
     this.opts.onGroupUpdated?.(newGroup);
@@ -200,10 +219,22 @@ export class SpatialGrouper {
       bbox,
       finalized: false,
       finalizeTimer: null,
+      lastStrokeEndMs: performance.now(),
     };
     this.groups.push(newGroup);
     this.opts.onGroupUpdated?.(newGroup);
     this.scheduleFinalizeTimer(newGroup);
+  }
+
+  /**
+   * Force-finalize a specific group by ID immediately.
+   * No timer, no proximity check. Used by the recognizer for early-commit
+   * when a group is unambiguously recognized — prevents the next character's
+   * first stroke from merging into this group (stroke-loss bug).
+   */
+  finalizeGroupById(groupId: number): void {
+    const group = this.groups.find(g => g.id === groupId && !g.finalized);
+    if (group) this.doFinalize(group);
   }
 
   /** Force-finalize all pending groups immediately */

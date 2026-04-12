@@ -61,6 +61,12 @@ interface RecognitionState {
   displayed: boolean;
   /** Stroke count when the API last returned exactly 1 character */
   lastSingleCharStrokeCount: number;
+  /** Last result produced (used for stability check → early-commit confidence) */
+  lastResult: string;
+  /** How many consecutive recognition passes agreed on `lastResult` */
+  stableCount: number;
+  /** Set once this group has been early-committed (prevents duplicate finalize) */
+  earlyCommitted: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -113,6 +119,7 @@ export class CascadingRecognizer {
     this.grouper = new SpatialGrouper({
       proximityFactor: params.proximityFactor,
       minProximityPx: params.minProximityPx,
+      maxProximityPx: params.maxProximityPx,
       finalizeDelay: params.finalizeDelay,
       onGroupUpdated: (group) => this.handleGroupUpdated(group),
       onGroupFinalized: (group) => this.handleGroupFinalized(group),
@@ -159,7 +166,7 @@ export class CascadingRecognizer {
 
     let state = this.groupState.get(group.id);
     if (!state) {
-      state = { generation: 0, result: '', displayed: false, lastSingleCharStrokeCount: 0 };
+      state = { generation: 0, result: '', displayed: false, lastSingleCharStrokeCount: 0, lastResult: '', stableCount: 0, earlyCommitted: false };
       this.groupState.set(group.id, state);
     }
 
@@ -170,7 +177,7 @@ export class CascadingRecognizer {
     const dpr = this.groupDpr.get(group.id) ?? 1;
     let state = this.groupState.get(group.id);
     if (!state) {
-      state = { generation: 0, result: '', displayed: false, lastSingleCharStrokeCount: 0 };
+      state = { generation: 0, result: '', displayed: false, lastSingleCharStrokeCount: 0, lastResult: '', stableCount: 0, earlyCommitted: false };
       this.groupState.set(group.id, state);
     }
     this.finalizeGroup(group, state, dpr);
@@ -208,9 +215,38 @@ export class CascadingRecognizer {
         }
       } else {
         // Single character result — track stroke count for future split detection
-        state.result = text[0] ?? '';
+        const newResult = text[0] ?? '';
+        state.result = newResult;
         if (text.length === 1) {
           state.lastSingleCharStrokeCount = strokeCountNow;
+        }
+
+        // Stability tracking: if two consecutive recognition passes produce
+        // the same single-char result, we treat the group as high-confidence.
+        if (text.length === 1 && newResult === state.lastResult && newResult !== '') {
+          state.stableCount += 1;
+        } else {
+          state.stableCount = text.length === 1 ? 1 : 0;
+        }
+        state.lastResult = newResult;
+
+        // Confidence-based early commit.
+        // When the group has been unambiguously recognized (stable single-
+        // char result across ≥ 2 passes), finalize NOW so the next stroke
+        // cannot join this group and cause re-recognition that loses the
+        // next character's first stroke. See stroke-loss root cause in
+        // docs/execution-plan.md.
+        const confidenceHigh = state.stableCount >= 2 && text.length === 1;
+        if (
+          confidenceHigh
+          && !state.displayed
+          && !state.earlyCommitted
+          && strokeCountNow >= 2
+        ) {
+          state.earlyCommitted = true;
+          // Mark recognizing=false before finalize so UI clears its spinner.
+          this.opts.onRecognizing(false);
+          this.grouper.finalizeGroupById(group.id);
         }
       }
     }).catch(() => {}).finally(() => {
