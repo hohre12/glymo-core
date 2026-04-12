@@ -171,6 +171,11 @@ export type {
 export { HologramGesture } from './gesture/HologramGesture.js';
 export type { LandmarkPoint } from './gesture/HologramGesture.js';
 
+// ── Diagnostics ──────────────────────────────────────
+
+export { DiagBus } from './diag/DiagBus.js';
+export type { DiagEvent, DiagStage, DiagListener } from './diag/DiagBus.js';
+
 // ── Main Class ──────────────────────────────────────
 
 export { Glymo } from './Glymo.js';
