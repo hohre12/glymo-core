@@ -1022,6 +1022,16 @@ export class Glymo {
     this.eventBus.on('morph:complete', () => {
       const animator = this.textPipeline.getMorphAnimator();
       if (animator && !animator.isActive()) {
+        // [stroke-trace] Font-morph completion — the exact instant the user
+        // reports a stroke disappearing. Capture stroke counts across
+        // store + renderer + object-store so we can diff against the next
+        // stroke-trace event.
+        // eslint-disable-next-line no-console
+        console.info('[stroke-trace] fontMorph:complete', {
+          strokesLen: this.strokes.length,
+          accumulatedLen: this.accumulatedStrokes.length,
+          ts: performance.now(),
+        });
         this.renderer.setFontMorphAnimator(null);
       }
     });
@@ -1247,6 +1257,17 @@ export class Glymo {
 
   private completeMorph(): void {
     if (!this.pendingStroke || !this.morphAnimator) return;
+
+    // [stroke-trace] Audit stroke store before and after per-stroke morph
+    // completion. Helps isolate whether strokes are being dropped here vs
+    // during font-morph completion. Low overhead — one line per stroke.
+    // eslint-disable-next-line no-console
+    console.info('[stroke-trace] completeMorph:enter', {
+      strokesBeforeLen: this.strokes.length,
+      accumulatedLen: this.accumulatedStrokes.length,
+      pendingRawLen: this.pendingStroke.raw.length,
+      ts: performance.now(),
+    });
 
     // Auto-correct if enabled
     let raw = this.pendingStroke.raw;

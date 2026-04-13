@@ -116,6 +116,16 @@ export class CanvasRenderer implements IRenderer {
 
   /** Set or clear the FontMorphAnimator for text morph rendering */
   setFontMorphAnimator(animator: FontMorphAnimator | null): void {
+    // [stroke-trace] Renderer-side stroke count at font-morph boundary.
+    // If strokes vanish visually at font-morph completion but remain in
+    // the Glymo store, the discrepancy must be here.
+    // eslint-disable-next-line no-console
+    console.info('[stroke-trace] renderer:setFontMorphAnimator', {
+      animator: animator ? 'attach' : 'detach',
+      completedStrokesLen: this.completedStrokes.length,
+      cacheDirty: this.completedCacheDirty,
+      ts: performance.now(),
+    });
     this.fontMorphAnimator = animator;
   }
 

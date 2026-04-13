@@ -121,7 +121,12 @@ export class SpatialGrouper {
       // from being merged into the previous group (stroke-loss bug).
       const nowMs = performance.now();
       const gapMs = nowMs - active.lastStrokeEndMs;
-      const boundaryGapMs = this.opts.finalizeDelay / 2;
+      // When finalizeDelay is 0, the boundary is effectively disabled (no time
+      // gap ever exceeds zero) — keep accumulation working for callers that
+      // opt out of time-based boundaries.
+      const boundaryGapMs = this.opts.finalizeDelay > 0
+        ? this.opts.finalizeDelay / 2
+        : Infinity;
 
       if (gapMs > boundaryGapMs) {
         this.doFinalize(active);
