@@ -23,7 +23,15 @@ export class SegmentStage implements PipelineStage {
   /** Whether the MAX_POINTS warning has already been emitted for the current stroke. */
   private capWarned = false;
 
-  /** Accumulate points during drawing (capped at MAX_POINTS). */
+  /**
+   * Accumulate points during drawing (capped at MAX_POINTS).
+   *
+   * On overflow, further incoming points are silently dropped — FIFO-freeze,
+   * not ring buffer. This preserves the stroke's start anchor (load-bearing
+   * for morph matching) at the cost of losing the tail. Acceptable because
+   * MAX_POINTS=10000 ≈ 167s at 60Hz — longer than any realistic single
+   * stroke; the cap is an abuse-protection safety valve, not a normal path.
+   */
   process(input: StrokePoint): StrokePoint {
     if (this.isDrawing) {
       if (this.currentPoints.length < MAX_POINTS) {

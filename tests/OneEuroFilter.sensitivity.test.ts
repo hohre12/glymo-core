@@ -10,7 +10,7 @@
 // gate, not a behaviour test. To update defaults, regenerate the snapshot
 // AND get explicit design approval.
 
-import { OneEuroFilter } from '../src/filter/OneEuroFilter.js';
+import { BETA, D_CUTOFF, MIN_CUTOFF, OneEuroFilter } from '../src/filter/OneEuroFilter.js';
 
 // ── Fixture: deterministic 10-point stroke ─────────────────────────────
 // Slow diagonal with small jitter, 16 ms (~60 fps) intervals.
@@ -46,6 +46,16 @@ const EXPECTED: ReadonlyArray<{ x: number; y: number }> = [
 const EPS = 1e-6;
 
 describe('OneEuroFilter default-parameter snapshot (regression gate)', () => {
+  // Hard value gate — cannot be bypassed by regenerating the numeric snapshot.
+  // Any change to the constants in OneEuroFilter.ts fails this assertion
+  // immediately, making a parameter change a visible PR diff that must be
+  // justified (CLAUDE.md "no parameter changes without testing" rule).
+  it('locks OneEuroFilter parameter defaults (CLAUDE.md prohibition)', () => {
+    expect(MIN_CUTOFF).toBe(1.0);
+    expect(BETA).toBe(0.007);
+    expect(D_CUTOFF).toBe(1.0);
+  });
+
   it('matches the locked smoothed output to 1e-6 precision', () => {
     // Two independent 1-D filters: one per axis (matches Stabilize stage usage).
     const fx = new OneEuroFilter();

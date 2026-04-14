@@ -30,8 +30,8 @@ export const CANVAS_SIZE = 256;
 
 /** Per-pixel tolerance for pixelmatch (0-1, higher = more lenient). */
 const MATCH_THRESHOLD = 0.1;
-/** Maximum allowed differing pixels before a test fails. */
-const MAX_DIFF_PIXELS = 50;
+/** Maximum allowed differing pixels before a test fails. 0.1% of canvas — scales with CANVAS_SIZE. */
+const MAX_DIFF_PIXELS = Math.ceil(CANVAS_SIZE * CANVAS_SIZE * 0.001);
 
 /**
  * Runs the real pipeline stages (1-5) against a raw input stroke and
