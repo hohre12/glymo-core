@@ -1,11 +1,15 @@
 import { RawInputPoint, StrokePoint } from '../types.js';
 import { EventBus } from '../state/EventBus.js';
 /**
- * Orchestrates the 6-stage pipeline:
+ * Orchestrates stages 1-5 of the 6-stage pipeline:
  * Capture -> Stabilize -> Pressure -> Segment -> Smooth
  *
- * Processes points sequentially through real-time stages (1-4),
- * then applies batch stages (5) on stroke finalization.
+ * Stage 6 (Effect) is applied by the renderer (see CanvasRenderer /
+ * WebGPURenderer) at paint time, not by this engine.
+ *
+ * Processes points sequentially through real-time stages (1-3) and
+ * accumulates them in Segment (stage 4); batch stages (Pressure taper
+ * + Smooth) run on stroke finalization in penUp().
  */
 export declare class PipelineEngine {
     private readonly captureStage;

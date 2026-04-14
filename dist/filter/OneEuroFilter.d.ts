@@ -1,3 +1,9 @@
+/** Minimum cutoff frequency (Hz). Strong smoothing at rest. */
+export declare const MIN_CUTOFF = 1;
+/** Speed coefficient. Smoothing release during fast movement. */
+export declare const BETA = 0.007;
+/** Derivative cutoff frequency. Usually fixed. */
+export declare const D_CUTOFF = 1;
 /**
  * 1D OneEuroFilter. Use one instance per axis (X and Y independently).
  *
