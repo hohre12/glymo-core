@@ -137,22 +137,6 @@ export class CascadingRecognizer {
   }
 
   notifyStrokeStart(): void {
-    // If the active group has already been recognized (API returned a result),
-    // use a tighter time threshold to finalize — the character is likely complete.
-    const activeId = this.grouper.getActiveGroupId();
-    if (activeId != null) {
-      const state = this.groupState.get(activeId);
-      if (state?.result) {
-        const lastMs = this.grouper.getActiveGroupLastStrokeMs();
-        const gap = performance.now() - lastMs;
-        const params = LANG_PARAMS[this.language] ?? DEFAULT_PARAMS;
-        // Recognized group: finalize at half the delay (e.g., 750ms for Korean)
-        if (gap >= params.finalizeDelay * 0.5) {
-          this.grouper.finalizeGroupById(activeId);
-          return;
-        }
-      }
-    }
     this.grouper.notifyStrokeStart();
   }
 
