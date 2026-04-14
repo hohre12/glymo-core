@@ -86,21 +86,27 @@ export class SpatialGrouper {
     }
   }
 
-  /** Signal that a new stroke started — resets the time-boundary reference
-   *  and reschedules finalize timers so the group stays alive while the user
-   *  is actively drawing.
-   *
-   *  Without this, camera/air input always exceeds the time boundary (600ms EN)
-   *  because hand movement between strokes naturally takes > 600ms. */
+  /** Signal that a new stroke started.
+   *  If enough time has passed (>= finalizeDelay), the group is finalized
+   *  immediately — the user has moved on to a new character.
+   *  Otherwise, cancels the timer (NOT reschedule) so it won't fire while
+   *  the user is mid-stroke. Timer resumes when feedStroke is called. */
   notifyStrokeStart(): void {
     if (this.destroyed) return;
     const now = performance.now();
     for (const g of this.groups) {
       if (!g.finalized) {
-        g.lastStrokeEndMs = now;
-        // Reschedule (not just cancel) — the user is actively interacting,
-        // so push the finalize deadline forward by a full finalizeDelay.
-        this.scheduleFinalizeTimer(g);
+        const gap = now - g.lastStrokeEndMs;
+        if (this.opts.finalizeDelay > 0 && gap >= this.opts.finalizeDelay) {
+          this.doFinalize(g);
+        } else {
+          // Cancel timer — no reschedule until stroke completes (feedStroke)
+          if (g.finalizeTimer) {
+            clearTimeout(g.finalizeTimer);
+            g.finalizeTimer = null;
+          }
+          g.lastStrokeEndMs = now;
+        }
       }
     }
   }
@@ -255,6 +261,16 @@ export class SpatialGrouper {
   /** Get count of active (non-finalized) groups */
   get activeGroupCount(): number {
     return this.groups.filter(g => !g.finalized).length;
+  }
+
+  /** Get the last active (non-finalized) group's id, or undefined */
+  getActiveGroupId(): number | undefined {
+    return this.lastActiveGroup()?.id;
+  }
+
+  /** Get the last active group's lastStrokeEndMs, or 0 */
+  getActiveGroupLastStrokeMs(): number {
+    return this.lastActiveGroup()?.lastStrokeEndMs ?? 0;
   }
 
   // ── Private helpers ──────────────────────────────────────────────────
