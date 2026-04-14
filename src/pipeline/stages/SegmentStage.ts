@@ -3,6 +3,9 @@ import type { PipelineStage, StrokePoint } from '../../types.js';
 /** Minimum number of points for a valid stroke */
 const MIN_POINTS_PER_STROKE = 3;
 
+/** Hard cap on in-memory points per stroke. 10000 ≈ 167 s at 60 Hz — longer than any realistic single stroke; protects against runaway pen-stuck-down input. */
+export const MAX_POINTS = 10000;
+
 /**
  * Stage 4: SEGMENT (design.md SS4.4)
  *
@@ -15,11 +18,27 @@ export class SegmentStage implements PipelineStage {
 
   private currentPoints: StrokePoint[] = [];
   private isDrawing = false;
+  /** Points dropped after the buffer hit MAX_POINTS during the current stroke. */
+  private droppedThisStroke = 0;
+  /** Whether the MAX_POINTS warning has already been emitted for the current stroke. */
+  private capWarned = false;
 
-  /** Accumulate points during drawing */
+  /** Accumulate points during drawing (capped at MAX_POINTS). */
   process(input: StrokePoint): StrokePoint {
     if (this.isDrawing) {
-      this.currentPoints.push({ ...input });
+      if (this.currentPoints.length < MAX_POINTS) {
+        this.currentPoints.push({ ...input });
+      } else {
+        this.droppedThisStroke += 1;
+        if (!this.capWarned) {
+          // Emit exactly once per stroke the first time we clip the buffer.
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[SegmentStage] stroke exceeded MAX_POINTS=${MAX_POINTS}; further points will be dropped for this stroke.`,
+          );
+          this.capWarned = true;
+        }
+      }
     }
     return input;
   }
@@ -28,6 +47,8 @@ export class SegmentStage implements PipelineStage {
   penDown(): void {
     this.isDrawing = true;
     this.currentPoints = [];
+    this.droppedThisStroke = 0;
+    this.capWarned = false;
   }
 
   /**
@@ -56,8 +77,15 @@ export class SegmentStage implements PipelineStage {
     return this.isDrawing;
   }
 
+  /** Number of points dropped because the MAX_POINTS cap was hit during the current stroke. Cleared on every penDown(). */
+  getDroppedCount(): number {
+    return this.droppedThisStroke;
+  }
+
   reset(): void {
     this.currentPoints = [];
     this.isDrawing = false;
+    this.droppedThisStroke = 0;
+    this.capWarned = false;
   }
 }
