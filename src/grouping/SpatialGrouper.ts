@@ -86,13 +86,21 @@ export class SpatialGrouper {
     }
   }
 
-  /** Cancel all pending finalize timers — call when a new stroke STARTS drawing */
+  /** Signal that a new stroke started — resets the time-boundary reference
+   *  and reschedules finalize timers so the group stays alive while the user
+   *  is actively drawing.
+   *
+   *  Without this, camera/air input always exceeds the time boundary (600ms EN)
+   *  because hand movement between strokes naturally takes > 600ms. */
   notifyStrokeStart(): void {
     if (this.destroyed) return;
+    const now = performance.now();
     for (const g of this.groups) {
-      if (!g.finalized && g.finalizeTimer) {
-        clearTimeout(g.finalizeTimer);
-        g.finalizeTimer = null;
+      if (!g.finalized) {
+        g.lastStrokeEndMs = now;
+        // Reschedule (not just cancel) — the user is actively interacting,
+        // so push the finalize deadline forward by a full finalizeDelay.
+        this.scheduleFinalizeTimer(g);
       }
     }
   }
@@ -113,55 +121,35 @@ export class SpatialGrouper {
     const active = this.lastActiveGroup();
 
     if (active) {
-      // Time-based boundary: if the inter-stroke pause exceeds half the
-      // finalize delay, the user has visibly paused and is probably starting
-      // a new character. Finalize the current group immediately and fall
-      // through to the "start new group" branch, regardless of spatial
-      // proximity. This prevents the first stroke of the next character
-      // from being merged into the previous group (stroke-loss bug).
-      const nowMs = performance.now();
-      const gapMs = nowMs - active.lastStrokeEndMs;
-      // When finalizeDelay is 0, the boundary is effectively disabled (no time
-      // gap ever exceeds zero) — keep accumulation working for callers that
-      // opt out of time-based boundaries.
-      const boundaryGapMs = this.opts.finalizeDelay > 0
-        ? this.opts.finalizeDelay / 2
-        : Infinity;
+      // Check if new stroke is near the active group
+      // Capped to prevent snowball: bigger group → bigger threshold → catches more → repeat
+      const threshold = Math.min(
+        Math.max(
+          Math.max(active.bbox.width, active.bbox.height) * this.opts.proximityFactor,
+          this.opts.minProximityPx,
+        ),
+        this.opts.maxProximityPx,
+      );
 
-      if (gapMs > boundaryGapMs) {
-        this.doFinalize(active);
-        // fall through to "start new group" below
-      } else {
-        // Check if new stroke is near the active group
-        // Capped to prevent snowball: bigger group → bigger threshold → catches more → repeat
-        const threshold = Math.min(
-          Math.max(
-            Math.max(active.bbox.width, active.bbox.height) * this.opts.proximityFactor,
-            this.opts.minProximityPx,
-          ),
-          this.opts.maxProximityPx,
-        );
+      const near = bboxNear(cssBbox, active.bbox, threshold);
 
-        const near = bboxNear(cssBbox, active.bbox, threshold);
-
-        if (near) {
-          // Add to existing group
-          active.strokes.push(cssStroke);
-          active.bbox = combineBbox(active.bbox, cssBbox);
-          active.lastStrokeEndMs = nowMs;
-          // Cancel pending finalize timer
-          if (active.finalizeTimer) {
-            clearTimeout(active.finalizeTimer);
-            active.finalizeTimer = null;
-          }
-          this.opts.onGroupUpdated?.(active);
-          this.scheduleFinalizeTimer(active);
-          return;
+      if (near) {
+        // Add to existing group
+        active.strokes.push(cssStroke);
+        active.bbox = combineBbox(active.bbox, cssBbox);
+        active.lastStrokeEndMs = performance.now();
+        // Cancel pending finalize timer
+        if (active.finalizeTimer) {
+          clearTimeout(active.finalizeTimer);
+          active.finalizeTimer = null;
         }
-
-        // New stroke is far away — finalize previous group immediately
-        this.doFinalize(active);
+        this.opts.onGroupUpdated?.(active);
+        this.scheduleFinalizeTimer(active);
+        return;
       }
+
+      // New stroke is far away — finalize previous group immediately
+      this.doFinalize(active);
     }
 
     // Start new group
