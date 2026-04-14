@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Glymo pre-commit: block staged .env / .env.local / .env.production.
+# See scripts/check-env-staged.mjs for the exhaustive forbidden list.
+npm run check:env-staged --silent

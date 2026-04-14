@@ -6,13 +6,13 @@ const TWO_PI = 2 * Math.PI;
 // ── Tuned Parameters (IMMUTABLE) ─────────────────────
 
 /** Minimum cutoff frequency (Hz). Strong smoothing at rest. */
-const MIN_CUTOFF = 1.0;
+export const MIN_CUTOFF = 1.0;
 
 /** Speed coefficient. Smoothing release during fast movement. */
-const BETA = 0.007;
+export const BETA = 0.007;
 
 /** Derivative cutoff frequency. Usually fixed. */
-const D_CUTOFF = 1.0;
+export const D_CUTOFF = 1.0;
 
 // ── Filter Implementation ────────────────────────────
 
