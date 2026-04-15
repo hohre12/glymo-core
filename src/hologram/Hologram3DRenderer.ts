@@ -646,16 +646,16 @@ export class Hologram3DRenderer {
     };
   }
 
-  /** Fallback: render CJK character to a canvas texture and apply to extruded shape */
+  /** Fallback: render CJK character to a canvas texture on a plane with TSL alpha */
   private createTextureCharMesh(
     char: string,
     front: { material: any; uTime: any; uTransition: any },
     side: { material: any; uTime: any; uTransition: any },
   ) {
-    if (!THREE) return null;
+    if (!THREE || !tsl) return null;
 
-    // Render character to a 2D canvas
-    const texSize = 128;
+    // Render character to a 2D canvas (white on transparent)
+    const texSize = 256;
     const offscreen = document.createElement('canvas');
     offscreen.width = texSize;
     offscreen.height = texSize;
@@ -664,41 +664,69 @@ export class Hologram3DRenderer {
 
     ctx.clearRect(0, 0, texSize, texSize);
     ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${texSize * 0.7}px ${KOREAN_FONT_STACK}`;
+    ctx.font = `bold ${texSize * 0.75}px ${KOREAN_FONT_STACK}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(char, texSize / 2, texSize / 2);
 
     // Create Three.js texture from canvas
-    const texture = new THREE.CanvasTexture(offscreen);
-    texture.needsUpdate = true;
+    const tex = new THREE.CanvasTexture(offscreen);
+    tex.needsUpdate = true;
 
-    // Create a front-face material that combines the hologram effect with the texture alpha
-    const frontMat = front.material.clone();
+    // Build a TSL-based front material that masks opacity by the texture alpha.
+    // We re-derive the hologram look here so the texture alpha integrates
+    // directly into the opacityNode (standard alphaMap is ignored by NodeMaterial).
+    const { Fn, float, vec3, uniform: tslUniform, color: tslColor,
+            positionWorld, normalWorld, cameraPosition, sin, smoothstep, abs, dot, pow,
+            clamp: tslClamp, texture: tslTexture, uv } = tsl;
+
+    const uTime = tslUniform(0.0);
+    const uTransition = tslUniform(0.0);
+    const holoColor = new THREE.Color(0x00bbff);
+
+    const fresnel = Fn(() => {
+      const viewDir = cameraPosition.sub(positionWorld).normalize();
+      const nDotV = abs(dot(normalWorld, viewDir));
+      return pow(float(1.0).sub(nDotV), float(3.0));
+    });
+    const scanline = Fn(() => {
+      const raw = sin(positionWorld.y.mul(60.0).sub(uTime.mul(4.0))).mul(0.5).add(0.5);
+      return smoothstep(float(0.2), float(0.8), raw).mul(0.25);
+    });
+    const flicker = Fn(() => {
+      return sin(uTime.mul(6.0)).mul(0.06).add(sin(uTime.mul(11.3)).mul(0.04));
+    });
+
+    // Sample texture alpha from the canvas
+    const texAlpha = tslTexture(tex, uv()).a;
+
+    const frontMat = new THREE.MeshStandardNodeMaterial();
     frontMat.transparent = true;
-    frontMat.alphaMap = texture;
-    frontMat.alphaTest = 0.1;
+    frontMat.depthWrite = false;
+    frontMat.side = THREE.DoubleSide;
+    frontMat.colorNode = tslColor(holoColor).add(fresnel().mul(0.8)).add(vec3(float(0.1), float(0.2), float(0.3)));
+    frontMat.opacityNode = tslClamp(
+      float(0.92).add(fresnel().mul(0.08)).sub(scanline()).add(flicker()).mul(uTransition).mul(texAlpha),
+      float(0.0),
+      float(1.0),
+    );
+    frontMat.emissiveNode = tslColor(holoColor).mul(fresnel().mul(0.7).add(0.35));
 
-    // Use a box geometry with slight depth for 3D feel
-    const geometry = new THREE.BoxGeometry(1.2, 1.2, 0.35);
-    const mesh = new THREE.Mesh(geometry, [
-      side.material,   // +x
-      side.material,   // -x
-      side.material,   // +y
-      side.material,   // -y
-      frontMat,        // +z (front face with text)
-      front.material,  // -z (back)
-    ]);
+    // Single plane with DoubleSide — the texture alpha masks the character shape.
+    // No side/back geometry needed; DoubleSide renders both faces, and slight
+    // depth perception comes from the 3D rotation applied by the controller.
+    const planeGeo = new THREE.PlaneGeometry(1.2, 1.2);
+    const frontMesh = new THREE.Mesh(planeGeo, frontMat);
 
     const group = new THREE.Group();
-    group.add(mesh);
+    group.add(frontMesh);
 
     return {
       group,
       frontMat: front.material,
       sideMat: side.material,
-      uTime: front.uTime,
-      uTransition: front.uTransition,
+      uTime,
+      uTransition,
       sideUTime: side.uTime,
       sideUTransition: side.uTransition,
     };

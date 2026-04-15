@@ -63,6 +63,6 @@ export declare class Hologram3DRenderer {
     private createHologramMaterial;
     /** Create a 3D character mesh with hologram materials */
     private createCharMesh;
-    /** Fallback: render CJK character to a canvas texture and apply to extruded shape */
+    /** Fallback: render CJK character to a canvas texture on a plane with TSL alpha */
     private createTextureCharMesh;
 }

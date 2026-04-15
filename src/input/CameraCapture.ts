@@ -468,6 +468,7 @@ export class CameraCapture implements InputCapture {
 
   private handleInitError(err: unknown): void {
     const error = err instanceof Error ? err : new Error(String(err));
+    console.error('[CameraCapture] init failed:', error.name, error.message, error);
     this.active = false;
     this.releaseCamera();
     this.onError(error);
