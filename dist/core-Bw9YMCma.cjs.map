@@ -1,1 +1,0 @@
-{"version":3,"file":"core-Bw9YMCma.cjs","names":[],"sources":["../__vite-optional-peer-dep:tesseract.js:@glymo/core"],"sourcesContent":["export default {};\nthrow new Error(`Could not resolve \"tesseract.js\" imported by \"@glymo/core\". Is it installed?`)"],"mappings":"AACA,MAAM,IAAI,MAAM,8EAAA"}
