@@ -146,8 +146,11 @@ export class CascadingRecognizer {
         const lastMs = this.grouper.getActiveGroupLastStrokeMs();
         const gap = performance.now() - lastMs;
         const params = LANG_PARAMS[this.language] ?? DEFAULT_PARAMS;
-        // Recognized group: finalize at half the delay (e.g., 750ms for Korean)
-        if (gap >= params.finalizeDelay * 0.5) {
+        // Recognized group: finalize at reduced delay.
+        // Korean needs more time for 받침 (final consonant): 70% of delay.
+        // English: 50% of delay.
+        const earlyFactor = this.language === 'ko' ? 0.7 : 0.5;
+        if (gap >= params.finalizeDelay * earlyFactor) {
           this.grouper.finalizeGroupById(activeId);
           return;
         }
@@ -252,12 +255,19 @@ export class CascadingRecognizer {
         // cannot join this group and cause re-recognition that loses the
         // next character's first stroke. See stroke-loss root cause in
         // docs/execution-plan.md.
-        const confidenceHigh = state.stableCount >= 2 && text.length === 1;
+        //
+        // Korean requires higher thresholds: a syllable like 녕 needs 3+ strokes,
+        // and intermediate forms (녀) are valid characters too. stableCount >= 2
+        // fires too early — the user is still adding the final consonant (받침).
+        const isKorean = this.language === 'ko';
+        const stableThreshold = isKorean ? 4 : 2;
+        const minStrokes = isKorean ? 4 : 2;
+        const confidenceHigh = state.stableCount >= stableThreshold && text.length === 1;
         if (
           confidenceHigh
           && !state.displayed
           && !state.earlyCommitted
-          && strokeCountNow >= 2
+          && strokeCountNow >= minStrokes
         ) {
           state.earlyCommitted = true;
           // Mark recognizing=false before finalize so UI clears its spinner.
