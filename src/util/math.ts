@@ -19,10 +19,15 @@ export function distance(a: Point, b: Point): number {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-/** Convert hex color string to RGB object */
+/** Convert hex color string (3-char or 6-char) to RGB object */
 export function hexToRgb(hex: string): RGB {
   const cleaned = hex.startsWith('#') ? hex.slice(1) : hex;
-  const value = parseInt(cleaned, HEX_RADIX);
+  // Expand 3-char shorthand (#fff → ffffff)
+  const full =
+    cleaned.length === 3
+      ? cleaned[0]! + cleaned[0]! + cleaned[1]! + cleaned[1]! + cleaned[2]! + cleaned[2]!
+      : cleaned;
+  const value = parseInt(full, HEX_RADIX);
   return {
     r: (value >> 16) & RGB_MAX,
     g: (value >> 8) & RGB_MAX,

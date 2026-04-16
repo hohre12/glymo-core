@@ -51,6 +51,7 @@ export class CanvasRenderer implements IRenderer {
   private morphAnimator: MorphAnimator | null = null;
   private fontMorphAnimator: FontMorphAnimator | null = null;
   private backgroundMode: 'solid' | 'transparent' = 'solid';
+  private backgroundColor = '#000000';
   private morphBurstFired = false;
   private lastSparkleSpawn = 0;
   private static readonly SPARKLE_INTERVAL = 120; // ms between sparkle particle spawns
@@ -149,9 +150,14 @@ export class CanvasRenderer implements IRenderer {
     this.completedCacheDirty = true;
   }
 
-  /** Set background rendering mode — 'transparent' skips the black fill */
+  /** Set background rendering mode — 'transparent' skips the fill */
   setBackgroundMode(mode: 'solid' | 'transparent'): void {
     this.backgroundMode = mode;
+  }
+
+  /** Set background color (hex string) */
+  setBackgroundColor(color: string): void {
+    this.backgroundColor = color;
   }
 
   /** Add a completed stroke for rendering */
@@ -318,7 +324,7 @@ export class CanvasRenderer implements IRenderer {
     this.activePoints = this.getActivePointsFn?.() ?? [];
 
     // Layer 0 — Background
-    renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode);
+    renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode, this.backgroundColor);
 
     // Layer 5 — Fills (below strokes, with object animation transforms)
     renderFills(this.ctx, this.fills, this.objectStore, this.strokeAnimator);

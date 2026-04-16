@@ -30,6 +30,15 @@ export type {
 
 export { EFFECT_PRESETS } from './types.js';
 
+// ── Runtime Effect Registry ────────────────────────
+export {
+  registerEffect,
+  unregisterEffect,
+  getEffect,
+  listEffects,
+} from './effects/registry.js';
+export type { EffectId, EffectDefinition } from './effects/registry.js';
+
 export {
   type GIFExportOptions,
   type ReplayFn,

@@ -48,6 +48,9 @@ export class Glymo {
   private readonly stateMachine: SessionStateMachine;
   private webgpuAvailable = false;
 
+  private backgroundMode: 'solid' | 'transparent' = 'solid';
+  private backgroundColor = '#000000';
+
   private strokes: Stroke[] = [];
   private fills: Fill[] = [];
   private currentEffect: EffectPresetName;
@@ -850,7 +853,15 @@ export class Glymo {
    */
   setBackgroundMode(mode: 'solid' | 'transparent'): void {
     this.assertNotDestroyed();
+    this.backgroundMode = mode;
     this.renderer.setBackgroundMode(mode);
+  }
+
+  /** Set the background color (hex string). Only visible when mode is 'solid'. */
+  setBackgroundColor(color: string): void {
+    this.assertNotDestroyed();
+    this.backgroundColor = color;
+    this.renderer.setBackgroundColor(color);
   }
 
   // ── Canvas ─────────────────────────────────────────
@@ -1358,6 +1369,8 @@ export class Glymo {
     this.renderer = newRenderer ?? new CanvasRenderer(this.canvas, this.options.pixelRatio);
     this.renderer.setEventBus(this.eventBus);
     this.renderer.setEffect(this.currentEffect);
+    this.renderer.setBackgroundMode(this.backgroundMode);
+    this.renderer.setBackgroundColor(this.backgroundColor);
     this.renderer.setActivePointsSource(() => this.pipeline.getActivePoints());
     this.wireStrokeAnimator();
     this.wireObjectStore();

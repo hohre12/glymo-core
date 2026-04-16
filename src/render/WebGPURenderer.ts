@@ -10,7 +10,7 @@ import type { OverlayText } from '../text/types.js';
 // ── Constants ────────────────────────────────────────
 
 const INIT_TIMEOUT_MS = 2000;
-const BG_COLOR: GPUColor = { r: 0, g: 0, b: 0, a: 1 };
+const DEFAULT_BG_COLOR: GPUColor = { r: 0, g: 0, b: 0, a: 1 };
 const ACTIVE_DOT_COLOR = '#10b981';
 const ACTIVE_DOT_RADIUS = 3;
 
@@ -177,6 +177,10 @@ export class WebGPURenderer implements IRenderer {
   private overlayCanvas: HTMLCanvasElement | null = null;
   private overlayCtx: CanvasRenderingContext2D | null = null;
 
+  private bgTransparent = false;
+  private backgroundColor = '#000000';
+  private parsedBgColor: GPUColor = { ...DEFAULT_BG_COLOR };
+
   private initialized = false;
 
   constructor(canvas: HTMLCanvasElement, dpr: number = 1) {
@@ -254,8 +258,17 @@ export class WebGPURenderer implements IRenderer {
   setEffect(name: EffectPresetName): void { this.activeEffect = name; }
   getEffect(): EffectPresetName { return this.activeEffect; }
   getStrokeCount(): number { return this.completedStrokes.length; }
-  /** No-op for WebGPU renderer — background is always cleared by the GPU load op */
-  setBackgroundMode(_mode: 'solid' | 'transparent'): void { /* GPU load op handles clear */ }
+  /** Set background mode — 'transparent' clears with alpha 0 so layers below show through */
+  setBackgroundMode(mode: 'solid' | 'transparent'): void {
+    this.bgTransparent = mode === 'transparent';
+  }
+
+  /** Set background color (hex string, e.g. '#000000' or '#ffffff') */
+  setBackgroundColor(color: string): void {
+    this.backgroundColor = color;
+    const rgb = hexToRgb(color);
+    this.parsedBgColor = { r: rgb.r / 255, g: rgb.g / 255, b: rgb.b / 255, a: 1 };
+  }
 
   destroy(): void {
     this.stop();
@@ -370,7 +383,7 @@ export class WebGPURenderer implements IRenderer {
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
         view: texture.createView(),
-        clearValue: BG_COLOR,
+        clearValue: this.bgTransparent ? { r: 0, g: 0, b: 0, a: 0 } : this.parsedBgColor,
         loadOp: 'clear' as GPULoadOp,
         storeOp: 'store' as GPUStoreOp,
       }],

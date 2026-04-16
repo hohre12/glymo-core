@@ -83,6 +83,9 @@ export interface IRenderer {
   /** Set background rendering mode */
   setBackgroundMode(mode: 'solid' | 'transparent'): void;
 
+  /** Set background color (hex string, e.g. '#000000' or '#ffffff') */
+  setBackgroundColor(color: string): void;
+
   /** Destroy renderer and release resources */
   destroy(): void;
 
