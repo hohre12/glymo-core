@@ -116,9 +116,10 @@ describe('EffectRegistry — renderer integration', () => {
     registerEffect(id, { ...sampleDefinition, particleColor: sentinelColor });
 
     const system = new ParticleSystem();
+    const point = { x: 10, y: 10, t: 0, pressure: 1 };
     const stroke: Pick<Stroke, 'raw' | 'smoothed' | 'effect'> = {
-      raw: [{ x: 10, y: 10, pressure: 1, timestamp: 0, speed: 0 }],
-      smoothed: [{ x: 10, y: 10, pressure: 1, timestamp: 0, speed: 0 }],
+      raw: [point],
+      smoothed: [point],
       effect: id as Stroke['effect'],
     };
 
