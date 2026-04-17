@@ -1,5 +1,5 @@
 import type { EffectStyle, Particle, Stroke, StrokePoint } from '../types.js';
-import { EFFECT_PRESETS } from '../types.js';
+import { resolveEffect } from '../effects/registry.js';
 
 // ── Constants ────────────────────────────────────────
 
@@ -29,7 +29,7 @@ export class ParticleSystem {
 
   /** Spawn particles along a completed stroke with endpoint bursts */
   spawnForStroke(stroke: Stroke): void {
-    const style = EFFECT_PRESETS[stroke.effect];
+    const style = resolveEffect(stroke.effect);
     const points = stroke.smoothed;
     if (points.length === 0) return;
 
@@ -182,7 +182,7 @@ export class ParticleSystem {
 
   /** Spawn a dense burst of particles along the entire stroke at morph start */
   spawnBurstForMorph(stroke: Pick<Stroke, 'raw' | 'smoothed' | 'effect'>): void {
-    const style = EFFECT_PRESETS[stroke.effect];
+    const style = resolveEffect(stroke.effect);
     if (!style) return;
     const points = stroke.smoothed.length > 0 ? stroke.smoothed : stroke.raw;
 

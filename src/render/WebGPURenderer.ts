@@ -1,5 +1,6 @@
 import type { EffectPresetName, Fill, Stroke, StrokePoint } from '../types.js';
-import { EFFECT_PRESETS, GPU_EFFECT_NAMES } from '../types.js';
+import { GPU_EFFECT_NAMES } from '../types.js';
+import { resolveEffect } from '../effects/registry.js';
 import { hexToRgb } from '../util/math.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
 import type { FontMorphAnimator } from '../text/FontMorphAnimator.js';
@@ -392,7 +393,7 @@ export class WebGPURenderer implements IRenderer {
     // Render all completed strokes
     for (const stroke of this.completedStrokes) {
       if (stroke.smoothed.length < 2) continue;
-      const style = EFFECT_PRESETS[stroke.effect];
+      const style = resolveEffect(stroke.effect);
       this.drawStroke(pass, dev, stroke.smoothed, style, true);
       this.drawStroke(pass, dev, stroke.smoothed, style, false);
     }
@@ -403,7 +404,7 @@ export class WebGPURenderer implements IRenderer {
       const effect = animator.effect;
       const points = animator.update(_dt);
       if (points && points.length >= 2) {
-        const style = EFFECT_PRESETS[effect];
+        const style = resolveEffect(effect);
         this.drawStroke(pass, dev, points, style, true);
         this.drawStroke(pass, dev, points, style, false);
       }

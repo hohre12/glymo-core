@@ -1,7 +1,7 @@
 // ── Layer 10: Completed Strokes ──────────────────────
 
 import type { Stroke } from '../../types.js';
-import { EFFECT_PRESETS } from '../../types.js';
+import { resolveEffect } from '../../effects/registry.js';
 import { renderGlowPass, renderMainStroke } from '../StrokeRenderer.js';
 import type { StrokeOverrides } from '../StrokeRenderer.js';
 import type { StrokeAnimator } from '../../animation/StrokeAnimator.js';
@@ -63,7 +63,7 @@ export function renderCompletedStrokes(
     cacheCtx.clearRect(0, 0, cache.width, cache.height);
     for (const stroke of staticStrokes) {
       if (stroke.smoothed.length < 2) continue;
-      const style = EFFECT_PRESETS[stroke.effect];
+      const style = resolveEffect(stroke.effect);
       const overrides = getOverrides(stroke);
       renderGlowPass(cacheCtx, stroke.smoothed, style, 1.0, overrides);
       renderMainStroke(cacheCtx, stroke.smoothed, style, overrides);
@@ -82,7 +82,7 @@ export function renderCompletedStrokes(
       if (!transform) continue;
       if (stroke.smoothed.length < 2) continue;
 
-      const style = EFFECT_PRESETS[stroke.effect];
+      const style = resolveEffect(stroke.effect);
       const overrides = getOverrides(stroke);
 
       // Determine pivot: use object bbox center if stroke belongs to an object,

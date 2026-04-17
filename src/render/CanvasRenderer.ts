@@ -1,5 +1,5 @@
 import type { EffectPresetName, Fill, Stroke, StrokePoint } from '../types.js';
-import { EFFECT_PRESETS } from '../types.js';
+import { resolveEffect } from '../effects/registry.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
 import type { FontMorphAnimator } from '../text/FontMorphAnimator.js';
@@ -346,7 +346,7 @@ export class CanvasRenderer implements IRenderer {
         this.ctx,
         this.selectionManager.getSelectedIds(),
         this.objectStore,
-        EFFECT_PRESETS[this.activeEffect].color,
+        resolveEffect(this.activeEffect).color,
         timestamp,
         this.dpr,
       );
@@ -365,7 +365,7 @@ export class CanvasRenderer implements IRenderer {
     renderOverlayText(this.ctx, this.overlayTexts, performance.now());
 
     // Layer 30 — Active stroke
-    renderActiveStroke(this.ctx, this.activePoints, EFFECT_PRESETS[this.activeEffect]);
+    renderActiveStroke(this.ctx, this.activePoints, resolveEffect(this.activeEffect));
 
     // Sparkle particle spawning (throttled)
     this.spawnSparkleParticles(timestamp);
@@ -434,7 +434,7 @@ export class CanvasRenderer implements IRenderer {
     for (const id of sparkleIds) {
       const stroke = this.completedStrokes.find((s) => s.id === id);
       if (!stroke || stroke.smoothed.length < 2) continue;
-      const style = EFFECT_PRESETS[stroke.effect];
+      const style = resolveEffect(stroke.effect);
       this.particleSystem.spawnSparkleAlongStroke(stroke.smoothed, style.particleColor);
     }
   }

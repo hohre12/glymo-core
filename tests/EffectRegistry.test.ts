@@ -3,9 +3,12 @@ import {
   unregisterEffect,
   getEffect,
   listEffects,
+  resolveEffect,
   type EffectDefinition,
 } from '../src/effects/registry.js';
 import { EFFECT_PRESETS } from '../src/types.js';
+import { ParticleSystem } from '../src/render/ParticleSystem.js';
+import type { Stroke } from '../src/types.js';
 
 const sampleDefinition: EffectDefinition = {
   color: '#123456',
@@ -73,6 +76,57 @@ describe('EffectRegistry — registerEffect', () => {
     const malformed = { color: '#fff' } as unknown as EffectDefinition;
     expect(() => registerEffect('test:malformed', malformed)).toThrow(TypeError);
     expect(getEffect('test:malformed')).toBeUndefined();
+  });
+});
+
+// ── resolveEffect ─────────────────────────────────────
+
+describe('EffectRegistry — resolveEffect', () => {
+  const id = 'test:resolve-registered';
+
+  afterEach(() => {
+    unregisterEffect(id);
+  });
+
+  it('returns the registered definition when the id exists', () => {
+    registerEffect(id, sampleDefinition);
+    expect(resolveEffect(id)).toBe(sampleDefinition);
+  });
+
+  it('falls back to neon when the id is unknown', () => {
+    expect(resolveEffect('test:unknown-resolve')).toBe(EFFECT_PRESETS.neon);
+  });
+
+  it('seeded presets resolve to their EFFECT_PRESETS entry', () => {
+    expect(resolveEffect('liquid')).toBe(EFFECT_PRESETS.liquid);
+  });
+});
+
+// ── Renderer integration ──────────────────────────────
+
+describe('EffectRegistry — renderer integration', () => {
+  const id = 'test:renderer-integration';
+
+  afterEach(() => {
+    unregisterEffect(id);
+  });
+
+  it('ParticleSystem consumes a runtime-registered effect via resolveEffect', () => {
+    const sentinelColor = '#feedfa';
+    registerEffect(id, { ...sampleDefinition, particleColor: sentinelColor });
+
+    const system = new ParticleSystem();
+    const stroke: Pick<Stroke, 'raw' | 'smoothed' | 'effect'> = {
+      raw: [{ x: 10, y: 10, pressure: 1, timestamp: 0, speed: 0 }],
+      smoothed: [{ x: 10, y: 10, pressure: 1, timestamp: 0, speed: 0 }],
+      effect: id as Stroke['effect'],
+    };
+
+    system.spawnBurstForMorph(stroke);
+
+    const particles = (system as unknown as { particles: Array<{ color: string }> }).particles;
+    expect(particles.length).toBeGreaterThan(0);
+    expect(particles[0]!.color).toBe(sentinelColor);
   });
 });
 

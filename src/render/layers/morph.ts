@@ -1,7 +1,7 @@
 // ── Layer 20: Morphing Stroke ─────────────────────────
 
 import type { EffectPresetName, StrokePoint } from '../../types.js';
-import { EFFECT_PRESETS } from '../../types.js';
+import { resolveEffect } from '../../effects/registry.js';
 import { renderGlowPass, renderMainStroke } from '../StrokeRenderer.js';
 
 /** Data needed to drive the morph render pass */
@@ -29,7 +29,7 @@ export function renderMorphingStroke(
   // Glow intensification: peaks at 2.0 at the midpoint of the animation
   const intensityScale = 1.0 + Math.sin(progress * Math.PI) * 1.0;
 
-  const style = EFFECT_PRESETS[effect];
+  const style = resolveEffect(effect);
   renderGlowPass(ctx, points, style, intensityScale);
   renderMainStroke(ctx, points, style);
 }

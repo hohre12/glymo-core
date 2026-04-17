@@ -109,6 +109,36 @@ export function getEffect(id: EffectId): EffectDefinition | undefined {
   return registry.get(id);
 }
 
+/**
+ * Fallback effect id used by `resolveEffect` when the requested id is not
+ * registered. Must always be present in `EFFECT_PRESETS` so the fallback is
+ * guaranteed to exist at module load.
+ */
+const FALLBACK_EFFECT_ID: EffectPresetName = 'neon';
+
+/**
+ * Resolve an effect id to a definition, guaranteed non-undefined.
+ *
+ * Internal renderers call this on the render hot path — returning a fallback
+ * instead of `undefined` lets the call sites stay terse without scattering
+ * `?? EFFECT_PRESETS.neon` across the codebase. If you need the strict
+ * "was it registered?" semantics, call `getEffect()` instead.
+ *
+ * Fallback policy:
+ *  1. Registered definition for `id`, if any.
+ *  2. Registered definition for `'neon'` (the seeded preset — always present
+ *     because the seed loop inserts every `EFFECT_PRESETS` entry).
+ *  3. Raw `EFFECT_PRESETS.neon` (defensive — only reachable if someone
+ *     unregistered the seed, which is a test-only concern).
+ */
+export function resolveEffect(id: EffectId): EffectDefinition {
+  const hit = registry.get(id);
+  if (hit) return hit;
+  const seeded = registry.get(FALLBACK_EFFECT_ID);
+  if (seeded) return seeded;
+  return EFFECT_PRESETS[FALLBACK_EFFECT_ID];
+}
+
 /** List all currently registered effect ids (seed + runtime additions). */
 export function listEffects(): EffectId[] {
   return Array.from(registry.keys()) as EffectId[];

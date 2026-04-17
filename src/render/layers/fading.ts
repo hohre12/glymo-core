@@ -1,7 +1,7 @@
 // ── Layer 26: Fading Strokes ─────────────────────────
 
 import type { Stroke } from '../../types.js';
-import { EFFECT_PRESETS } from '../../types.js';
+import { resolveEffect } from '../../effects/registry.js';
 import { renderGlowPass, renderMainStroke } from '../StrokeRenderer.js';
 
 /** A stroke that is fading out before removal */
@@ -26,7 +26,7 @@ export function renderFadingStrokes(
     if (elapsed >= fadeDuration) return false;
 
     const alpha = 1.0 - (elapsed / fadeDuration);
-    const style = EFFECT_PRESETS[stroke.effect];
+    const style = resolveEffect(stroke.effect);
     const overrides = (stroke.customColor != null || stroke.customWidth != null)
       ? { customColor: stroke.customColor, customWidth: stroke.customWidth }
       : undefined;

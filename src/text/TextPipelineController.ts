@@ -1,7 +1,7 @@
 // ── Text Pipeline Controller ────────────────────────
 
 import type { StrokePoint, EffectPresetName } from '../types.js';
-import { EFFECT_PRESETS } from '../types.js';
+import { resolveEffect } from '../effects/registry.js';
 import type { EventBus } from '../state/EventBus.js';
 import type { SessionStateMachine } from '../state/SessionStateMachine.js';
 import type { TextModeConfig, OverlayText, TypographyMode } from './types.js';
@@ -136,7 +136,7 @@ export class TextPipelineController {
       if (this.typographyMode === 'overlay') {
         // Compute stroke bounding box
         const bbox = computeStrokeBounds(strokeArrays);
-        const style = EFFECT_PRESETS[this.effect];
+        const style = resolveEffect(this.effect);
 
         const overlayData: OverlayText = {
           text: text.trim(),
@@ -197,7 +197,7 @@ export class TextPipelineController {
     // Cancel any existing morph
     this.morphAnimator?.cancel();
 
-    const effectColor = EFFECT_PRESETS[this.effect].color;
+    const effectColor = resolveEffect(this.effect).color;
 
     const { FontMorphAnimator: FMA } = await import('./FontMorphAnimator.js');
     if (this.destroyed) return;

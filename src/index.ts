@@ -35,6 +35,7 @@ export {
   registerEffect,
   unregisterEffect,
   getEffect,
+  resolveEffect,
   listEffects,
 } from './effects/registry.js';
 export type { EffectId, EffectDefinition } from './effects/registry.js';

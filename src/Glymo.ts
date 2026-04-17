@@ -1,7 +1,8 @@
 // ── Glymo Main Class ────────────────────────────────
 
 import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
-import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES, EFFECT_PRESETS } from './types.js';
+import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES } from './types.js';
+import { resolveEffect } from './effects/registry.js';
 import { InputManager } from './input/InputManager.js';
 import { PipelineEngine } from './pipeline/PipelineEngine.js';
 import type { FinalizedStroke } from './pipeline/PipelineEngine.js';
@@ -1236,7 +1237,7 @@ export class Glymo {
       this.eventBus.emit('text:recognized', { text, confidence: 1.0, characters: [], processingTimeMs: 0 });
     }
 
-    const style = EFFECT_PRESETS[this.currentEffect];
+    const style = resolveEffect(this.currentEffect);
     this.renderer.setOverlayText({
       text,
       font: this.textPipeline.getFont(),
