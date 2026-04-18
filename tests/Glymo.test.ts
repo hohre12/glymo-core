@@ -6,6 +6,47 @@ import {
   type GIFOptions,
 } from '../src/index.js';
 
+// ── Node-env polyfills ────────────────────────────────
+// Glymo's internal renderer touches OffscreenCanvas during construction.
+// Vitest runs in the `node` environment here, so we stub a minimal shim
+// mirroring the pattern used in GlyphExtractor.test.ts.
+
+const mockOffscreenCtx = {
+  clearRect: () => {},
+  fillRect: () => {},
+  beginPath: () => {},
+  moveTo: () => {},
+  lineTo: () => {},
+  arc: () => {},
+  fill: () => {},
+  stroke: () => {},
+  save: () => {},
+  restore: () => {},
+  getImageData: () => ({ data: new Uint8ClampedArray(0), width: 0, height: 0 }),
+  drawImage: () => {},
+  fillStyle: '',
+  strokeStyle: '',
+  lineWidth: 1,
+  lineCap: 'round',
+  lineJoin: 'round',
+  globalAlpha: 1,
+};
+
+vi.stubGlobal(
+  'OffscreenCanvas',
+  class MockOffscreenCanvas {
+    width: number;
+    height: number;
+    constructor(w: number, h: number) {
+      this.width = w;
+      this.height = h;
+    }
+    getContext() {
+      return mockOffscreenCtx;
+    }
+  },
+);
+
 // ── Helpers ────────────────────────────────────────────
 
 function createMockCtx(): CanvasRenderingContext2D {
@@ -192,5 +233,44 @@ describe('Export and lifecycle methods', () => {
 
   it('destroy does not throw', () => {
     expect(() => glymo.destroy()).not.toThrow();
+  });
+});
+
+// ── loadStrokes (wire-format hydration) ──────────────
+
+describe('Glymo.loadStrokes', () => {
+  let glymo: Glymo;
+  beforeEach(() => { glymo = new Glymo(createMockCanvas()); });
+
+  it('hydrates strokes from the StrokeDoc wire shape', () => {
+    glymo.loadStrokes([
+      { points: [{ x: 0, y: 0 }, { x: 10, y: 10 }, { x: 20, y: 5, pressure: 0.5 }] },
+      { points: [{ x: 100, y: 100 }] },
+    ]);
+    const strokes = glymo.getStrokes();
+    expect(strokes).toHaveLength(2);
+    expect(strokes[0]!.raw).toHaveLength(3);
+    expect(strokes[1]!.raw).toHaveLength(1);
+  });
+
+  it('defaults missing pressure to 1.0 and synthesizes monotonic t', () => {
+    glymo.loadStrokes([{ points: [{ x: 0, y: 0 }, { x: 1, y: 1, pressure: 0.25 }] }]);
+    const pts = glymo.getStrokes()[0]!.raw;
+    expect(pts[0]!.pressure).toBe(1.0);
+    expect(pts[1]!.pressure).toBe(0.25);
+    expect(pts[0]!.t).toBe(0);
+    expect(pts[1]!.t).toBe(1);
+  });
+
+  it('replaces existing strokes on subsequent loads', () => {
+    glymo.loadStrokes([{ points: [{ x: 0, y: 0 }] }, { points: [{ x: 1, y: 1 }] }]);
+    expect(glymo.getStrokes()).toHaveLength(2);
+    glymo.loadStrokes([{ points: [{ x: 5, y: 5 }] }]);
+    expect(glymo.getStrokes()).toHaveLength(1);
+  });
+
+  it('accepts an empty array without throwing', () => {
+    expect(() => glymo.loadStrokes([])).not.toThrow();
+    expect(glymo.getStrokes()).toHaveLength(0);
   });
 });

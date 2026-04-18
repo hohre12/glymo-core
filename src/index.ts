@@ -23,6 +23,8 @@ export type {
   BatchPipelineStage,
   RenderLayer,
   Stroke,
+  StrokeDoc,
+  StrokeDocPoint,
   CanvasSession,
   GlymoError,
   SessionState,

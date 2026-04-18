@@ -1,6 +1,6 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
+import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, StrokeDoc, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES } from './types.js';
 import { resolveEffect } from './effects/registry.js';
 import { InputManager } from './input/InputManager.js';
@@ -476,6 +476,54 @@ export class Glymo {
   getStrokes(): readonly Stroke[] {
     this.assertNotDestroyed();
     return this.strokes;
+  }
+
+  /**
+   * Hydrate the session from a pre-recorded stroke set (e.g. a project
+   * loaded from the server). Replaces all existing strokes and fills.
+   *
+   * The wire format is intentionally slim (`StrokeDoc` carries only `x`,
+   * `y`, optional `pressure`) so persistence does not leak capture-time
+   * invariants. Missing fields are filled in with safe defaults:
+   *   - `t` (timestamp) is synthesized monotonically per-stroke; wire
+   *     payloads never carry wall-clock timing and rendering does not
+   *     depend on it.
+   *   - `pressure` defaults to 1.0, the most common capture fallback when
+   *     hardware does not report pressure.
+   *
+   * Loaded strokes are rendered but are NOT wrapped into `GlymoObject`
+   * groups — undo/group semantics apply only to strokes drawn after load.
+   */
+  loadStrokes(docs: StrokeDoc[]): void {
+    this.assertNotDestroyed();
+    this.strokes = [];
+    this.renderer.clearAll();
+    for (const doc of docs) {
+      const stroke = this.strokeFromDoc(doc);
+      this.strokes.push(stroke);
+      this.renderer.addCompletedStroke(stroke);
+    }
+    this.renderer.markDirty();
+  }
+
+  /** Internal: convert a persisted StrokeDoc to an internal Stroke. */
+  private strokeFromDoc(doc: StrokeDoc): Stroke {
+    const points: StrokePoint[] = doc.points.map((p, i) => ({
+      x: p.x,
+      y: p.y,
+      t: i,
+      pressure: p.pressure ?? 1.0,
+    }));
+    return {
+      id: crypto.randomUUID(),
+      raw: points,
+      // Persisted points are treated as already pipeline-processed; skip
+      // re-running Chaikin here to avoid visual drift across save/load.
+      smoothed: points.map(p => ({ ...p })),
+      state: 'effected',
+      effect: this.currentEffect,
+      createdAt: Date.now(),
+    };
   }
 
   /** Get canvas dimensions */

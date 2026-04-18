@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-04-18
+
+### Added
+- `Glymo.loadStrokes(docs: StrokeDoc[]): void` — public hydration API that replaces the current stroke list from a wire-format payload. Used by project-load flows in consumer apps (e.g. `@glymo/ui` `<CanvasEngine initialStrokes>`) so saved work can round-trip through the server without exposing the internal `StrokePoint` shape.
+- `StrokeDoc` and `StrokeDocPoint` type exports — slim persistence/wire shape (`{ points: [{ x, y, pressure? }] }`) distinct from the richer runtime `StrokePoint` which carries `t` and `pressure` as required fields. `pressure` defaults to `1.0` when omitted; `t` is synthesized monotonically per-stroke on load.
+
+### Notes
+- Loaded strokes are marked `state: 'effected'` with `smoothed === raw` — we do not re-run the smoothing pipeline on hydration to avoid drift from the originally exported geometry.
+- Loaded strokes are not re-wrapped into `GlymoObject`s; the object store is only populated by live drawing sessions. Consumers that need object-level operations after hydration should re-run their own segmentation pass.
+
 ## [0.2.0] - 2026-04-07
 
 ### Added
@@ -52,5 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - Initial project scaffolding and repository setup
 
+[0.4.0]: https://github.com/hohre12/glymo-core/compare/v0.3.0...v0.4.0
 [0.2.0]: https://github.com/hohre12/glymo-core/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hohre12/glymo-core/releases/tag/v0.1.0

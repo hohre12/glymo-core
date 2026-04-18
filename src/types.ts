@@ -218,6 +218,29 @@ export interface GlymoError {
   recoverable: boolean;
 }
 
+// ── Persistence (wire format) ────────────────────────
+
+/**
+ * A single point in the serialized wire format used by server / client
+ * persistence layers. Intentionally slimmer than the internal runtime
+ * {@link StrokePoint} so the capture-time invariants (`t`, required
+ * `pressure`) do not leak into storage contracts.
+ */
+export interface StrokeDocPoint {
+  x: number;
+  y: number;
+  pressure?: number;
+}
+
+/**
+ * A single stroke in the serialized wire format. `@glymo/core` consumes
+ * this shape via {@link Glymo.loadStrokes} to rehydrate a session from a
+ * persisted project payload.
+ */
+export interface StrokeDoc {
+  points: StrokeDocPoint[];
+}
+
 // ── Effect Presets ───────────────────────────────────
 
 export type EffectPresetName =
