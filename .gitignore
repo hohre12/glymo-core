@@ -11,3 +11,6 @@ coverage/
 
 # Visual-regression diff artefacts — written next to goldens on failure.
 tests/visual/__snapshots__/*.diff.png
+
+# npm auth — never commit
+.npmrc
