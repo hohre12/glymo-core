@@ -807,6 +807,41 @@ export class Glymo {
     return this.selectionManager.count > 0;
   }
 
+  /**
+   * Single-select an object — clears any existing selection and selects
+   * only `objectId`. Used by features (Media Art per
+   * `docs/plans/media-art-mvp.md` D7) that operate on exactly one object
+   * at a time and need a stable single-select handle independent of the
+   * existing multi-select toggle behaviour.
+   *
+   * Validates the id against ObjectStore so callers cannot select a
+   * stale or never-existed object. Unknown ids leave selection unchanged
+   * and emit a single `console.warn` so corrupt upstream state surfaces
+   * without throwing.
+   */
+  selectObject(objectId: string): void {
+    this.assertNotDestroyed();
+    if (!this.objectStore.getObject(objectId)) {
+      console.warn(`[Glymo] selectObject: unknown objectId "${objectId}"`);
+      return;
+    }
+    this.selectionManager.clearSelection();
+    this.selectionManager.select(objectId);
+  }
+
+  /**
+   * Convenience: returns the single selected object id (or `null` when
+   * zero or multiple objects are selected). Pairs with
+   * {@link Glymo.selectObject} for features that operate on exactly one
+   * object at a time. Multi-select consumers should use
+   * {@link Glymo.getSelectedObjectIds} instead.
+   */
+  getSelectedObjectId(): string | null {
+    const ids = this.selectionManager.getSelectedIds();
+    if (ids.size !== 1) return null;
+    return ids.values().next().value ?? null;
+  }
+
   // ── Correction ────────────────────────────────────
 
   /** Apply endpoint snapping + overshoot trimming to a specific object */
