@@ -3,8 +3,21 @@
 // Extracted from landing/hooks/useHologram3DMesh.ts.
 // Self-contained Three.js WebGPU renderer for holographic 3D text.
 // No React dependency — operates on a plain HTMLCanvasElement.
+//
+// v0.7.0 added mesh mode (per docs/plans/media-art-mvp.md §5 D5): the same
+// renderer can show a single GLB mesh instead of per-character text. Mode
+// flag routes geometry construction; bloom + holo color + rotation/zoom/spread
+// effects are shared so text and media-art holograms feel like one product.
 
-import type { HologramChar, Hologram3DRendererOptions, HitTestResult } from './types.js';
+import type {
+  HologramChar,
+  Hologram3DRendererOptions,
+  HitTestResult,
+  MediaArtMeshState,
+  MeshSource,
+  MeshSourceDescriptor,
+} from './types.js';
+import { GltfMeshSource } from './sources/GltfMeshSource.js';
 
 // ── Lazy Three.js WebGPU imports ──────────────────────────────────────────────
 // Dynamically imported to keep initial bundle small and avoid SSR issues.
@@ -15,32 +28,45 @@ let FontClass: typeof import('three/examples/jsm/loaders/FontLoader.js').Font | 
 let tsl: typeof import('three/tsl') | null = null;
 let bloomFn: typeof import('three/addons/tsl/display/BloomNode.js').bloom | null = null;
 
-async function loadThreeDeps(): Promise<boolean> {
-  if (THREE) return true;
-  try {
-    const [
-      threeModule,
-      textGeoModule,
-      fontLoaderModule,
-      tslModule,
-      bloomModule,
-    ] = await Promise.all([
-      import('three/webgpu'),
-      import('three/examples/jsm/geometries/TextGeometry.js'),
-      import('three/examples/jsm/loaders/FontLoader.js'),
-      import('three/tsl'),
-      import('three/addons/tsl/display/BloomNode.js'),
-    ]);
-    THREE = threeModule;
-    TextGeometry = textGeoModule.TextGeometry;
-    FontClass = fontLoaderModule.Font;
-    tsl = tslModule;
-    bloomFn = bloomModule.bloom;
-    return true;
-  } catch (e) {
-    console.error('[Hologram3DRenderer] Failed to load Three.js WebGPU:', e);
-    return false;
-  }
+// Single in-flight promise — guarantees concurrent callers share one
+// dynamic-import chain instead of racing parallel imports (which under
+// Strict Mode dev OR vitest mocks can resolve to different module identities,
+// silently overwriting THREE between callers).
+let loadPromise: Promise<boolean> | null = null;
+
+function loadThreeDeps(): Promise<boolean> {
+  if (THREE) return Promise.resolve(true);
+  if (loadPromise) return loadPromise;
+  loadPromise = (async () => {
+    try {
+      const [
+        threeModule,
+        textGeoModule,
+        fontLoaderModule,
+        tslModule,
+        bloomModule,
+      ] = await Promise.all([
+        import('three/webgpu'),
+        import('three/examples/jsm/geometries/TextGeometry.js'),
+        import('three/examples/jsm/loaders/FontLoader.js'),
+        import('three/tsl'),
+        import('three/addons/tsl/display/BloomNode.js'),
+      ]);
+      THREE = threeModule;
+      TextGeometry = textGeoModule.TextGeometry;
+      FontClass = fontLoaderModule.Font;
+      tsl = tslModule;
+      bloomFn = bloomModule.bloom;
+      return true;
+    } catch (e) {
+      console.error('[Hologram3DRenderer] Failed to load Three.js WebGPU:', e);
+      // Allow a future caller to retry on a fresh promise — a transient
+      // network error on the addons CDN should not poison subsequent loads.
+      loadPromise = null;
+      return false;
+    }
+  })();
+  return loadPromise;
 }
 
 // ── Font loading URLs ─────────────────────────────────────────────────────────
@@ -101,6 +127,25 @@ export class Hologram3DRenderer {
   private spread = 1;
   private handActive = false;
   private enabled = true;
+
+  // ── Mesh mode (v0.7.0) ──
+  // 'text' (default) renders per-char meshes from the chars[] array.
+  // 'mesh' renders a single GLB scene loaded via setModel(). Mode is
+  // exclusive — switching disposes the prior mode's resources.
+  private mode: 'text' | 'mesh' = 'text';
+  private meshState: MediaArtMeshState | null = null;
+  /**
+   * Token for the most recent setModel() call. setModel awaits an async
+   * load; if the user picks a different model mid-load (or calls
+   * setModel(null), or the renderer is disposed) the in-flight load must
+   * not "win" by attaching its result. We compare loadToken before commit.
+   */
+  private loadToken = 0;
+  /** Per-frame uniform driver for the currently loaded mesh's media-art shader. */
+  private meshUTime: { value: number } | null = null;
+  private meshUTransition: { value: number } | null = null;
+  /** Animation mixer clock — separate from startTime so mixer pauses on dispose. */
+  private mixerClock: InstanceType<typeof import('three/webgpu').Clock> | null = null;
   // Note: color and font were removed — the renderer uses hardcoded hologram
   // color (0x00bbff) and loads its own 3D font file. If per-instance color/font
   // customization is needed later, add setter methods instead of constructor args.
@@ -183,6 +228,137 @@ export class Hologram3DRenderer {
     this.spread = 1;
     this.movedChars.clear();
     this.activeDragId = null;
+  }
+
+  // ── Mesh mode API (v0.7.0) ──────────────────────────────────────────────────
+
+  /**
+   * Switch the renderer to mesh mode and load a GLB asset. Pass `null` to
+   * return to text mode. Disposes the prior model (or text mesh map) before
+   * the new one is committed.
+   *
+   * Resolves with the loaded mesh state (for inspection — bbox useful for
+   * placement) or `null` if the load was superseded by a later setModel call,
+   * or if the renderer was disposed mid-load.
+   *
+   * Errors from the underlying MeshSource (network, parse, validation) reject
+   * the promise as a typed `GlymoError` — callers should fall back to text
+   * mode and surface a user-visible error.
+   */
+  async setModel(descriptor: MeshSourceDescriptor | null): Promise<MediaArtMeshState | null> {
+    if (this.destroyed) {
+      throw new Error('[Hologram3DRenderer] setModel called on disposed renderer');
+    }
+
+    const myToken = ++this.loadToken;
+
+    // ── Switch to text mode ────────────────────────────────────────────────
+    if (descriptor === null) {
+      this.disposeMeshState();
+      this.mode = 'text';
+      return null;
+    }
+
+    // ── Wait for renderer init (Three.js modules + WebGPU) ────────────────
+    const ready = await this.ready;
+    if (!ready || this.destroyed || myToken !== this.loadToken) return null;
+    if (!THREE || !tsl) return null;
+
+    // ── Construct + load the mesh source ──────────────────────────────────
+    const source = this.createMeshSource(descriptor);
+    let state: MediaArtMeshState;
+    try {
+      state = await source.load({ THREE, tsl });
+    } catch (err) {
+      // If we were superseded mid-load, swallow the error — the new load
+      // owns the slot. Otherwise propagate.
+      if (myToken !== this.loadToken || this.destroyed) return null;
+      throw err;
+    }
+
+    // ── Re-check token: a newer setModel() may have raced ahead ───────────
+    if (myToken !== this.loadToken || this.destroyed) {
+      // Dispose the just-loaded resources we will not be attaching.
+      try {
+        state.dispose();
+      } catch {
+        /* noop */
+      }
+      return null;
+    }
+
+    // ── Commit: dispose prior mesh, attach new one ────────────────────────
+    this.disposeMeshState();
+    this.meshState = state;
+    this.mode = 'mesh';
+
+    // The GltfMeshSource returns aggregate uniforms via non-enumerable
+    // props (see sources/GltfMeshSource.ts); they're our handle to drive
+    // the media-art shader treatment per frame.
+    const stateWithUniforms = state as MediaArtMeshState & {
+      uTime?: { value: number };
+      uTransition?: { value: number };
+    };
+    this.meshUTime = stateWithUniforms.uTime ?? null;
+    this.meshUTransition = stateWithUniforms.uTransition ?? null;
+
+    // Attach to scene under charContainer so the existing rotation/zoom
+    // pipeline applies untouched.
+    if (this.charContainer) {
+      this.charContainer.add(state.group as InstanceType<typeof import('three/webgpu').Object3D>);
+    }
+
+    // Initialize mixer clock if the GLB ships animations.
+    if (state.mixer && THREE) {
+      this.mixerClock = new THREE.Clock();
+    }
+
+    return state;
+  }
+
+  /** Current rendering mode — useful for tools that adapt picker UI. */
+  getMode(): 'text' | 'mesh' {
+    return this.mode;
+  }
+
+  /** Read-only handle to the current mesh state. Null in text mode. */
+  getMeshState(): MediaArtMeshState | null {
+    return this.meshState;
+  }
+
+  // ── Internal: mesh-mode helpers ─────────────────────────────────────────────
+
+  private createMeshSource(descriptor: MeshSourceDescriptor): MeshSource {
+    switch (descriptor.type) {
+      case 'gltf':
+        return new GltfMeshSource(descriptor);
+      default: {
+        // Exhaustiveness check — adding a new descriptor type forces this
+        // switch to be updated.
+        const _exhaustive: never = descriptor;
+        throw new Error(
+          `[Hologram3DRenderer] Unknown mesh source descriptor type: ${JSON.stringify(_exhaustive)}`,
+        );
+      }
+    }
+  }
+
+  private disposeMeshState(): void {
+    if (!this.meshState) return;
+    if (this.charContainer) {
+      this.charContainer.remove(
+        this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>,
+      );
+    }
+    try {
+      this.meshState.dispose();
+    } catch (err) {
+      console.error('[Hologram3DRenderer] Mesh dispose threw:', err);
+    }
+    this.meshState = null;
+    this.meshUTime = null;
+    this.meshUTransition = null;
+    this.mixerClock = null;
   }
 
   /** Find the nearest char to a CSS point using 3D raycasting, returns {id, dist} or null */
@@ -276,6 +452,18 @@ export class Hologram3DRenderer {
     const now = performance.now();
     const elapsed = (now - this.startTime) * 0.001;
     const transition = this.transition;
+
+    // ── Mesh mode (v0.7.0) — render single GLB ────────────────────────────
+    // Branches BEFORE the per-char loop so text-mode resources are not
+    // touched while mesh mode is active. Container rotation / zoom / pivot
+    // indicator at the end of this method run for both modes.
+    if (this.mode === 'mesh') {
+      this.renderMeshFrame(elapsed, transition);
+      this.applyContainerRotationAndZoom(elapsed, transition);
+      this.postProcessing!.render();
+      return;
+    }
+
     const chars = this.chars.filter(c => !c.isDeleting);
     const numChars = Math.min(chars.length, 20);
     const spread = this.spread;
@@ -403,18 +591,60 @@ export class Hologram3DRenderer {
       }
     }
 
-    // ── Camera/container rotation ──────────────────────
-    // When hands are active: user-controlled rotation only.
-    // When no hands: add gentle idle wobble on top.
+    this.applyContainerRotationAndZoom(elapsed, transition);
+
+    // ── Render with bloom ──────────────────────────────
+    this.postProcessing!.render();
+  }
+
+  /** Mesh-mode per-frame update — transforms one GLB scene. */
+  private renderMeshFrame(elapsed: number, transition: number): void {
+    if (!this.meshState || !THREE) return;
+
+    const group = this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>;
+
+    // Drive the media-art shader uniforms.
+    if (this.meshUTime) this.meshUTime.value = elapsed;
+    if (this.meshUTransition) this.meshUTransition.value = transition;
+
+    // Tick the animation mixer if this GLB shipped clips.
+    if (this.meshState.mixer && this.mixerClock) {
+      const dt = this.mixerClock.getDelta();
+      (this.meshState.mixer as { update: (dt: number) => void }).update(dt);
+    }
+
+    // Normalize scale so the largest bbox dimension maps to ~2 world units.
+    // Then `transition` fades the scale from 0 → 1 for entry. The picker /
+    // orchestrator (P4 MediaArtTransition) drives the eased transition curve.
+    const bb = this.meshState.bbox;
+    const maxDim = Math.max(
+      bb.max.x - bb.min.x,
+      bb.max.y - bb.min.y,
+      bb.max.z - bb.min.z,
+    );
+    const normalize = maxDim > 0 ? 2.0 / maxDim : 1.0;
+    const baseScale = normalize * transition;
+    group.scale.set(baseScale, baseScale, baseScale);
+
+    // Center the mesh on its bbox so rotation pivots through the visual middle.
+    const cx = (bb.max.x + bb.min.x) * 0.5;
+    const cy = (bb.max.y + bb.min.y) * 0.5;
+    const cz = (bb.max.z + bb.min.z) * 0.5;
+    group.position.set(-cx * baseScale, -cy * baseScale, -cz * baseScale);
+  }
+
+  /** Shared camera + container rotation + pivot indicator (text and mesh modes). */
+  private applyContainerRotationAndZoom(elapsed: number, transition: number): void {
+    if (!this.charContainer || !this.camera) return;
+
     const isLocked = !this.enabled && transition > 0;
     const idleRotY = (this.handActive || isLocked) ? 0 : Math.sin(elapsed * 0.5) * 0.3;
     const idleRotX = (this.handActive || isLocked) ? 0 : Math.sin(elapsed * 0.3) * 0.12;
 
-    charContainer.rotation.x = this.rotX + idleRotX;
-    charContainer.rotation.y = this.rotY + idleRotY;
-    charContainer.rotation.z = this.rotZ;
+    this.charContainer.rotation.x = this.rotX + idleRotX;
+    this.charContainer.rotation.y = this.rotY + idleRotY;
+    this.charContainer.rotation.z = this.rotZ;
 
-    // ── Pivot indicator: fade in/out based on hand activity ──
     if (this.pivotGroup) {
       const pivotMats = (this.pivotGroup as any)._pivotMats as InstanceType<typeof import('three/webgpu').MeshBasicMaterial>[];
       const targetPivotOpacity = this.handActive ? 0.25 : 0;
@@ -425,15 +655,18 @@ export class Hologram3DRenderer {
     }
 
     // Zoom
-    camera.position.z = 6 / this.zoom;
-
-    // ── Render with bloom ──────────────────────────────
-    this.postProcessing!.render();
+    this.camera.position.z = 6 / this.zoom;
   }
 
   /** Clean up all GPU/Three.js resources */
   dispose(): void {
     this.destroyed = true;
+    // Bump token so any in-flight setModel() loads recognise themselves as
+    // superseded and dispose their just-loaded resources instead of attaching.
+    this.loadToken++;
+    // Dispose mesh-mode resources first so the GLB scene graph is cleaned
+    // before the WebGPU device tears down.
+    this.disposeMeshState();
     for (const [, entry] of this.charMeshes) {
       entry.group.traverse(obj => {
         if ((obj as any).geometry) (obj as any).geometry.dispose();
