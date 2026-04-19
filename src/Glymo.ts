@@ -842,6 +842,36 @@ export class Glymo {
     return ids.values().next().value ?? null;
   }
 
+  // ── Object metadata ────────────────────────────────
+  //
+  // Public surface so features (Media Art per `docs/plans/media-art-mvp.md`
+  // D6 — `metadata.mediaArt = { modelId, appliedAt, sourceLabel }`) can
+  // persist feature-specific state alongside the stroke geometry without
+  // reaching into the internal ObjectStore. The metadata bag is opaque
+  // to core: callers own the schema and the server round-trips the whole
+  // bag verbatim through its opaque metadata column. Any JSON-serialisable
+  // value is safe to store.
+
+  /**
+   * Set a metadata key on an object. Returns true when the object was
+   * found and the value applied, false when the id is unknown. Pass
+   * `undefined` to clear a key.
+   */
+  setObjectMetadata(objectId: string, key: string, value: unknown): boolean {
+    this.assertNotDestroyed();
+    return this.objectStore.updateMetadata(objectId, key, value);
+  }
+
+  /**
+   * Read a metadata key from an object. Returns `undefined` for unknown
+   * object ids or missing keys. Does not clone — callers must treat the
+   * result as immutable.
+   */
+  getObjectMetadata(objectId: string, key: string): unknown {
+    const obj = this.objectStore.getObject(objectId);
+    return obj?.metadata?.[key];
+  }
+
   // ── Correction ────────────────────────────────────
 
   /** Apply endpoint snapping + overshoot trimming to a specific object */
