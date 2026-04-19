@@ -148,22 +148,20 @@ export class GltfMeshSource implements MeshSource {
       }
     };
 
+    // Expose the treatment uniforms as plain enumerable properties so the
+    // renderer's setModel() can read them via `state.uTime` / `state.uTransition`.
+    // Earlier revisions wrapped these in Object.defineProperties + spread to
+    // hide them from JSON.stringify, but spread only copies own ENUMERABLE
+    // properties — the uniforms were silently dropped, leaving uTransition
+    // at its initial 0 and rendering every mesh fully transparent.
     return {
       id: this.id,
       group: sceneRoot,
       ...(mixer ? { mixer } : {}),
       bbox,
       dispose,
-      // Expose the treatment uniforms via non-enumerable props so the
-      // renderer can drive uTime/uTransition each frame without consumers
-      // having to know about applyMediaArtShaderTreatment internals.
-      ...(Object.defineProperties(
-        {},
-        {
-          uTime: { value: treatment.uTime, enumerable: false, configurable: true },
-          uTransition: { value: treatment.uTransition, enumerable: false, configurable: true },
-        },
-      ) as Record<string, unknown>),
+      uTime: treatment.uTime,
+      uTransition: treatment.uTransition,
     } as MediaArtMeshState & {
       uTime: ReturnType<typeof import('three/tsl').uniform>;
       uTransition: ReturnType<typeof import('three/tsl').uniform>;
