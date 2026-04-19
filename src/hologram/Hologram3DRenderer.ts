@@ -157,6 +157,16 @@ export class Hologram3DRenderer {
 
   private startTime = performance.now();
 
+  // Debug throttle (1 Hz) for renderFrame logs to avoid 60 fps console spam.
+  private _debugLastLog = 0;
+  private _debugMeshFrameLogged = false;
+  private _debugRenderFrameLog(reason: string, data: Record<string, unknown>): void {
+    const now = performance.now();
+    if (now - this._debugLastLog < 1000) return;
+    this._debugLastLog = now;
+    console.log('[holo-debug] renderFrame', reason, data);
+  }
+
   /** Whether the renderer has been successfully initialized */
   private _isAvailable = false;
   get isAvailable(): boolean { return this._isAvailable; }
@@ -205,7 +215,46 @@ export class Hologram3DRenderer {
 
   /** Enable/disable the renderer */
   setEnabled(enabled: boolean): void {
+    if (this.enabled !== enabled) {
+      console.log('[holo-debug] setEnabled', { from: this.enabled, to: enabled, mode: this.mode, transition: this.transition.toFixed(3) });
+    }
     this.enabled = enabled;
+  }
+
+  /**
+   * Resize the renderer's backbuffer + camera frustum to match a CSS box.
+   *
+   * Canonical pattern: this is the SOLE writer of `canvas.width` /
+   * `canvas.height` for the hologram canvas. The host (React) must NOT
+   * pass `width` / `height` props to the canvas element — CSS sizes the
+   * box, a ResizeObserver in the host calls into here, and Three.js
+   * (`renderer.setSize` → `CanvasTarget.setSize`) writes the bitmap
+   * attribute as `cssWidth × pixelRatio`.
+   *
+   * Without this single-writer guarantee the React render → Three.js
+   * setSize race causes the WebGPU swap chain to drift from the cached
+   * MSAA color buffer, producing the "resolve target size does not match
+   * the size of the other attachments" validation failure.
+   *
+   * `false` for `updateStyle` — we do not want Three.js writing inline
+   * `style.width` on the canvas element; CSS owns that channel.
+   *
+   * Skipped if zero-sized (pre-layout) — layout will deliver a non-zero
+   * size shortly and the next observer tick will route through.
+   */
+  setSize(cssWidth: number, cssHeight: number): void {
+    console.log('[holo-debug] setSize called', { cssW: cssWidth, cssH: cssHeight, destroyed: this.destroyed, hasRenderer: !!this.renderer, hasCamera: !!this.camera });
+    if (this.destroyed) return;
+    if (cssWidth <= 0 || cssHeight <= 0) return;
+    if (!this.renderer || !this.camera) return;
+
+    this.renderer.setSize(cssWidth, cssHeight, false);
+    this.camera.aspect = cssWidth / cssHeight;
+    this.camera.updateProjectionMatrix();
+    console.log('[holo-debug] setSize applied', { cssW: cssWidth, cssH: cssHeight, canvasW: this.canvas.width, canvasH: this.canvas.height, dpr: this.renderer.getPixelRatio(), aspect: this.camera.aspect.toFixed(3) });
+    // PassNode.updateBefore() and BloomNode.updateBefore() will pick up
+    // the new renderer.getSize() / getDrawingBufferSize() on the next
+    // postProcessing.render() — no manual setSize needed on the passes.
   }
 
   /** Start dragging a char to a CSS position */
@@ -291,6 +340,7 @@ export class Hologram3DRenderer {
     this.disposeMeshState();
     this.meshState = state;
     this.mode = 'mesh';
+    console.log('[holo-debug] setModel committed', { mode: this.mode, hasMeshState: !!this.meshState, bbox: state.bbox, hasGroup: !!state.group, charContainerExists: !!this.charContainer });
 
     // The GltfMeshSource returns aggregate uniforms via non-enumerable
     // props (see sources/GltfMeshSource.ts); they're our handle to drive
@@ -426,7 +476,10 @@ export class Hologram3DRenderer {
   /** Render one frame. Call this from your compositor or animation loop. */
   renderFrame(): void {
     if (this.destroyed) return;
-    if (!this.canvas || !this.renderer || !this.postProcessing || !this.scene || !this.camera || !this.charContainer) return;
+    if (!this.canvas || !this.renderer || !this.postProcessing || !this.scene || !this.camera || !this.charContainer) {
+      this._debugRenderFrameLog('skip-not-ready', { hasCanvas: !!this.canvas, hasRenderer: !!this.renderer, hasPostProcessing: !!this.postProcessing, hasScene: !!this.scene, hasCamera: !!this.camera, hasContainer: !!this.charContainer });
+      return;
+    }
 
     const canvas = this.canvas;
     const renderer = this.renderer;
@@ -444,6 +497,7 @@ export class Hologram3DRenderer {
     }
 
     if (!this.enabled || this.transition < 0.001) {
+      this._debugRenderFrameLog('skip-disabled-or-zero-transition', { enabled: this.enabled, transition: this.transition.toFixed(4), mode: this.mode, canvasW: canvas.width, canvasH: canvas.height });
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       return;
@@ -452,6 +506,7 @@ export class Hologram3DRenderer {
     const now = performance.now();
     const elapsed = (now - this.startTime) * 0.001;
     const transition = this.transition;
+    this._debugRenderFrameLog('render', { enabled: this.enabled, transition: this.transition.toFixed(3), mode: this.mode, canvasW: canvas.width, canvasH: canvas.height, clientW: w, clientH: h });
 
     // ── Mesh mode (v0.7.0) — render single GLB ────────────────────────────
     // Branches BEFORE the per-char loop so text-mode resources are not
@@ -599,7 +654,14 @@ export class Hologram3DRenderer {
 
   /** Mesh-mode per-frame update — transforms one GLB scene. */
   private renderMeshFrame(elapsed: number, transition: number): void {
-    if (!this.meshState || !THREE) return;
+    if (!this.meshState || !THREE) {
+      this._debugRenderFrameLog('mesh-skip', { hasMeshState: !!this.meshState, hasTHREE: !!THREE });
+      return;
+    }
+    if (!this._debugMeshFrameLogged) {
+      this._debugMeshFrameLogged = true;
+      console.log('[holo-debug] renderMeshFrame FIRST CALL', { elapsed: elapsed.toFixed(3), transition: transition.toFixed(3), bbox: this.meshState.bbox });
+    }
 
     const group = this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>;
 
