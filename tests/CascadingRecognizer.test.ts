@@ -161,6 +161,68 @@ describe('CascadingRecognizer — 만두 stroke-loss scenario', () => {
     recognizer.destroy();
   });
 
+  it('emits globally-unique char ids across recognizer instances (no counter collision)', async () => {
+    // Regression gate for the 2026-04-19 "안녕 → save → load → 반 → 녕반"
+    // bug. CascadingRecognizer previously minted char ids as
+    // `char-${++idCounter}` — a per-instance counter that reset to 0 on
+    // every new recognizer. On re-entry into a saved session, the first
+    // newly-recognised character would claim id `char-1`, colliding with
+    // the FIRST saved character's id. `CharacterStore.addCharacter`
+    // interprets a known id as an update → the new char silently
+    // overwrote the loaded one, making it appear to have vanished.
+    // Canonical fix: crypto.randomUUID() so ids are globally unique.
+    // See docs/plans/session-persistence-round-trip.md §11.9.
+
+    mockRecognize.mockImplementation(() =>
+      Promise.resolve({ text: 'A', candidates: ['A'] }),
+    );
+
+    const firstIds: string[] = [];
+    const secondIds: string[] = [];
+
+    // Recognizer #1 — mimics the original save-time recognizer.
+    const r1 = new CascadingRecognizer({
+      onChar: (c) => firstIds.push(c.id),
+      onCorrection: () => {},
+      onDisplayFlush: () => {},
+    });
+    r1.setLanguage('en');
+    const a1 = mkStroke(100, 100);
+    r1.feedStroke(a1.raw, a1.bbox, 1, 'r1-a');
+    await flushMicrotasks();
+    const a2 = mkStroke(105, 100);
+    r1.feedStroke(a2.raw, a2.bbox, 1, 'r1-b');
+    await flushMicrotasks();
+    r1.destroy();
+    expect(firstIds).toHaveLength(1);
+
+    // Recognizer #2 — mimics the fresh recognizer created after load.
+    const r2 = new CascadingRecognizer({
+      onChar: (c) => secondIds.push(c.id),
+      onCorrection: () => {},
+      onDisplayFlush: () => {},
+    });
+    r2.setLanguage('en');
+    const b1 = mkStroke(200, 100);
+    r2.feedStroke(b1.raw, b1.bbox, 1, 'r2-a');
+    await flushMicrotasks();
+    const b2 = mkStroke(205, 100);
+    r2.feedStroke(b2.raw, b2.bbox, 1, 'r2-b');
+    await flushMicrotasks();
+    r2.destroy();
+    expect(secondIds).toHaveLength(1);
+
+    // Primary invariant: ids across instances MUST NOT collide.
+    expect(firstIds[0]).not.toBe(secondIds[0]);
+
+    // Shape invariant: lock in UUID format so a future revert to the
+    // counter pattern fails at the shape level, not just the collision
+    // check. UUID v4 shape — 8-4-4-4-12 hex digits.
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    expect(firstIds[0]).toMatch(uuidRe);
+    expect(secondIds[0]).toMatch(uuidRe);
+  });
+
   it('early-commit finalizes a group immediately when recognition is stable', async () => {
     const flushedGroups: string[][] = [];
     const finalizedChars: string[] = [];

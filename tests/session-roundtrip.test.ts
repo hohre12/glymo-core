@@ -322,4 +322,70 @@ describe('session-roundtrip', () => {
     );
     expect(rejection).toBeInstanceOf(UploadNetworkError);
   });
+
+  // ── 6. Revision 2 — characters round-trip ──────────────────────────────────
+  //
+  // Regression gate for the "Studio save → exit → re-enter = blank canvas" bug
+  // shipped on 2026-04-19. Text-mode sessions destructively remove their
+  // handwritten strokes via `fadeOutStrokeById` the moment the recognizer
+  // finalises a glyph, so `exportSession().strokes` is empty for those
+  // sessions. Revision 2 persists the typography layer via `SessionDoc.characters`
+  // (Glymo#addCharacter → CharacterStore → exportSession / loadSession).
+  //
+  // What this test locks in:
+  //   * empty CharacterStore → `characters` field is OMITTED from the wire
+  //     (not an empty array — "no typography" and "typography cleared" are
+  //     distinct states; only a non-empty array is persisted)
+  //   * non-empty CharacterStore → `characters` is present on the wire with
+  //     identity-preserving fields (id, char, bbox, fontId, effect, confidence)
+  //   * loadSession hydrates the second instance's CharacterStore 1:1 with
+  //     the exported payload
+  //   * `character:change` fires on loadSession so React hooks driven by the
+  //     event (useTextRecognition) pick up the restored glyphs on mount
+
+  it('omits `characters` on export when the CharacterStore is empty', async () => {
+    const { uploader, loader } = makeInMemoryIO();
+    const glymo = new Glymo(fakeCanvas(), { bitmapUploader: uploader, bitmapLoader: loader });
+    const exported = await glymo.exportSession();
+    expect(exported).not.toHaveProperty('characters');
+  });
+
+  it('round-trips characters through exportSession / loadSession', async () => {
+    const { uploader, loader } = makeInMemoryIO();
+    const g1 = new Glymo(fakeCanvas(), { bitmapUploader: uploader, bitmapLoader: loader });
+
+    g1.addCharacter({
+      id: 'c1', char: '안', x: 10, y: 20, width: 40, height: 60,
+      fontId: 'default-ko', effect: 'none', confidence: 0.97,
+    });
+    g1.addCharacter({
+      id: 'c2', char: '녕', x: 60, y: 20, width: 40, height: 60,
+      fontId: 'default-ko', effect: 'none', confidence: 0.95,
+    });
+
+    const exported = await g1.exportSession();
+    expect(exported.characters).toHaveLength(2);
+
+    const wire = JSON.parse(JSON.stringify(exported)) as SessionDoc;
+    expect(wire.characters?.map(c => c.char)).toEqual(['안', '녕']);
+    expect(wire.characters?.[0]).toMatchObject({
+      id: 'c1', char: '안', x: 10, y: 20, width: 40, height: 60,
+      fontId: 'default-ko', effect: 'none', confidence: 0.97,
+    });
+
+    const g2 = new Glymo(fakeCanvas(), { bitmapUploader: uploader, bitmapLoader: loader });
+
+    // Event contract — useTextRecognition subscribes to character:change and
+    // derives its React state from the core store. Without this emit the
+    // text-mode overlay never renders on reload.
+    const received: Array<{ characters: ReturnType<typeof g2.getCharacters> }> = [];
+    g2.on('character:change', (payload) => { received.push(payload); });
+
+    await g2.loadSession(wire);
+
+    expect(g2.getCharacters()).toHaveLength(2);
+    expect(g2.getCharacters().map(c => c.id)).toEqual(['c1', 'c2']);
+    expect(received).toHaveLength(1);
+    expect(received[0].characters).toHaveLength(2);
+  });
 });

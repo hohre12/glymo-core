@@ -28,6 +28,7 @@ export type {
   SessionDoc,
   ObjectDoc,
   FillDoc,
+  CharacterDoc,
   AnimationDoc,
   BitmapUploader,
   BitmapLoader,

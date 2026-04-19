@@ -343,8 +343,51 @@ export interface AnimationDoc {
 }
 
 /**
+ * Serialized wire format for a recognised character — the typography output
+ * produced by `CascadingRecognizer` once it finalises a group of handwritten
+ * strokes into a glyph. Carries only what the user sees on the canvas after
+ * finalisation; the original handwritten strokes are already removed from
+ * `Glymo.this.strokes` via `fadeOutStrokeById` and are NOT persisted.
+ *
+ * `strokePoints` (char-local geometry used by hologram / morph effects) is
+ * intentionally omitted from the wire shape: it is deterministically derivable
+ * from `char + fontId + (x, y, width, height)` on load, and keeping it out of
+ * the wire keeps `projects.data` inside the 1 MiB soft cap.
+ *
+ * Added for session persistence Revision 2 (2026-04-19); see
+ * `docs/plans/session-persistence-round-trip.md` §11 for the design context.
+ */
+export interface CharacterDoc {
+  /**
+   * Globally-unique character id. Minted via `crypto.randomUUID()` at
+   * `CascadingRecognizer.onDisplayFlush` time so save → re-enter → add
+   * does not collide a new glyph id with a loaded one. The counter-based
+   * `char-N` scheme used pre-Revision-2 caused silent overwrites on
+   * re-entry — see `docs/plans/session-persistence-round-trip.md` §11.9.
+   */
+  id: string;
+  /** The recognised glyph (e.g. "안"). */
+  char: string;
+  /** Centre-x in CSS pixels, matches runtime `RecognizedChar.x`. */
+  x: number;
+  /** Centre-y in CSS pixels. */
+  y: number;
+  /** Width in CSS pixels. */
+  width: number;
+  /** Height in CSS pixels. Rolling-averaged at recognition time. */
+  height: number;
+  /** Per-character font override at creation time. */
+  fontId?: string;
+  /** Per-character effect override at creation time. */
+  effect?: string;
+  /** Diagnostic — not a load-time gate. */
+  confidence?: number;
+}
+
+/**
  * Full session wire contract (v2). Round-trips the complete Studio state —
- * strokes, objects, fills, and per-stroke animations.
+ * strokes, objects, fills, per-stroke animations, and (Revision 2) recognised
+ * characters for text-mode typography.
  *
  * Legacy (v1) payloads as `StrokeDoc[]` remain accepted by
  * {@link Glymo.loadSession} for backward compatibility.
@@ -367,6 +410,12 @@ export interface SessionDoc {
   objects: ObjectDoc[];
   /** Fills. MAY be empty. */
   fills: FillDoc[];
+  /**
+   * Recognised characters (text-mode typography). MAY be omitted entirely
+   * for drawing-mode / legacy payloads. See {@link CharacterDoc} for the
+   * per-character shape and Revision 2 notes in the plan document.
+   */
+  characters?: CharacterDoc[];
 }
 
 // ── Bitmap Injection (host-provided) ────────────────
@@ -456,6 +505,14 @@ export interface GlymoEventMap {
   'object:selected': [{ objectId: string }];
   'object:deselected': [{ objectId: string }];
   'selection:changed': [{ selectedIds: string[] }];
+  /**
+   * Fires whenever the recognised-character store mutates — add, update
+   * (correction), remove, or bulk-load. The payload carries the full
+   * authoritative list so subscribers can re-render without tracking
+   * individual deltas. Added for session persistence Revision 2; see
+   * `docs/plans/session-persistence-round-trip.md` §11.
+   */
+  'character:change': [{ characters: CharacterDoc[] }];
   'correction:applied': [{ objectId: string; corrections: string[] }];
   'correction:reverted': [{ objectId: string }];
   [key: `gesture:${string}`]: [import('./gesture/types.js').GestureEvent];

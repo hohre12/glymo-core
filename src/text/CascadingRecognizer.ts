@@ -295,7 +295,18 @@ export class CascadingRecognizer {
       this.heightWindow, group.bbox.height, this.opts.heightWindowSize,
     );
 
-    const charId = `char-${++this.idCounter}`;
+    // Use `crypto.randomUUID()` so char ids are globally unique across
+    // sessions. The legacy `char-${++idCounter}` pattern collided with
+    // loaded characters on re-entry: a fresh recognizer starts counter
+    // at 0, so its first newly-recognised char claims id `char-1` — the
+    // same id the previous session wrote for its first character. The
+    // collision overwrote the loaded char in `CharacterStore`, producing
+    // the "안녕" + new "반" → "녕반" regression (2026-04-19). See
+    // `docs/plans/session-persistence-round-trip.md` §11.9 for the full
+    // analysis. UUIDs are the canonical pattern already used by
+    // `ObjectStore`, `FillStore`, and the stroke-id synthesis path in
+    // `Glymo.loadSession`.
+    const charId = crypto.randomUUID();
     const cx = group.bbox.x + group.bbox.width / 2;
     const cy = group.bbox.y + group.bbox.height / 2;
 

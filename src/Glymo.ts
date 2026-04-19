@@ -1,6 +1,6 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { AnimationDoc, BitmapLoader, BitmapUploader, EffectPresetName, Fill, FillDoc, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, ObjectDoc, SessionDoc, Stroke, StrokeDoc, StrokeDocPoint, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
+import type { AnimationDoc, BitmapLoader, BitmapUploader, CharacterDoc, EffectPresetName, Fill, FillDoc, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, ObjectDoc, SessionDoc, Stroke, StrokeDoc, StrokeDocPoint, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
 import { GlymoError } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES } from './types.js';
 import { resolveEffect } from './effects/registry.js';
@@ -16,6 +16,7 @@ import { MorphAnimator } from './animate/MorphAnimator.js';
 import { StrokeAnimator } from './animation/StrokeAnimator.js';
 import type { AnimationParams } from './animation/types.js';
 import { ObjectStore } from './store/ObjectStore.js';
+import { CharacterStore } from './store/CharacterStore.js';
 import { exportPNG } from './export/PNGExporter.js';
 import { exportGIF as exportGIFImpl } from './export/GIFExporter.js';
 import type { GIFExportOptions } from './export/GIFExporter.js';
@@ -65,6 +66,13 @@ export class Glymo {
    */
   readonly strokeAnimator: StrokeAnimator;
   private readonly objectStore: ObjectStore;
+  /**
+   * Authoritative store for recognised characters (text-mode typography
+   * output). Owned by core so `exportSession` can serialise without a
+   * React round-trip and the renderer can read char geometry directly.
+   * See `docs/plans/session-persistence-round-trip.md` §11.2.
+   */
+  private readonly characterStore: CharacterStore;
   private readonly bitmapUploader: BitmapUploader | null;
   private readonly bitmapLoader: BitmapLoader | null;
   private pendingStroke: FinalizedStroke | null = null;
@@ -113,6 +121,7 @@ export class Glymo {
     this.pipeline2 = new PipelineEngine(this.eventBus);
     this.strokeAnimator = new StrokeAnimator();
     this.objectStore = new ObjectStore();
+    this.characterStore = new CharacterStore();
     this.bitmapUploader = options?.bitmapUploader ?? null;
     this.bitmapLoader = options?.bitmapLoader ?? null;
     this.selectionManager = new SelectionManager(this.eventBus);
@@ -640,6 +649,59 @@ export class Glymo {
   /** Get direct access to the ObjectStore */
   getObjectStore(): ObjectStore { return this.objectStore; }
 
+  // ── Recognised Characters (Revision 2) ─────────────
+
+  /**
+   * Add a newly-recognised character to the authoritative store and emit
+   * `character:change` with the full post-mutation list. Called by the UI
+   * adapter (`useTextRecognition`) whenever `CascadingRecognizer.onChar`
+   * fires. The stroke fadeOut that accompanies finalisation is intentionally
+   * kept — at save time the user sees typography, not strokes, so the wire
+   * snapshot must match that screen. See §11.2 in the plan.
+   */
+  addCharacter(doc: CharacterDoc): void {
+    this.assertNotDestroyed();
+    this.characterStore.addCharacter(doc);
+    this.emitCharacterChange();
+  }
+
+  /**
+   * Patch a character — used when `CascadingRecognizer.onCorrection` issues
+   * a net2 sweep override (same id, new glyph). No-op for unknown ids
+   * (the store warns and skips).
+   */
+  updateCharacter(id: string, patch: Partial<Omit<CharacterDoc, 'id'>>): void {
+    this.assertNotDestroyed();
+    this.characterStore.updateCharacter(id, patch);
+    this.emitCharacterChange();
+  }
+
+  /**
+   * Remove a character by id. Used for explicit deletes (user gesture) and
+   * recognised-char teardown paths. No-op for unknown ids.
+   */
+  removeCharacter(id: string): CharacterDoc | undefined {
+    this.assertNotDestroyed();
+    const removed = this.characterStore.removeCharacter(id);
+    if (removed) this.emitCharacterChange();
+    return removed;
+  }
+
+  /**
+   * Snapshot of the current character list. Fresh copies — mutations on
+   * the returned array never affect the store.
+   */
+  getCharacters(): CharacterDoc[] {
+    return this.characterStore.getAllCharacters();
+  }
+
+  /** Emit `character:change` with the full authoritative list. */
+  private emitCharacterChange(): void {
+    this.eventBus.emit('character:change', {
+      characters: this.characterStore.getAllCharacters(),
+    });
+  }
+
   /**
    * Toggle animation on an entire object (all strokes animated together).
    * Returns true if animation was turned ON, false if turned OFF.
@@ -1119,7 +1181,12 @@ export class Glymo {
     const canvasW = Math.round(this.canvas.width / dpr);
     const canvasH = Math.round(this.canvas.height / dpr);
 
-    return {
+    // Recognised characters (Revision 2). Serialise only when text mode
+    // produced typography — drawing-mode / empty payloads keep the wire
+    // shape minimal by omitting the field entirely.
+    const characterDocs = this.characterStore.getAllCharacters();
+
+    const doc: SessionDoc = {
       version: 2,
       canvas: { w: canvasW, h: canvasH },
       effect: { name: sessionEffect },
@@ -1127,6 +1194,10 @@ export class Glymo {
       objects: objectDocs,
       fills: fillDocs,
     };
+    if (characterDocs.length > 0) {
+      doc.characters = characterDocs;
+    }
+    return doc;
   }
 
   /**
@@ -1228,6 +1299,15 @@ export class Glymo {
       );
     }
 
+    // Recognised characters (Revision 2). Empty payloads and drawing-mode
+    // payloads simply omit the field — the store stays cleared from
+    // `resetSessionState`. Emit a single `character:change` so the UI
+    // adapter can hydrate its overlay state in one render pass.
+    if (doc.characters && doc.characters.length > 0) {
+      this.characterStore.loadCharacters(doc.characters);
+      this.emitCharacterChange();
+    }
+
     this.renderer.markDirty();
   }
 
@@ -1274,6 +1354,18 @@ export class Glymo {
     this.fills = [];
     this.strokeAnimator.clear();
     this.objectStore.clear();
+    // CharacterStore is a live-observed store — UI mirrors (e.g. the React
+    // `useTextRecognition` hook) subscribe to `character:change` to rebuild
+    // their own cached lists. A silent `clear()` would leave those mirrors
+    // stale until the next add/update/remove. When `resetSessionState` is
+    // followed by `loadCharacters` + `emitCharacterChange` (the normal load
+    // path) the mirror catches up naturally, but any caller that clears
+    // without a subsequent load (tests, defensive resets, future flows)
+    // would desync. Emit a single change event if the store had items so
+    // the clear is observable to subscribers.
+    const hadCharacters = this.characterStore.size > 0;
+    this.characterStore.clear();
+    if (hadCharacters) this.emitCharacterChange();
     this._pausedAnimations.clear();
     this._pausedObjectAnimations.clear();
     this.selectionManager.clearSelection();
