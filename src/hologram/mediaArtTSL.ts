@@ -146,8 +146,14 @@ export function createMediaArtShaderNodes(deps: {
     return sin(uTime.mul(6.0)).mul(0.05).add(sin(uTime.mul(11.3)).mul(0.035));
   });
 
-  // colorNode: full 4-stop luminance plus a subtle rim color additive.
-  const colorNode = luminance().add(color(rimColor).mul(fresnel().mul(0.35)));
+  // colorNode: full 4-stop luminance — relies on PBR diffuse from scene
+  // lights to show. Hologram3DRenderer.init() adds DirectionalLight +
+  // AmbientLight matching the landing /preview/media-art reference, so
+  // the cyan gradient becomes the dominant visible signal at facing
+  // surfaces. Earlier revisions added a fresnel-rim additive here, but
+  // that doubled with emissiveNode and pushed the silhouette into bloom
+  // saturation — the rim now lives in emissiveNode only.
+  const colorNode = luminance();
 
   // opacityNode: high base opacity, fresnel boost on edges for crisp
   // silhouette, scanline subtraction, flicker, scaled by transition.
@@ -161,9 +167,16 @@ export function createMediaArtShaderNodes(deps: {
     float(1.0),
   );
 
-  // emissiveNode: cyan rim emission so the bloom postprocess lights up
-  // silhouettes (matches text material at line 603).
-  const emissiveNode = color(rimColor).mul(fresnel().mul(0.7).add(0.3));
+  // emissiveNode: edge-ONLY emission — facing surfaces have zero emissive
+  // so PBR diffuse (driven by the cyan gradient + scene lights) reads as
+  // the body, while the fresnel rim alone pushes through the bloom
+  // threshold (0.7 in Hologram3DRenderer). This matches EarthPreview.tsx
+  // lines 191-192 (`cyanGlow.mul(coastline.mul(1.3)).add(cyanGlow.mul(
+  // fresnelEdge().mul(0.55)))`) — silhouette glows, body doesn't.
+  // Removing the +0.3 baseline that earlier revisions carried fixes the
+  // "every mesh looks like a uniform glowing white blob" regression
+  // surfaced during 2026-04-20 UAT.
+  const emissiveNode = color(rimColor).mul(fresnel().mul(1.5));
 
   return {
     uTime,
@@ -222,13 +235,25 @@ export function applyMediaArtShaderTreatment(
       const mat = new THREE.MeshStandardNodeMaterial();
       mat.transparent = true;
       mat.depthWrite = false;
-      mat.side = THREE.DoubleSide;
+      // FrontSide is the canonical PBR default. The previous DoubleSide
+      // double-rendered every fragment (front + back face), which doubled
+      // the emissive rim contribution and pushed silhouettes into bloom
+      // saturation. EarthPreview uses FrontSide for the body and BackSide
+      // only for an atmosphere shell — that two-pass pattern is left for
+      // a future media-art-mvp Phase if a halo is needed; for now the
+      // single FrontSide pass gives a clean silhouette.
+      mat.side = THREE.FrontSide;
       // The TSL nodes are typed as `unknown` in the public surface so the
       // types module does not pull three/webgpu into every consumer; the
       // assignments below are safe because we constructed them above.
       (mat as unknown as { colorNode: unknown }).colorNode = nodes.colorNode;
       (mat as unknown as { opacityNode: unknown }).opacityNode = nodes.opacityNode;
       (mat as unknown as { emissiveNode: unknown }).emissiveNode = nodes.emissiveNode;
+      // Explicit PBR params — high roughness + zero metalness mirrors
+      // EarthPreview's earthMat (matte cyan body, no specular hot spots
+      // that would confuse the bloom pass).
+      (mat as unknown as { roughnessNode: unknown }).roughnessNode = (deps.tsl as { float: (v: number) => unknown }).float(0.85);
+      (mat as unknown as { metalnessNode: unknown }).metalnessNode = (deps.tsl as { float: (v: number) => unknown }).float(0.0);
 
       (obj as { material: unknown }).material = mat;
       materials.push(mat);
