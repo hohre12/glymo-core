@@ -1,6 +1,7 @@
 // ── Glymo Main Class ────────────────────────────────
 
-import type { EffectPresetName, Fill, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, Stroke, StrokeDoc, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
+import type { AnimationDoc, BitmapLoader, BitmapUploader, EffectPresetName, Fill, FillDoc, GlymoObject, GlymoOptions, GIFOptions, GlymoEventMap, ObjectDoc, SessionDoc, Stroke, StrokeDoc, StrokeDocPoint, SessionState, RendererMode, StrokePoint, CreateOptions, CorrectionOptions, CorrectionMetadata } from './types.js';
+import { GlymoError } from './types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES } from './types.js';
 import { resolveEffect } from './effects/registry.js';
 import { InputManager } from './input/InputManager.js';
@@ -56,8 +57,16 @@ export class Glymo {
   private fills: Fill[] = [];
   private currentEffect: EffectPresetName;
   private morphAnimator: MorphAnimator | null = null;
-  private readonly strokeAnimator: StrokeAnimator;
+  /**
+   * Per-stroke animation engine. Public so callers can drive
+   * {@link StrokeAnimator.serialize}/{@link StrokeAnimator.restore} directly
+   * when persisting sessions — exportSession/loadSession use the same
+   * interface internally.
+   */
+  readonly strokeAnimator: StrokeAnimator;
   private readonly objectStore: ObjectStore;
+  private readonly bitmapUploader: BitmapUploader | null;
+  private readonly bitmapLoader: BitmapLoader | null;
   private pendingStroke: FinalizedStroke | null = null;
   private destroyed = false;
   private instantComplete = false;
@@ -104,6 +113,8 @@ export class Glymo {
     this.pipeline2 = new PipelineEngine(this.eventBus);
     this.strokeAnimator = new StrokeAnimator();
     this.objectStore = new ObjectStore();
+    this.bitmapUploader = options?.bitmapUploader ?? null;
+    this.bitmapLoader = options?.bitmapLoader ?? null;
     this.selectionManager = new SelectionManager(this.eventBus);
     this.renderer = new CanvasRenderer(canvas, this.options.pixelRatio);
     this.inputManager = new InputManager();
@@ -478,6 +489,18 @@ export class Glymo {
     return this.strokes;
   }
 
+  /** Get all active fills (read-only). */
+  getFills(): readonly Fill[] {
+    this.assertNotDestroyed();
+    return this.fills;
+  }
+
+  /** Get all {@link GlymoObject} groups in creation order. */
+  listObjects(): GlymoObject[] {
+    this.assertNotDestroyed();
+    return this.objectStore.getAllObjects();
+  }
+
   /**
    * Hydrate the session from a pre-recorded stroke set (e.g. a project
    * loaded from the server). Replaces all existing strokes and fills.
@@ -506,23 +529,35 @@ export class Glymo {
     this.renderer.markDirty();
   }
 
-  /** Internal: convert a persisted StrokeDoc to an internal Stroke. */
-  private strokeFromDoc(doc: StrokeDoc): Stroke {
+  /**
+   * Internal: convert a persisted StrokeDoc to an internal Stroke.
+   *
+   * Honors the v2 wire shape: preserves `doc.id` when present (required for
+   * round-trip ObjectDoc referential integrity), and resolves the effect as
+   * `doc.effect ?? defaultEffect ?? this.currentEffect` so callers in the
+   * session-load path can inject the session-level effect name.
+   */
+  private strokeFromDoc(doc: StrokeDoc, defaultEffect?: EffectPresetName): Stroke {
     const points: StrokePoint[] = doc.points.map((p, i) => ({
       x: p.x,
       y: p.y,
       t: i,
       pressure: p.pressure ?? 1.0,
     }));
+    const effect = (doc.effect as EffectPresetName | undefined)
+      ?? defaultEffect
+      ?? this.currentEffect;
     return {
-      id: crypto.randomUUID(),
+      id: doc.id ?? crypto.randomUUID(),
       raw: points,
       // Persisted points are treated as already pipeline-processed; skip
       // re-running Chaikin here to avoid visual drift across save/load.
       smoothed: points.map(p => ({ ...p })),
       state: 'effected',
-      effect: this.currentEffect,
+      effect,
       createdAt: Date.now(),
+      ...(doc.customColor != null && { customColor: doc.customColor }),
+      ...(doc.customWidth != null && { customWidth: doc.customWidth }),
     };
   }
 
@@ -1015,6 +1050,235 @@ export class Glymo {
       this.stateMachine.transition('export_fail');
       throw err;
     }
+  }
+
+  // ── Session Persistence (v2) ──────────────────────
+
+  /**
+   * Serialize the full Studio state into the v2 {@link SessionDoc} wire
+   * format. Fill bitmaps are uploaded via the configured
+   * {@link BitmapUploader} and referenced by URL — large binary never
+   * inlines into the JSON payload, keeping `projects.data` under the
+   * Supabase Free JSONB budget.
+   *
+   * Any {@link BitmapUploader.upload} rejection propagates cleanly; no
+   * partial `SessionDoc` is ever returned.
+   */
+  async exportSession(): Promise<SessionDoc> {
+    this.assertNotDestroyed();
+
+    if (this.fills.length > 0 && !this.bitmapUploader) {
+      throw new GlymoError(
+        'bitmap-uploader-missing',
+        'exportSession requires a BitmapUploader when fills are present',
+        { stage: 'export', recoverable: false },
+      );
+    }
+
+    // Upload fills sequentially so a mid-batch failure aborts the export
+    // before we hand the caller an incomplete doc.
+    const fillDocs: FillDoc[] = [];
+    for (const fill of this.fills) {
+      const url = await this.bitmapUploader!.upload(fill.bitmap);
+      fillDocs.push({ id: fill.id, color: fill.color, bitmap_url: url });
+    }
+
+    const sessionEffect = this.currentEffect;
+
+    const strokeDocs: StrokeDoc[] = this.strokes.map(s => {
+      const points: StrokeDocPoint[] = s.smoothed.map(p => {
+        const out: StrokeDocPoint = { x: p.x, y: p.y };
+        if (p.pressure !== undefined && p.pressure !== 1) {
+          out.pressure = p.pressure;
+        }
+        return out;
+      });
+      const animParams = this.strokeAnimator.getAnimationParams(s.id);
+      const doc: StrokeDoc = { id: s.id, points };
+      if (s.effect && s.effect !== sessionEffect) doc.effect = s.effect;
+      if (s.customColor != null) doc.customColor = s.customColor;
+      if (s.customWidth != null) doc.customWidth = s.customWidth;
+      if (animParams) doc.animation = Glymo.animationParamsToDoc(animParams);
+      return doc;
+    });
+
+    const objectDocs: ObjectDoc[] = this.objectStore.getAllObjects().map(o => {
+      const doc: ObjectDoc = {
+        id: o.id,
+        strokeIds: [...o.strokeIds],
+        fillIds: [...o.fillIds],
+        bbox: { ...o.bbox },
+      };
+      if (o.metadata && Object.keys(o.metadata).length > 0) {
+        doc.metadata = { ...o.metadata };
+      }
+      return doc;
+    });
+
+    const dpr = this.options.pixelRatio || 1;
+    const canvasW = Math.round(this.canvas.width / dpr);
+    const canvasH = Math.round(this.canvas.height / dpr);
+
+    return {
+      version: 2,
+      canvas: { w: canvasW, h: canvasH },
+      effect: { name: sessionEffect },
+      strokes: strokeDocs,
+      objects: objectDocs,
+      fills: fillDocs,
+    };
+  }
+
+  /**
+   * Hydrate the Studio from a persisted session. Accepts the v2
+   * {@link SessionDoc} or a legacy v1 {@link StrokeDoc} array (§4 D3).
+   *
+   * Referential integrity: objects referencing unknown strokes or fills
+   * are dropped with a `console.warn`; the canvas does not throw on a
+   * corrupt session. Stroke ids are preserved so object references resolve
+   * after the round-trip.
+   */
+  async loadSession(payload: SessionDoc | StrokeDoc[]): Promise<void> {
+    this.assertNotDestroyed();
+
+    // D3: legacy v1 shape — a bare StrokeDoc[]
+    if (Array.isArray(payload)) {
+      this.resetSessionState();
+      for (const sd of payload) {
+        const stroke = this.strokeFromDoc(sd);
+        this.strokes.push(stroke);
+        this.renderer.addCompletedStroke(stroke);
+      }
+      this.renderer.markDirty();
+      return;
+    }
+
+    const doc = payload;
+
+    if (doc.fills.length > 0 && !this.bitmapLoader) {
+      throw new GlymoError(
+        'bitmap-loader-missing',
+        'loadSession requires a BitmapLoader when the SessionDoc contains fills',
+        { stage: 'load', recoverable: false },
+      );
+    }
+
+    this.resetSessionState();
+
+    const sessionEffect = doc.effect.name as EffectPresetName;
+    this.setEffect(sessionEffect);
+
+    // Strokes first — establish the id set before objects reference it.
+    const validStrokeIds = new Set<string>();
+    for (const sd of doc.strokes) {
+      const stroke = this.strokeFromDoc(sd, sessionEffect);
+      this.strokes.push(stroke);
+      this.renderer.addCompletedStroke(stroke);
+      validStrokeIds.add(stroke.id);
+    }
+
+    // Fills — parallel load; any rejection propagates. Size / MIME
+    // enforcement belongs to the host loader.
+    const loaded = await Promise.all(
+      doc.fills.map(async (fd): Promise<Fill> => ({
+        id: fd.id,
+        color: fd.color,
+        bitmap: await this.bitmapLoader!.load(fd.bitmap_url),
+        createdAt: Date.now(),
+      })),
+    );
+    const validFillIds = new Set<string>();
+    for (const fill of loaded) {
+      this.fills.push(fill);
+      this.renderer.addFill(fill);
+      validFillIds.add(fill.id);
+    }
+
+    // Objects — drop any with dangling refs per §4 D6.
+    for (const od of doc.objects) {
+      const danglingStroke = od.strokeIds.find(id => !validStrokeIds.has(id));
+      const danglingFill = od.fillIds.find(id => !validFillIds.has(id));
+      if (danglingStroke || danglingFill) {
+        const what = danglingStroke
+          ? `stroke "${danglingStroke}"`
+          : `fill "${danglingFill}"`;
+        console.warn(
+          `[Glymo] loadSession: dropping object "${od.id}" — unresolved ${what}.`,
+        );
+        continue;
+      }
+      this.objectStore.restoreObject(
+        od.id,
+        od.strokeIds,
+        od.fillIds,
+        od.bbox,
+        od.metadata,
+      );
+    }
+
+    // Animations — each stroke carries its own params (D4). Wire →
+    // runtime translation happens here so the rest of the engine keeps
+    // using `AnimationParams` unchanged.
+    for (const sd of doc.strokes) {
+      if (!sd.animation || !sd.id) continue;
+      if (!validStrokeIds.has(sd.id)) continue;
+      this.strokeAnimator.addAnimation(
+        [sd.id],
+        Glymo.animationDocToParams(sd.animation),
+      );
+    }
+
+    this.renderer.markDirty();
+  }
+
+  /**
+   * Convert a runtime {@link AnimationParams} into the wire
+   * {@link AnimationDoc} shape: `duration` → `durationMs`, `repeat` → `loop`.
+   * Other optional fields pass through so type-specific params ('fly',
+   * 'rotate', 'sparkle', 'keyframe') survive a round-trip.
+   */
+  private static animationParamsToDoc(params: AnimationParams): AnimationDoc {
+    const doc: AnimationDoc = { type: params.type, durationMs: params.duration };
+    if (params.repeat !== undefined) doc.loop = params.repeat;
+    if (params.delay !== undefined) doc.delay = params.delay;
+    if (params.direction !== undefined) doc.direction = params.direction;
+    if (params.amplitude !== undefined) doc.amplitude = params.amplitude;
+    if (params.speed !== undefined) doc.speed = params.speed;
+    if (params.particleCount !== undefined) doc.particleCount = params.particleCount;
+    if (params.keyframes !== undefined) doc.keyframes = params.keyframes.map(k => ({ ...k }));
+    return doc;
+  }
+
+  /**
+   * Reverse of {@link Glymo.animationParamsToDoc}. Missing `durationMs` on
+   * the wire falls back to a 2000 ms cycle to match the engine defaults.
+   */
+  private static animationDocToParams(doc: AnimationDoc): AnimationParams {
+    const params: AnimationParams = {
+      type: doc.type,
+      duration: doc.durationMs ?? 2000,
+    };
+    if (doc.loop !== undefined) params.repeat = doc.loop;
+    if (doc.delay !== undefined) params.delay = doc.delay;
+    if (doc.direction !== undefined) params.direction = doc.direction;
+    if (doc.amplitude !== undefined) params.amplitude = doc.amplitude;
+    if (doc.speed !== undefined) params.speed = doc.speed;
+    if (doc.particleCount !== undefined) params.particleCount = doc.particleCount;
+    if (doc.keyframes !== undefined) params.keyframes = doc.keyframes.map(k => ({ ...k }));
+    return params;
+  }
+
+  /** Fully reset session-level state before a load. */
+  private resetSessionState(): void {
+    this.strokes = [];
+    this.fills = [];
+    this.strokeAnimator.clear();
+    this.objectStore.clear();
+    this._pausedAnimations.clear();
+    this._pausedObjectAnimations.clear();
+    this.selectionManager.clearSelection();
+    this.renderer.clearFills();
+    this.renderer.clearAll();
   }
 
   // ── Events ─────────────────────────────────────────

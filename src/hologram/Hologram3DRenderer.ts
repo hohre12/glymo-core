@@ -475,7 +475,14 @@ export class Hologram3DRenderer {
 
       // Must await WebGPU initialization
       await this.renderer.init();
-      if (this.destroyed) { this.renderer.dispose(); return false; }
+      // Re-entrancy guard: external dispose() may have fired during the await
+      // and already set `this.renderer = null`. In React Strict Mode (dev)
+      // mount → cleanup → remount runs init() and dispose() on overlapping
+      // ticks; calling dispose() again here threw
+      // "Cannot read properties of null (reading 'dispose')". dispose() is
+      // idempotent and already cleaned the renderer it saw, so a plain exit
+      // is the correct response.
+      if (this.destroyed) return false;
 
       // ── Post-processing: bloom via TSL ───────────────
       const { pass } = tsl;

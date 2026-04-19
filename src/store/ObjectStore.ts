@@ -160,4 +160,39 @@ export class ObjectStore {
     this.fillToObject.clear();
     this.creationOrder = [];
   }
+
+  /**
+   * Restore an object with its original id (used by session loading).
+   * Unlike {@link ObjectStore.createObject}, this does NOT generate a new
+   * UUID and does NOT steal strokes from other objects — callers have
+   * already validated referential integrity.
+   *
+   * Duplicate ids are rejected with `console.warn` to surface corrupt wire
+   * data without throwing.
+   */
+  restoreObject(
+    id: string,
+    strokeIds: string[],
+    fillIds: string[],
+    bbox: { x: number; y: number; width: number; height: number },
+    metadata?: Record<string, unknown>,
+  ): GlymoObject | undefined {
+    if (this.objects.has(id)) {
+      console.warn(`[ObjectStore] duplicate ObjectDoc id ${id}; skipping.`);
+      return undefined;
+    }
+    const obj: GlymoObject = {
+      id,
+      strokeIds: [...strokeIds],
+      fillIds: [...fillIds],
+      bbox: { ...bbox },
+      createdAt: Date.now(),
+      ...(metadata && { metadata: { ...metadata } }),
+    };
+    this.objects.set(id, obj);
+    this.creationOrder.push(id);
+    for (const sid of strokeIds) this.strokeToObject.set(sid, id);
+    for (const fid of fillIds) this.fillToObject.set(fid, id);
+    return obj;
+  }
 }

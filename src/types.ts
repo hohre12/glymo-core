@@ -218,6 +218,32 @@ export interface GlymoError {
   recoverable: boolean;
 }
 
+/**
+ * Throwable form of {@link GlymoError}. Use when an API must surface a
+ * failure synchronously (e.g., {@link Glymo.exportSession} when a fill PNG
+ * exceeds the 500 KB wire limit). Declaration-merges with the interface of
+ * the same name so `const e: GlymoError = new GlymoError(...)` is valid.
+ */
+export class GlymoError extends Error {
+  readonly code: string;
+  readonly recoverable: boolean;
+  readonly stage?: string;
+  readonly originalError?: Error;
+
+  constructor(
+    code: string,
+    message: string,
+    options: { stage?: string; recoverable?: boolean; originalError?: Error } = {},
+  ) {
+    super(message);
+    this.name = 'GlymoError';
+    this.code = code;
+    this.recoverable = options.recoverable ?? false;
+    if (options.stage) this.stage = options.stage;
+    if (options.originalError) this.originalError = options.originalError;
+  }
+}
+
 // ── Persistence (wire format) ────────────────────────
 
 /**
@@ -233,12 +259,134 @@ export interface StrokeDocPoint {
 }
 
 /**
- * A single stroke in the serialized wire format. `@glymo/core` consumes
- * this shape via {@link Glymo.loadStrokes} to rehydrate a session from a
- * persisted project payload.
+ * A single stroke in the serialized wire format. Consumed by
+ * {@link Glymo.loadSession} (v2 full session) and {@link Glymo.loadStrokes}
+ * (v1 strokes-only compat).
+ *
+ * v2 extends v1 via optional fields only — legacy payloads with only `points`
+ * continue to deserialize. `id` is optional on the type but required at v2
+ * semantics: the loader synthesises a UUID if missing so v1 payloads keep
+ * working.
  */
 export interface StrokeDoc {
+  /** Stable stroke identity — load-time synthesised from `crypto.randomUUID()` if absent. */
+  id?: string;
   points: StrokeDocPoint[];
+  /** Per-stroke effect override; takes precedence over {@link SessionDoc.effect} on load. */
+  effect?: string;
+  /** Per-stroke color override; takes precedence over the resolved effect's color. */
+  customColor?: string;
+  /** Per-stroke fixed width override (ignores pressure). */
+  customWidth?: number;
+  /** Per-stroke animation params. Live state (startTime/active) is session-local. */
+  animation?: AnimationDoc;
+}
+
+// ── Session Wire Format (v2) ────────────────────────
+
+/**
+ * Serialized wire format for a {@link GlymoObject} grouping — a set of strokes
+ * and fills treated as a single unit for animation / selection / undo.
+ *
+ * Referential integrity: `strokeIds` and `fillIds` MUST resolve within the
+ * same {@link SessionDoc}. Dangling references on load are dropped with a
+ * `console.warn`; the canvas does not throw on a corrupt session.
+ */
+export interface ObjectDoc {
+  id: string;
+  strokeIds: string[];
+  fillIds: string[];
+  bbox: { x: number; y: number; width: number; height: number };
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Serialized wire format for a {@link Fill}. The bitmap is persisted to the
+ * S3-compatible bucket (same bucket as artwork images); `bitmap_url` carries
+ * the public URL at rest. `projects.data` JSONB stays purely textual.
+ *
+ * Size limit: 500 KB per fill PNG, enforced client-side before upload.
+ */
+export interface FillDoc {
+  id: string;
+  color: string;
+  bitmap_url: string;
+}
+
+/**
+ * Serialized wire format for a stroke animation. Live state (`startTime`,
+ * `active`) is NOT persisted — animations restart at t=0 on load, matching
+ * the UX of a page refresh today.
+ *
+ * Deliberately diverges from the runtime
+ * {@link import('./animation/types.js').AnimationParams} on two fields:
+ *
+ *   - `durationMs` (wire) ↔ `duration` (runtime)
+ *   - `loop` (wire) ↔ `repeat` (runtime)
+ *
+ * The rename keeps the persistence contract explicit about the unit and
+ * intent — a choice the server-side pydantic schema locks in as well.
+ * Translation happens in {@link Glymo.exportSession} /
+ * {@link Glymo.loadSession}; runtime code continues to use
+ * {@link import('./animation/types.js').AnimationParams} unchanged.
+ */
+export interface AnimationDoc {
+  type: import('./animation/types.js').AnimationType;
+  durationMs?: number;
+  loop?: boolean;
+  delay?: number;
+  direction?: 'up' | 'down' | 'left' | 'right';
+  amplitude?: number;
+  speed?: number;
+  particleCount?: number;
+  keyframes?: import('./animation/types.js').AnimationKeyframe[];
+}
+
+/**
+ * Full session wire contract (v2). Round-trips the complete Studio state —
+ * strokes, objects, fills, and per-stroke animations.
+ *
+ * Legacy (v1) payloads as `StrokeDoc[]` remain accepted by
+ * {@link Glymo.loadSession} for backward compatibility.
+ */
+export interface SessionDoc {
+  version: 2;
+  canvas: { w: number; h: number };
+  effect: {
+    /**
+     * Effect identifier. `core` does not constrain this to
+     * {@link EffectPresetName} so the app layer can carry extended presets
+     * through the wire; resolution happens in the renderer via the runtime
+     * effect registry.
+     */
+    name: string;
+    params?: Record<string, unknown>;
+  };
+  strokes: StrokeDoc[];
+  /** Object groupings. MAY be empty. */
+  objects: ObjectDoc[];
+  /** Fills. MAY be empty. */
+  fills: FillDoc[];
+}
+
+// ── Bitmap Injection (host-provided) ────────────────
+
+/**
+ * Host-provided uploader for fill bitmaps. `core` is framework-agnostic and
+ * does not own HTTP credentials or bucket configuration; the UI layer injects
+ * a concrete implementation at {@link Glymo} construction time.
+ */
+export interface BitmapUploader {
+  /** PNG-encode `bitmap` and upload; return the public URL at rest. */
+  upload(bitmap: ImageBitmap): Promise<string>;
+}
+
+/**
+ * Host-provided loader for previously-uploaded fill bitmaps.
+ */
+export interface BitmapLoader {
+  /** Fetch `url` and decode it into an ImageBitmap. */
+  load(url: string): Promise<ImageBitmap>;
 }
 
 // ── Effect Presets ───────────────────────────────────
@@ -329,6 +477,17 @@ export interface GlymoOptions {
   font?: string;
   language?: string;
   renderer?: RendererMode;
+  /**
+   * Host-provided uploader for Fill bitmaps. Required for {@link Glymo.exportSession}
+   * when fills are present. Keeping this pluggable lets `@glymo/core` stay
+   * framework-agnostic while callers supply S3/Supabase/etc. transport.
+   */
+  bitmapUploader?: BitmapUploader;
+  /**
+   * Host-provided loader for Fill bitmaps. Required for {@link Glymo.loadSession}
+   * when the wire doc references remote bitmap URLs.
+   */
+  bitmapLoader?: BitmapLoader;
 }
 
 /** Options for the `Glymo.create()` convenience factory */

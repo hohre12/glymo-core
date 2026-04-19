@@ -169,6 +169,35 @@ export class StrokeAnimator {
     this.animations.clear();
   }
 
+  /**
+   * Serialize all active animations into a wire-safe form. Live state
+   * (`startTime`, `active`) is intentionally omitted — animations restart
+   * at t=0 when {@link StrokeAnimator.restore} replays them.
+   */
+  serialize(): Array<{ strokeIds: string[]; params: AnimationParams }> {
+    const out: Array<{ strokeIds: string[]; params: AnimationParams }> = [];
+    for (const anim of this.animations.values()) {
+      if (!anim.active) continue;
+      out.push({
+        strokeIds: [...anim.strokeIds],
+        params: { ...anim.params },
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Restore animations from a serialized snapshot. Clears any existing
+   * animations first. Each entry becomes a fresh animation with its
+   * `startTime` set to the current `performance.now()`.
+   */
+  restore(entries: Array<{ strokeIds: string[]; params: AnimationParams }>): void {
+    this.animations.clear();
+    for (const entry of entries) {
+      this.addAnimation(entry.strokeIds, entry.params);
+    }
+  }
+
   // ── Private: Animation Calculations ─────────────────
 
   private computeAnimationTransform(

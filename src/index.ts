@@ -25,10 +25,19 @@ export type {
   Stroke,
   StrokeDoc,
   StrokeDocPoint,
+  SessionDoc,
+  ObjectDoc,
+  FillDoc,
+  AnimationDoc,
+  BitmapUploader,
+  BitmapLoader,
   CanvasSession,
-  GlymoError,
   SessionState,
 } from './types.js';
+
+// `GlymoError` is a class (with a same-named interface via declaration merging),
+// so it must be re-exported as a value — not a type.
+export { GlymoError } from './types.js';
 
 export { EFFECT_PRESETS } from './types.js';
 

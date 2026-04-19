@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-04-19
+
+### Added
+- `Glymo.exportSession(): Promise<SessionDoc>` and
+  `Glymo.loadSession(payload: SessionDoc | StrokeDoc[]): Promise<void>` —
+  full-session persistence API that round-trips strokes, animated objects,
+  fills, canvas size, and the active effect preset through a single wire
+  payload. Replaces the stroke-only `loadStrokes` path for project save /
+  load in consumer apps while keeping `loadStrokes` available for v1
+  call-sites (see Notes).
+- `SessionDoc`, `ObjectDoc`, `FillDoc`, `AnimationDoc` type exports —
+  v2 wire contract covering the studio surface. `SessionDoc` is tagged
+  `version: 2` and carries `canvas { w, h }`, `effect { name }`,
+  `strokes[]`, `objects[]`, `fills[]`. Fill bitmaps are referenced by
+  `bitmap_url` (not inlined) so the wire payload stays small and the
+  bitmap can live on object storage.
+- `BitmapUploader` and `BitmapLoader` constructor options on `Glymo` —
+  host-provided transports for fill bitmaps. Required only when the
+  active session actually contains fills: `exportSession` rejects with
+  `GlymoError('session.export.missing_uploader')` if fills exist without
+  an uploader, and `loadSession` rejects with
+  `GlymoError('session.load.missing_loader')` if a `SessionDoc` carries
+  fills without a loader. Plain strokes-only sessions do not require
+  either hook.
+- `CanvasSession` and `SessionState` type exports — internal-shape
+  aliases surfaced for consumers that need to type their own persistence
+  helpers without reaching into the runtime.
+- `ObjectDoc` referential integrity — `loadSession` drops any object
+  whose `strokeIds` reference missing strokes or whose `fillId`
+  references a missing fill, with a single `console.warn` per drop
+  naming the dangling id. The rest of the session hydrates normally.
+
+### Notes
+- `Glymo.loadStrokes(docs: StrokeDoc[])` (added in 0.4.0) remains the
+  preferred entry point for strokes-only hydration. `loadSession`
+  dispatches on `Array.isArray(payload)` and delegates a `StrokeDoc[]`
+  payload straight to `loadStrokes`, so v1 wire payloads round-trip
+  without forcing callers to wrap them in a `SessionDoc`.
+- Animation parameters use different shapes on the wire versus at
+  runtime: `AnimationDoc` stores `durationMs: number` and
+  `loop: boolean`, while the runtime `AnimationParams` uses `duration`
+  (seconds) and `repeat`. `loadSession` / `exportSession` translate
+  between the two representations; hosts should persist the wire shape
+  only.
+- Loaded strokes retain their source `id` when one is present on the
+  wire (previously `loadStrokes` always re-synthesized ids). Object
+  `strokeIds` therefore remain resolvable across a full save → load
+  round-trip.
+
+## [0.4.1] - 2026-04-19
+
+### Fixed
+- `Hologram3DRenderer` no longer throws `TypeError: Cannot read
+  properties of null (reading 'dispose')` when an external `dispose()`
+  fires during the `await renderer.init()` window (reproducible under
+  React Strict Mode mount → cleanup → remount). Root cause: the post-init
+  `if (this.destroyed) { this.renderer.dispose(); return false; }`
+  re-entered a cleanup that the external `dispose()` had already
+  completed, after it had nulled `this.renderer`. The defensive branch
+  now simply returns — `dispose()` is idempotent and has already freed
+  the WebGPU renderer it saw. Reported during internal UAT on the app
+  Studio page on 2026-04-19.
+
 ## [0.4.0] - 2026-04-18
 
 ### Added
