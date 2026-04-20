@@ -248,6 +248,12 @@ export interface MediaArtMeshState {
  * single-fetch sources pass the network ratio directly; multi-fetch sources
  * (GLB + HDR, three textures) compose weighted fractions per asset and emit
  * a final `1.0` once the parse + scene assembly completes.
+ *
+ * `onCacheHit` fires once when EVERY underlying network asset for the load
+ * resolved from cache (no bytes hit the wire). Multi-fetch sources internally
+ * aggregate per-slot signals and emit the single rollup. The callback is the
+ * orchestrator's signal to suppress its loading-chip flash on warm reloads —
+ * see MediaArtOrchestrator.tsx for the canonical wiring.
  */
 export interface MeshSourceLoadContext {
   /**
@@ -256,6 +262,14 @@ export interface MeshSourceLoadContext {
    * must not abort the load.
    */
   onProgress?: (progress: number) => void;
+  /**
+   * Optional cache-hit signal. Fires AT MOST ONCE per load, only when every
+   * underlying fetch resolved from cache. Synchronous; thrown errors are
+   * swallowed (same contract as onProgress). Multi-fetch sources only fire
+   * when the FULL set of assets was a cache hit — a single network miss
+   * suppresses the signal even if the others were warm.
+   */
+  onCacheHit?: () => void;
 }
 
 /**

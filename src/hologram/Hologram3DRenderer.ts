@@ -174,6 +174,15 @@ export class Hologram3DRenderer {
   private movedChars = new Map<string, { x: number; y: number }>();
   /** Which char is currently being actively dragged (null = none) */
   private activeDragId: string | null = null;
+  /**
+   * Mesh-mode single-hand pinch-grab state. `activeMeshDrag` fades the pivot
+   * indicator in during translate (same channel as two-hand `handActive`);
+   * `meshGrabPosition` records the last committed charContainer position in
+   * world units so tests and future commit paths can inspect the release
+   * value without reaching into Three.js internals.
+   */
+  private activeMeshDrag = false;
+  private meshGrabPosition: { x: number; y: number } | null = null;
 
   private startTime = performance.now();
 
@@ -282,6 +291,11 @@ export class Hologram3DRenderer {
     this.spread = 1;
     this.movedChars.clear();
     this.activeDragId = null;
+    this.activeMeshDrag = false;
+    this.meshGrabPosition = null;
+    if (this.charContainer) {
+      this.charContainer.position.set(0, 0, 0);
+    }
   }
 
   // ── Mesh mode API (v0.7.0) ──────────────────────────────────────────────────
@@ -304,6 +318,12 @@ export class Hologram3DRenderer {
    * UI hookup (e.g. percentage chip during a heavy GLB download). Progress
    * callbacks fired AFTER the load is superseded by a newer setModel are
    * ignored — only the latest in-flight load reaches the consumer.
+   *
+   * Pass `{ onCacheHit }` to receive a single signal when EVERY underlying
+   * fetch was a cache hit (warm reload). Hosts use this to suppress a
+   * loading-chip flash on instantaneous loads — see MediaArtOrchestrator.
+   * Like onProgress, the signal is suppressed if a newer setModel races
+   * ahead.
    */
   async setModel(
     descriptor: MeshSourceDescriptor | null,
@@ -331,16 +351,30 @@ export class Hologram3DRenderer {
     const source = this.createMeshSource(descriptor);
     let state: MediaArtMeshState;
     try {
-      // Wrap the consumer's onProgress so a callback firing after this load
-      // is superseded does not leak stale progress into the consumer's UI.
-      const sourceCtx: MeshSourceLoadContext | undefined = ctx?.onProgress
-        ? {
-            onProgress: (p: number) => {
-              if (myToken !== this.loadToken || this.destroyed) return;
-              ctx.onProgress?.(p);
-            },
+      // Wrap the consumer's onProgress AND onCacheHit so callbacks firing
+      // after this load is superseded do not leak stale signals into the
+      // consumer's UI. The wrappers are only attached when the consumer
+      // supplied the corresponding hook — sources that never receive
+      // onProgress / onCacheHit skip the per-event work entirely.
+      const wrappedProgress = ctx?.onProgress
+        ? (p: number): void => {
+            if (myToken !== this.loadToken || this.destroyed) return;
+            ctx.onProgress?.(p);
           }
         : undefined;
+      const wrappedCacheHit = ctx?.onCacheHit
+        ? (): void => {
+            if (myToken !== this.loadToken || this.destroyed) return;
+            ctx.onCacheHit?.();
+          }
+        : undefined;
+      const sourceCtx: MeshSourceLoadContext | undefined =
+        wrappedProgress || wrappedCacheHit
+          ? {
+              ...(wrappedProgress ? { onProgress: wrappedProgress } : {}),
+              ...(wrappedCacheHit ? { onCacheHit: wrappedCacheHit } : {}),
+            }
+          : undefined;
       state = await source.load({ THREE, tsl }, sourceCtx);
     } catch (err) {
       // If we were superseded mid-load, swallow the error — the new load
@@ -405,6 +439,89 @@ export class Hologram3DRenderer {
   /** Read-only handle to the current mesh state. Null in text mode. */
   getMeshState(): MediaArtMeshState | null {
     return this.meshState;
+  }
+
+  /**
+   * Hit-test the active mesh via 3D raycasting from a CSS coordinate.
+   *
+   * Returns `null` when there is no mesh to test (text mode, or mesh mode
+   * before `setModel()` resolved). In mesh mode returns `{ hit: true }` when
+   * the ray intersects any descendant of the mesh group and `{ hit: false }`
+   * when it misses — callers do not receive distance/child-id because the
+   * mesh is translated as a whole (unlike per-char hit testing which selects
+   * one of many targets).
+   */
+  hitTestMesh(x: number, y: number): { hit: boolean } | null {
+    if (this.mode !== 'mesh' || !this.meshState) return null;
+    if (!THREE || !this.camera || !this.canvas) return { hit: false };
+
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    if (w <= 0 || h <= 0) return { hit: false };
+
+    const ndcX = (x / w) * 2 - 1;
+    const ndcY = -(y / h) * 2 + 1;
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    const group = this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>;
+    const intersects = raycaster.intersectObjects([group], true);
+    return { hit: intersects.length > 0 };
+  }
+
+  /**
+   * Begin a single-hand pinch-grab on the active mesh. Returns `false` when
+   * there is no mesh loaded (text mode or pre-load mesh mode) — callers
+   * should not call `translateMeshTo` in that case. Turning the grab flag on
+   * fades the pivot indicator in for the duration of the drag, matching the
+   * visual affordance used by two-hand rotation.
+   */
+  grabMesh(): boolean {
+    if (this.mode !== 'mesh' || !this.meshState) return false;
+    this.activeMeshDrag = true;
+    return true;
+  }
+
+  /**
+   * Translate the mesh so its visual center tracks the supplied CSS point.
+   * Implemented as a charContainer translation — the mesh group is a child
+   * of charContainer (see setModel) and the renderMeshFrame pass keeps the
+   * mesh self-centered inside that container, so moving the container
+   * moves the mesh without disturbing the rotation pivot.
+   *
+   * No-op when not in mesh mode or when the renderer has not finished
+   * initialising (camera/canvas/container all need to be live).
+   */
+  translateMeshTo(x: number, y: number): void {
+    if (this.mode !== 'mesh' || !this.meshState) return;
+    if (!this.camera || !this.canvas || !this.charContainer) return;
+
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    if (w <= 0 || h <= 0) return;
+
+    // Same CSS → world projection used by the text-mode active-drag path
+    // (see renderFrame L607-611 / L636-637).
+    const camZ = 6 / this.zoom;
+    const fovRad = 35 * Math.PI / 180;
+    const visibleHalfH = camZ * Math.tan(fovRad / 2);
+    const visibleHalfW = visibleHalfH * this.camera.aspect;
+    const ndcX = (x / w) * 2.0 - 1.0;
+    const ndcY = -((y / h) * 2.0 - 1.0);
+    const worldX = ndcX * visibleHalfW;
+    const worldY = ndcY * visibleHalfH;
+
+    this.charContainer.position.set(worldX, worldY, 0);
+    this.meshGrabPosition = { x: worldX, y: worldY };
+  }
+
+  /**
+   * End the pinch-grab gesture. The final container position persists on
+   * the Three.js group so the mesh stays where the user released it;
+   * `resetTransform()` is the escape hatch that returns it to origin.
+   */
+  releaseMesh(): void {
+    this.activeMeshDrag = false;
   }
 
   // ── Internal: mesh-mode helpers ─────────────────────────────────────────────
@@ -743,7 +860,7 @@ export class Hologram3DRenderer {
 
     if (this.pivotGroup) {
       const pivotMats = (this.pivotGroup as any)._pivotMats as InstanceType<typeof import('three/webgpu').MeshBasicMaterial>[];
-      const targetPivotOpacity = this.handActive ? 0.25 : 0;
+      const targetPivotOpacity = (this.handActive || this.activeMeshDrag) ? 0.25 : 0;
       for (const mat of pivotMats) {
         mat.opacity += (targetPivotOpacity - mat.opacity) * 0.1;
       }

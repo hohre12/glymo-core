@@ -49,8 +49,13 @@ export type FetchProgressCallback = (loaded: number, total: number | null) => vo
 /**
  * Fetch a remote URL as ArrayBuffer with optional cache short-circuit.
  *
- * - Cache hit: returns the cached buffer untouched (firing `onProgress`
- *   exactly once with 100% if a callback was supplied).
+ * - Cache hit: returns the cached buffer untouched. If `onCacheHit` is
+ *   supplied, that fires (no synthetic progress tick); otherwise falls
+ *   back to firing `onProgress` once at 100% so legacy consumers without
+ *   the cache-hit hook still see a clean 0 → done transition. The new
+ *   `onCacheHit` channel exists so hosts can suppress a momentary
+ *   loading-chip flash on cache hits — see
+ *   `MediaArtOrchestrator.tsx` for the canonical wiring.
  * - Cache miss: fetches, persists on success, returns the buffer.
  * - Cache write failure is non-fatal (logged via swallow — caller still gets
  *   the buffer it asked for).
@@ -73,17 +78,31 @@ export async function fetchArrayBufferWithCache(opts: {
   assetLabel: string;
   /** Optional per-chunk progress callback. See {@link FetchProgressCallback}. */
   onProgress?: FetchProgressCallback;
+  /**
+   * Optional cache-hit signal. Fired synchronously the moment the cache
+   * lookup succeeds, BEFORE the buffer is returned. When supplied, the
+   * function does NOT also fire the synthetic 100% `onProgress` tick — the
+   * caller is taking explicit responsibility for cache-hit UX. Throws are
+   * swallowed (same contract as the other callbacks).
+   */
+  onCacheHit?: () => void;
 }): Promise<ArrayBuffer> {
-  const { cacheKey, url, cache, fetcher, errorCode, assetLabel, onProgress } = opts;
+  const { cacheKey, url, cache, fetcher, errorCode, assetLabel, onProgress, onCacheHit } = opts;
 
   if (cache) {
     try {
       const cached = await cache.get(cacheKey);
       if (cached) {
-        // Fire a single 100% tick so consumers transition cleanly from
-        // 0 → done without seeing a stuck zero (the cache hit skips the
-        // streaming branch where progress would normally land).
-        if (onProgress) {
+        if (onCacheHit) {
+          try {
+            onCacheHit();
+          } catch {
+            /* Callback throws are swallowed — see field doc. */
+          }
+        } else if (onProgress) {
+          // Fire a single 100% tick so legacy consumers without onCacheHit
+          // still transition cleanly from 0 → done (the cache hit skips the
+          // streaming branch where progress would normally land).
           try {
             onProgress(cached.byteLength, cached.byteLength);
           } catch {

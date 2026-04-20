@@ -74,7 +74,29 @@ export class GlbPbrMeshSource extends BaseMeshSource {
     // larger payload), HDR takes the remaining 40%. The HDR is also
     // non-fatal — its progress is still reported even if the texture fetch
     // ends up failing (the consumer gets a clean 0 → 1 sweep regardless).
+    //
+    // Cache-hit aggregation: rollup fires only when BOTH the GLB and HDR
+    // resolved from cache. A `cacheHits` counter tracks per-slot hits; when
+    // it reaches the expected total of 2 we fire the rollup once and null
+    // the local ref so a second slot signal can never re-fire. If HDR
+    // failed (network 404, parse error) the counter stays below 2 and the
+    // rollup is suppressed — the user saw network activity even if it
+    // produced no IBL, so the chip should have flashed.
     const reportProgress = ctx?.onProgress;
+    const reportCacheHit = ctx?.onCacheHit;
+    let cacheHits = 0;
+    const expectedCacheHits = 2;
+    const noteCacheHit = (): void => {
+      if (!reportCacheHit) return;
+      cacheHits += 1;
+      if (cacheHits >= expectedCacheHits) {
+        try {
+          reportCacheHit();
+        } catch {
+          /* swallow consumer throws */
+        }
+      }
+    };
     const glbBuffer = await this.fetchBuffer({
       url: this.url,
       errorCode: 'media-art/fetch-failed',
@@ -90,6 +112,7 @@ export class GlbPbrMeshSource extends BaseMeshSource {
             },
           }
         : {}),
+      ...(reportCacheHit ? { onCacheHit: noteCacheHit } : {}),
     });
 
     // ── 2. Parse GLB ──────────────────────────────────────────────────────
@@ -115,7 +138,7 @@ export class GlbPbrMeshSource extends BaseMeshSource {
     // the GLB's 60%. Total stays monotonic because `0.6 + Math.min(ratio, 1) * 0.4`
     // peaks at exactly 1.0 even when Content-Length is missing (the inner
     // ratio is clamped at 0.95 in that case).
-    const hdrTexture = await this.tryLoadHdri(deps, reportProgress).catch((err) => {
+    const hdrTexture = await this.tryLoadHdri(deps, reportProgress, noteCacheHit).catch((err) => {
       // Image-based lighting is a quality-add, not a correctness gate. Log
       // and continue; the asset still renders against scene lights.
       console.warn(`[GlbPbrMeshSource] HDRI load failed for ${this.id} — continuing without IBL`, err);
@@ -214,6 +237,7 @@ export class GlbPbrMeshSource extends BaseMeshSource {
       THREE: typeof import('three/webgpu');
     },
     reportProgress?: (p: number) => void,
+    noteCacheHit?: () => void,
   ): Promise<InstanceType<typeof import('three/webgpu').DataTexture>> {
     const buffer = await this.fetchBuffer({
       url: this.hdriUrl,
@@ -231,6 +255,7 @@ export class GlbPbrMeshSource extends BaseMeshSource {
             },
           }
         : {}),
+      ...(noteCacheHit ? { onCacheHit: noteCacheHit } : {}),
     });
 
     let RGBELoaderClass: typeof import('three/examples/jsm/loaders/RGBELoader.js').RGBELoader;

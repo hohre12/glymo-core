@@ -133,6 +133,78 @@ describe('fetchArrayBufferWithCache — onProgress callback', () => {
     expect(onProgress).toHaveBeenCalledTimes(2);
   });
 
+  it('cache hit with onCacheHit supplied fires onCacheHit and SKIPS the synthetic onProgress(100%)', async () => {
+    // 2026-04-20: orchestrator's chip-flash-on-warm-reload fix relies on
+    // this contract — when the consumer takes responsibility for cache-hit
+    // UX (delayed seed timer, etc.) we must NOT also fire the synthetic
+    // 100% tick or the chip resets to 100% mid-cancel.
+    const cached = new ArrayBuffer(64);
+    const cache: MeshSourceCache = {
+      get: vi.fn(async () => cached),
+      set: vi.fn(),
+    };
+    const fetcher = vi.fn(async () => new Response(null, { status: 200 }));
+    const onProgress = vi.fn();
+    const onCacheHit = vi.fn();
+    const buffer = await fetchArrayBufferWithCache({
+      cacheKey: 'cached-hit',
+      url: 'https://cdn.test/cached-hit.glb',
+      cache,
+      fetcher,
+      errorCode: 'media-art/fetch-failed',
+      assetLabel: 'cached-hit',
+      onProgress,
+      onCacheHit,
+    });
+    expect(buffer).toBe(cached);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(onCacheHit).toHaveBeenCalledTimes(1);
+    expect(onProgress).not.toHaveBeenCalled();
+  });
+
+  it('cache MISS with onCacheHit supplied does NOT fire onCacheHit (network was hit)', async () => {
+    const chunk = new Uint8Array(20).fill(0xee);
+    const response = makeStreamingResponse([chunk], { contentLength: 20 });
+    const cache: MeshSourceCache = {
+      get: vi.fn(async () => null),
+      set: vi.fn(),
+    };
+    const onCacheHit = vi.fn();
+    await fetchArrayBufferWithCache({
+      cacheKey: 'cold',
+      url: 'https://cdn.test/cold.glb',
+      cache,
+      fetcher: fakeFetcherFor(response),
+      errorCode: 'media-art/fetch-failed',
+      assetLabel: 'cold',
+      onCacheHit,
+    });
+    expect(onCacheHit).not.toHaveBeenCalled();
+  });
+
+  it('onCacheHit consumer throws are swallowed (same contract as onProgress)', async () => {
+    const cached = new ArrayBuffer(8);
+    const cache: MeshSourceCache = {
+      get: vi.fn(async () => cached),
+      set: vi.fn(),
+    };
+    const fetcher = vi.fn(async () => new Response(null, { status: 200 }));
+    const onCacheHit = vi.fn(() => {
+      throw new Error('consumer blew up in onCacheHit');
+    });
+    const buffer = await fetchArrayBufferWithCache({
+      cacheKey: 'cached-throws',
+      url: 'https://cdn.test/cached-throws.glb',
+      cache,
+      fetcher,
+      errorCode: 'media-art/fetch-failed',
+      assetLabel: 'cached-throws',
+      onCacheHit,
+    });
+    expect(buffer).toBe(cached);
+    expect(onCacheHit).toHaveBeenCalledTimes(1);
+  });
+
   it('without onProgress the legacy arrayBuffer() branch is used', async () => {
     const chunk = new Uint8Array(8);
     const response = makeStreamingResponse([chunk], { contentLength: 8 });

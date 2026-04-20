@@ -129,6 +129,7 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
     // independently, so the user sees parallel-load progress instead of a
     // step-function.
     const reportProgress = ctx?.onProgress;
+    const reportCacheHit = ctx?.onCacheHit;
     const slotRatios: Record<'daymap' | 'clouds' | 'normal', number> = {
       daymap: 0,
       clouds: 0,
@@ -150,24 +151,45 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
         slotRatios[slot] = Math.min(ratio, 1);
         emitAggregate();
       };
+    // Cache-hit aggregation: rollup fires when ALL THREE textures resolve
+    // from cache. The counter is fed per-slot from fetchBuffer's onCacheHit;
+    // once it reaches 3 we forward to ctx.onCacheHit exactly once. If even
+    // one slot misses we suppress the rollup — the user saw network activity
+    // for at least one texture, so the chip should have been visible.
+    let cacheHits = 0;
+    const expectedCacheHits = 3;
+    const noteCacheHit = (): void => {
+      if (!reportCacheHit) return;
+      cacheHits += 1;
+      if (cacheHits >= expectedCacheHits) {
+        try {
+          reportCacheHit();
+        } catch {
+          /* swallow consumer throws */
+        }
+      }
+    };
     const [dayBuf, cloudBuf, normalBuf] = await Promise.all([
       this.fetchBuffer({
         url: this.textures.daymap,
         errorCode: 'media-art/fetch-failed',
         cacheKeySuffix: 'daymap',
         ...(reportProgress ? { onProgress: makeSlotProgress('daymap') } : {}),
+        ...(reportCacheHit ? { onCacheHit: noteCacheHit } : {}),
       }),
       this.fetchBuffer({
         url: this.textures.clouds,
         errorCode: 'media-art/fetch-failed',
         cacheKeySuffix: 'clouds',
         ...(reportProgress ? { onProgress: makeSlotProgress('clouds') } : {}),
+        ...(reportCacheHit ? { onCacheHit: noteCacheHit } : {}),
       }),
       this.fetchBuffer({
         url: this.textures.normal,
         errorCode: 'media-art/fetch-failed',
         cacheKeySuffix: 'normal',
         ...(reportProgress ? { onProgress: makeSlotProgress('normal') } : {}),
+        ...(reportCacheHit ? { onCacheHit: noteCacheHit } : {}),
       }),
     ]);
     // Final monotonic 100% — covers the parse + scene-assembly tail that

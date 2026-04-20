@@ -59,7 +59,11 @@ export class GltfMeshSource extends BaseMeshSource {
     const { THREE } = deps;
 
     // ── 1. Acquire the GLB binary (cache or network) ──────────────────────
+    //
+    // Single-fetch source: the rollup `ctx.onCacheHit` fires iff the GLB came
+    // from cache. Pass-through, no aggregation needed.
     const reportProgress = ctx?.onProgress;
+    const reportCacheHit = ctx?.onCacheHit;
     const buffer = await this.fetchBuffer({
       url: this.url,
       errorCode: 'media-art/fetch-failed',
@@ -72,6 +76,17 @@ export class GltfMeshSource extends BaseMeshSource {
               const ratio = total && total > 0 ? loaded / total : 0.95;
               try {
                 reportProgress(Math.min(ratio, 1));
+              } catch {
+                /* swallow consumer throws */
+              }
+            },
+          }
+        : {}),
+      ...(reportCacheHit
+        ? {
+            onCacheHit: () => {
+              try {
+                reportCacheHit();
               } catch {
                 /* swallow consumer throws */
               }

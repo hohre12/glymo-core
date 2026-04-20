@@ -73,12 +73,18 @@ export abstract class BaseMeshSource implements MeshSource {
    * implementing multi-fetch loads (GLB + HDR, three textures) can compose
    * weighted progress fractions on top of per-fetch byte progress without
    * duplicating the cache short-circuit semantics.
+   *
+   * `onCacheHit` is the per-fetch cache-hit signal (fires synchronously when
+   * the buffer was served from the cache). Multi-fetch subclasses aggregate
+   * per-slot signals into the single rollup callback exposed via
+   * `MeshSourceLoadContext.onCacheHit`.
    */
   protected fetchBuffer(opts: {
     url: string;
     errorCode: string;
     cacheKeySuffix?: string;
     onProgress?: FetchProgressCallback;
+    onCacheHit?: () => void;
   }): Promise<ArrayBuffer> {
     const cacheKey = opts.cacheKeySuffix
       ? `${this.id}:${opts.cacheKeySuffix}`
@@ -91,6 +97,7 @@ export abstract class BaseMeshSource implements MeshSource {
       errorCode: opts.errorCode,
       assetLabel: this.id,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(opts.onCacheHit ? { onCacheHit: opts.onCacheHit } : {}),
     });
   }
 }

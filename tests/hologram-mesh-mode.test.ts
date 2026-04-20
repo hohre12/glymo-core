@@ -19,10 +19,22 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const stubs = vi.hoisted(() => {
+  // Position/scale/rotation stubs track writes so hit-test / translate-mesh
+  // tests can assert the renderer reached through to charContainer.position.
+  // Existing mesh-mode-basic tests do not read these values, so promoting
+  // from no-op to tracking is backward-compatible.
+  const makeVec3Stub = () => {
+    const v: { x: number; y: number; z: number; set: (x: number, y: number, z: number) => void; setScalar: (s: number) => void } = {
+      x: 0, y: 0, z: 0,
+      set(x: number, y: number, z: number) { v.x = x; v.y = y; v.z = z; },
+      setScalar(s: number) { v.x = s; v.y = s; v.z = s; },
+    };
+    return v;
+  };
   class StubObject3D {
-    position = { set: () => {}, x: 0, y: 0, z: 0 };
-    scale = { set: () => {}, setScalar: () => {} };
-    rotation = { set: () => {}, x: 0, y: 0, z: 0 };
+    position = makeVec3Stub();
+    scale = makeVec3Stub();
+    rotation = makeVec3Stub();
     children: StubObject3D[] = [];
     visible = true;
     add(o: StubObject3D): void { this.children.push(o); }
@@ -381,6 +393,133 @@ describe('Hologram3DRenderer mesh mode', () => {
       url: 'https://cdn.test/r.glb',
     });
     r.setTransition(1);
+    expect(() => r.renderFrame()).not.toThrow();
+    r.dispose();
+  });
+});
+
+// ── Mesh single-hand pinch-grab API (#26) ────────────────────────────────────
+//
+// Pins the contract exposed by Hologram3DRenderer for media-art mesh mode:
+//
+//   - hitTestMesh returns null in text mode, {hit:false|true} in mesh mode.
+//   - grabMesh is a mode gate (false in text, true once setModel resolves).
+//   - translateMeshTo writes charContainer.position using the same
+//     CSS→world projection the text-mode active-drag path uses, so rotation
+//     around the mesh's own center is preserved after translation.
+//   - releaseMesh clears the drag flag but leaves the final position on the
+//     Three.js group — the mesh stays where the user released it.
+//   - resetTransform is the escape hatch that returns position to origin.
+//
+// The pivot-indicator fade channel (applyContainerRotationAndZoom) is not
+// asserted here — it is verified indirectly through activeMeshDrag wiring
+// and exercised live in the landing/app studio flow. The StubRaycaster is
+// swapped per-test via prototype patching when hit-vs-miss distinction
+// matters; the default empty-intersection stub serves the common case.
+
+describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
+  it('hitTestMesh returns null in text mode (no mesh loaded)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    expect(r.hitTestMesh(400, 300)).toBeNull();
+    r.dispose();
+  });
+
+  it('hitTestMesh returns {hit:false} when the raycast misses in mesh mode', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'miss', url: 'https://cdn/m.glb' });
+    // Default StubRaycaster.intersectObjects returns [] → miss.
+    expect(r.hitTestMesh(400, 300)).toEqual({ hit: false });
+    r.dispose();
+  });
+
+  it('hitTestMesh returns {hit:true} when the raycast intersects the mesh group', async () => {
+    const orig = stubs.StubRaycaster.prototype.intersectObjects;
+    stubs.StubRaycaster.prototype.intersectObjects = function () {
+      return [{ object: {}, distance: 1 }];
+    };
+    try {
+      const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+      await r.setModel({ type: 'gltf', id: 'hit', url: 'https://cdn/m.glb' });
+      expect(r.hitTestMesh(400, 300)).toEqual({ hit: true });
+      r.dispose();
+    } finally {
+      stubs.StubRaycaster.prototype.intersectObjects = orig;
+    }
+  });
+
+  it('grabMesh returns false in text mode and true once mesh is loaded', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    expect(r.grabMesh()).toBe(false);
+    await r.setModel({ type: 'gltf', id: 'grab', url: 'https://cdn/m.glb' });
+    expect(r.grabMesh()).toBe(true);
+    r.dispose();
+  });
+
+  it('translateMeshTo moves charContainer.position in mesh mode', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'translate', url: 'https://cdn/m.glb' });
+    r.grabMesh();
+    // Upper-right of the 800×600 mock canvas — positive NDC X, positive NDC Y.
+    r.translateMeshTo(700, 100);
+    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
+    expect(container.position.x).toBeGreaterThan(0);
+    expect(container.position.y).toBeGreaterThan(0);
+    expect(container.position.z).toBe(0);
+    r.dispose();
+  });
+
+  it('translateMeshTo is a no-op in text mode', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } | null }).charContainer;
+    const before = { x: container?.position.x ?? 0, y: container?.position.y ?? 0 };
+    r.translateMeshTo(500, 200);
+    expect(container?.position.x).toBe(before.x);
+    expect(container?.position.y).toBe(before.y);
+    r.dispose();
+  });
+
+  it('grab → translate → release keeps the final position on the group', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'seq', url: 'https://cdn/m.glb' });
+    expect(r.grabMesh()).toBe(true);
+    r.translateMeshTo(600, 200);
+    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
+    const committed = { x: container.position.x, y: container.position.y };
+    expect(committed.x).not.toBe(0);
+    r.releaseMesh();
+    // Position is persisted by the Three.js Group — release only clears the
+    // internal drag flag, it does not rewind translation.
+    expect(container.position.x).toBe(committed.x);
+    expect(container.position.y).toBe(committed.y);
+    r.dispose();
+  });
+
+  it('resetTransform clears mesh drag state and returns container to origin', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'reset', url: 'https://cdn/m.glb' });
+    r.grabMesh();
+    r.translateMeshTo(700, 100);
+    r.resetTransform();
+    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
+    expect(container.position.x).toBe(0);
+    expect(container.position.y).toBe(0);
+    expect(container.position.z).toBe(0);
+    r.dispose();
+  });
+
+  it('renderFrame after grab + translate still does not throw (rotation pipeline intact)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'no-regress', url: 'https://cdn/m.glb' });
+    r.setTransition(1);
+    r.grabMesh();
+    r.translateMeshTo(500, 300);
+    r.setRotation(0.3, -0.2, 0.1);
+    r.setZoom(1.5);
+    expect(() => r.renderFrame()).not.toThrow();
+    r.releaseMesh();
     expect(() => r.renderFrame()).not.toThrow();
     r.dispose();
   });
