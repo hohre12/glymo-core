@@ -1,78 +1,50 @@
 // ── GLTF Mesh Source ──────────────────────────────────────────────────────────
 //
 // Loads a GLB binary and produces a MediaArtMeshState ready to be added to
-// the Hologram3DRenderer scene. Implements the MeshSource interface from
-// hologram/types.ts.
+// the Hologram3DRenderer scene. Inherits cache + fetcher plumbing from
+// BaseMeshSource — this file owns only the GLB parse + holographic shader
+// treatment.
 //
 // Cache contract (per docs/plans/media-art-mvp.md §6.1):
 //   - Cache key is descriptor.id (NOT URL) — surviving CDN moves and the
 //     glymo-app/public/media-art/<category>/<provider>/<id>.glb scheme.
-//   - Cache miss → fetch(url), parse, cache.set(id, ArrayBuffer).
 //   - Cache hit → parse the cached buffer directly, skip the network.
+//   - Cache miss → fetch + persist + parse.
 //   - Cache adapter is optional. Without it, every load fetches.
 //
-// Error contract:
-//   - Network failures (fetch reject, non-OK status) → GlymoError code
-//     'media-art/fetch-failed'.
-//   - Parse failures (GLTFLoader rejection) → GlymoError 'media-art/parse-failed'.
-//   - Validation failures (no scenes in the GLB) → GlymoError
-//     'media-art/empty-gltf'.
-//   - All errors are recoverable (caller can fall back to text mode or pick
-//     another asset).
+// Error contract (all GlymoError-wrapped, recoverable except parse-failed
+// originating from a missing GLTFLoader module):
+//   - 'media-art/fetch-failed' — network error or non-OK status.
+//   - 'media-art/parse-failed' — GLTFLoader rejection.
+//   - 'media-art/empty-gltf' — GLB has no scenes.
 //
 // The MediaArtMeshState owns disposal — the renderer just calls dispose()
-// once and walks away. Inside dispose() we walk the scene graph, disposing
-// every geometry, material, and texture we created (the GLTFLoader-attached
-// ones get replaced by applyMediaArtShaderTreatment, but skinning meshes can
-// keep their own buffers we must release).
+// once and walks away. The base disposeObject3DTree helper walks the scene
+// graph; this source layers in defensive disposal of the holographic shader
+// materials (some of which the GLB scene graph might never reference).
 
 import { GlymoError } from '../../types.js';
 import type {
   GltfMeshSourceDescriptor,
   MediaArtMeshState,
-  MeshSource,
-  MeshSourceCache,
 } from '../types.js';
 import { applyMediaArtShaderTreatment } from '../mediaArtTSL.js';
+import { BaseMeshSource, type BaseMeshSourceOptions } from './BaseMeshSource.js';
+import {
+  assertDescriptorField,
+  assertDescriptorType,
+  computeBboxFromObject,
+  disposeObject3DTree,
+} from './common.js';
 
-/** Default fetcher — pluggable so tests can stub the network. */
-type FetchLike = (url: string) => Promise<Response>;
-
-export class GltfMeshSource implements MeshSource {
-  readonly id: string;
+export class GltfMeshSource extends BaseMeshSource {
   private readonly url: string;
-  private readonly cache?: MeshSourceCache;
-  private readonly fetcher: FetchLike;
 
-  constructor(
-    descriptor: GltfMeshSourceDescriptor,
-    options: { fetcher?: FetchLike } = {},
-  ) {
-    if (descriptor.type !== 'gltf') {
-      throw new GlymoError(
-        'media-art/invalid-descriptor',
-        `GltfMeshSource expected descriptor.type="gltf", got "${(descriptor as { type: string }).type}"`,
-        { recoverable: false },
-      );
-    }
-    if (!descriptor.id) {
-      throw new GlymoError(
-        'media-art/invalid-descriptor',
-        'GltfMeshSource requires descriptor.id',
-        { recoverable: false },
-      );
-    }
-    if (!descriptor.url) {
-      throw new GlymoError(
-        'media-art/invalid-descriptor',
-        'GltfMeshSource requires descriptor.url',
-        { recoverable: false },
-      );
-    }
-    this.id = descriptor.id;
+  constructor(descriptor: GltfMeshSourceDescriptor, options: BaseMeshSourceOptions = {}) {
+    assertDescriptorType(descriptor, 'gltf', 'GltfMeshSource');
+    assertDescriptorField(descriptor.url, 'url', 'GltfMeshSource');
+    super(descriptor, options);
     this.url = descriptor.url;
-    if (descriptor.cache) this.cache = descriptor.cache;
-    this.fetcher = options.fetcher ?? ((u) => fetch(u));
   }
 
   async load(deps: {
@@ -82,7 +54,10 @@ export class GltfMeshSource implements MeshSource {
     const { THREE } = deps;
 
     // ── 1. Acquire the GLB binary (cache or network) ──────────────────────
-    const buffer = await this.acquireBuffer();
+    const buffer = await this.fetchBuffer({
+      url: this.url,
+      errorCode: 'media-art/fetch-failed',
+    });
 
     // ── 2. Parse GLB via GLTFLoader ───────────────────────────────────────
     const gltf = await this.parseGlb(buffer);
@@ -97,23 +72,19 @@ export class GltfMeshSource implements MeshSource {
     const sceneRoot = gltf.scene ?? gltf.scenes[0];
 
     // ── 3. Compute bbox before swapping materials so we get geometry-true
-    //      bounds (the holo material has DoubleSide which would inflate the
-    //      bbox if we measured after).
-    const box = new THREE.Box3().setFromObject(sceneRoot);
-    const bbox = {
-      min: { x: box.min.x, y: box.min.y, z: box.min.z },
-      max: { x: box.max.x, y: box.max.y, z: box.max.z },
-    };
+    //      bounds (a future material with DoubleSide would otherwise inflate
+    //      the bbox if measured after).
+    const bbox = computeBboxFromObject(THREE, sceneRoot);
 
     // ── 4. Apply the media-art shader treatment to every Mesh ─────────────
     const treatment = applyMediaArtShaderTreatment(sceneRoot, deps);
 
-    // ── 5. Optional animation mixer (bake first available clip on play) ───
+    // ── 5. Optional animation mixer (auto-play first clip) ────────────────
     let mixer: unknown = undefined;
     if (gltf.animations && gltf.animations.length > 0) {
-      mixer = new THREE.AnimationMixer(sceneRoot);
-      // Auto-play the first clip — most GLBs ship with idle/breathing as
-      // clip[0]. Caller can override later by re-querying the mixer.
+      mixer = new THREE.AnimationMixer(
+        sceneRoot as InstanceType<typeof import('three/webgpu').Object3D>,
+      );
       const action = (mixer as { clipAction: (clip: unknown) => { play: () => void } })
         .clipAction(gltf.animations[0]);
       action.play();
@@ -121,39 +92,12 @@ export class GltfMeshSource implements MeshSource {
 
     // ── 6. Wire up disposal — close over the resources we own ─────────────
     const dispose = () => {
-      // Stop animation mixer first so no draw calls reference disposed buffers.
       if (mixer) {
         (mixer as { stopAllAction: () => void }).stopAllAction();
       }
-      sceneRoot.traverse((obj: unknown) => {
-        const geometry = (obj as { geometry?: { dispose?: () => void } }).geometry;
-        if (geometry?.dispose) geometry.dispose();
-        const material = (obj as { material?: unknown }).material;
-        if (material) {
-          const list = Array.isArray(material) ? material : [material];
-          for (const m of list) {
-            const dispMat = m as { dispose?: () => void; map?: { dispose?: () => void } };
-            if (dispMat.map?.dispose) dispMat.map.dispose();
-            if (dispMat.dispose) dispMat.dispose();
-          }
-        }
-      });
-      // Defensive: dispose any treatment material the GLB scene graph never
-      // ended up referencing (paranoid path — applyMediaArtShaderTreatment
-      // attaches every material to a Mesh, so the traverse above usually
-      // covers them).
-      for (const m of treatment.materials) {
-        const dispMat = m as { dispose?: () => void };
-        if (dispMat.dispose) dispMat.dispose();
-      }
+      disposeObject3DTree(sceneRoot, { extraMaterials: treatment.materials });
     };
 
-    // Expose the treatment uniforms as plain enumerable properties so the
-    // renderer's setModel() can read them via `state.uTime` / `state.uTransition`.
-    // Earlier revisions wrapped these in Object.defineProperties + spread to
-    // hide them from JSON.stringify, but spread only copies own ENUMERABLE
-    // properties — the uniforms were silently dropped, leaving uTransition
-    // at its initial 0 and rendering every mesh fully transparent.
     return {
       id: this.id,
       group: sceneRoot,
@@ -162,55 +106,10 @@ export class GltfMeshSource implements MeshSource {
       dispose,
       uTime: treatment.uTime,
       uTransition: treatment.uTransition,
-    } as MediaArtMeshState & {
-      uTime: ReturnType<typeof import('three/tsl').uniform>;
-      uTransition: ReturnType<typeof import('three/tsl').uniform>;
     };
   }
 
   // ── Private ──────────────────────────────────────────────────────────────
-
-  private async acquireBuffer(): Promise<ArrayBuffer> {
-    if (this.cache) {
-      try {
-        const cached = await this.cache.get(this.id);
-        if (cached) return cached;
-      } catch {
-        // Cache read failure is non-fatal — proceed to network.
-      }
-    }
-
-    let response: Response;
-    try {
-      response = await this.fetcher(this.url);
-    } catch (err) {
-      throw new GlymoError(
-        'media-art/fetch-failed',
-        `Network error fetching GLB ${this.id} from ${this.url}`,
-        { recoverable: true, originalError: err as Error },
-      );
-    }
-
-    if (!response.ok) {
-      throw new GlymoError(
-        'media-art/fetch-failed',
-        `HTTP ${response.status} fetching GLB ${this.id} from ${this.url}`,
-        { recoverable: true },
-      );
-    }
-
-    const buffer = await response.arrayBuffer();
-
-    if (this.cache) {
-      try {
-        await this.cache.set(this.id, buffer);
-      } catch {
-        // Cache write failure is non-fatal — the mesh still loads.
-      }
-    }
-
-    return buffer;
-  }
 
   private async parseGlb(buffer: ArrayBuffer): Promise<{
     scene?: { traverse: (cb: (obj: unknown) => void) => void };

@@ -57,17 +57,27 @@ export interface HologramGestureState {
 //
 // Added in v0.7.0 (P3 of docs/plans/media-art-mvp.md). The Hologram3DRenderer
 // switches between text mode (per-char TextGeometry, existing) and mesh mode
-// (single GLB) via setModel(). Both modes share the same Three.js scene,
-// camera, bloom postprocessing, and rotation/zoom/spread effects.
+// via setModel(). Both modes share the same Three.js scene, camera, bloom
+// postprocessing, and rotation/zoom/spread effects.
 //
 // Per §5 D5: a single Three.js context, internal mode flag routes geometry
 // construction. The MeshSource interface keeps text/mesh paths cleanly
 // separated without forcing the renderer into a god-class shape.
+//
+// v0.8.0 (2026-04-20) made the descriptor union polymorphic so each catalog
+// category can ship its own production-grade mesh source (procedural planets,
+// PBR-with-HDRI scenes, plain GLB) without forcing every asset through one
+// loader. The factory createMeshSource(descriptor) dispatches on type; each
+// concrete source extends BaseMeshSource for shared cache/dispose plumbing.
 
 /**
- * Cache adapter for fetched GLB binaries. Implementations may persist to
- * IndexedDB, in-memory, or skip caching entirely. Keys are descriptor.id
- * (NOT URL) so reloading after a CDN move still hits cache.
+ * Cache adapter for fetched binaries (GLB, HDR, image). Implementations may
+ * persist to IndexedDB, in-memory, or skip caching entirely. Keys are
+ * descriptor.id (NOT URL) so reloading after a CDN move still hits cache.
+ *
+ * For multi-asset sources (e.g. ProceduralPlanetMeshSource fetches three
+ * textures), implementations namespace internally — the public contract is
+ * still {get,set}(key, value).
  */
 export interface MeshSourceCache {
   get(key: string): Promise<ArrayBuffer | null>;
@@ -75,25 +85,104 @@ export interface MeshSourceCache {
 }
 
 /**
- * Descriptor for loading a GLB asset. Passed to Hologram3DRenderer.setModel().
- * Discriminated union — future descriptors (e.g. parametric primitives,
- * generated meshes) can be added without breaking existing call sites.
+ * Fields common to every MeshSource descriptor variant. Concrete descriptors
+ * extend this with their `type` discriminator and per-type fields.
  */
-export interface GltfMeshSourceDescriptor {
-  type: 'gltf';
+export interface BaseMeshSourceDescriptor {
   /** Stable id from the catalog (e.g. "kenney-tree-01"). Used for cache key. */
   id: string;
-  /** Public URL resolving to the GLB binary. */
-  url: string;
   /** Optional cache adapter. If omitted, every load fetches the network. */
   cache?: MeshSourceCache;
 }
 
 /**
- * Union of all descriptors accepted by setModel(). Currently GLTF-only; future
- * additions (e.g. 'kenney-asset', 'tripo-generated') extend the union.
+ * Descriptor for loading a plain GLB asset whose visual treatment is the
+ * cyan holographic media-art shader. Used by simple object/food/vehicle
+ * categories where the asset is just a shape.
  */
-export type MeshSourceDescriptor = GltfMeshSourceDescriptor;
+export interface GltfMeshSourceDescriptor extends BaseMeshSourceDescriptor {
+  type: 'gltf';
+  /** Public URL resolving to the GLB binary. */
+  url: string;
+}
+
+/**
+ * Descriptor for loading a GLB asset together with an HDR environment map.
+ * The HDRI drives image-based lighting (scene.environment); each Mesh's
+ * native PBR maps (`.map` / `.normalMap` / `.roughnessMap`) feed the textured
+ * cyan holographic treatment so surface detail bleeds through into the
+ * holographic look. Used for higher-fidelity categories (animals, hero
+ * objects) where the asset is meant to read as a richly-detailed subject
+ * inside a holographic scene.
+ *
+ * Pattern derived from .media-art-staging/DogPBRPreview.tsx.ref —
+ * RGBELoader-loaded HDR + textured-luminance cyan tint + fresnel rim.
+ */
+export interface GltfPbrMeshSourceDescriptor extends BaseMeshSourceDescriptor {
+  type: 'gltf-pbr';
+  /** Public URL resolving to the GLB binary. */
+  url: string;
+  /** Public URL resolving to the .hdr environment map (RGBE). */
+  hdriUrl: string;
+  /**
+   * Image-based lighting intensity multiplier (scene.environmentIntensity).
+   * Default 0.6 (matches DogPBRPreview canonical).
+   */
+  environmentIntensity?: number;
+}
+
+/**
+ * Descriptor for the procedural planet pattern: three layered spheres
+ * (body / clouds / atmosphere) driven by NASA-Public-Domain texture maps
+ * with a TSL-authored cyan-tinted Sobel-coastline shader. The visual
+ * signature matches glymo-landing/components/preview/EarthPreview.tsx
+ * (the canonical media-art quality bar from 2026-04-20).
+ *
+ * Used by the `space` category (Earth, future planets). Body texture
+ * encodes daylight reflectance (used for Sobel edge detection to surface
+ * coastlines as glow); clouds is single-channel atmosphere mask; normal
+ * supplies surface relief.
+ */
+export interface ProceduralPlanetMeshSourceDescriptor extends BaseMeshSourceDescriptor {
+  type: 'procedural-planet';
+  /** Public texture URLs — daymap + clouds + normal map. */
+  textures: {
+    daymap: string;
+    clouds: string;
+    normal: string;
+  };
+  /**
+   * Texture atlas pixel dimensions — required for the Sobel coastline
+   * neighbour-pixel offset (1/W, 1/H). All three textures must share these
+   * dimensions; the source does not rescale.
+   */
+  textureSize: {
+    width: number;
+    height: number;
+  };
+  /** Axial tilt in degrees applied to the body group. Earth: 23.4°. */
+  axialTiltDeg?: number;
+  /**
+   * Per-frame rotation rates in radians per second.
+   *   body — body sphere y-rotation (Earth: 0.10)
+   *   clouds — cloud shell y-rotation (Earth: 0.13)
+   * Defaults match Earth.
+   */
+  rotationRate?: {
+    body?: number;
+    clouds?: number;
+  };
+}
+
+/**
+ * Union of all descriptors accepted by setModel(). The factory
+ * createMeshSource(descriptor) dispatches on `type`; adding a new variant
+ * forces the switch to be updated (exhaustiveness check).
+ */
+export type MeshSourceDescriptor =
+  | GltfMeshSourceDescriptor
+  | GltfPbrMeshSourceDescriptor
+  | ProceduralPlanetMeshSourceDescriptor;
 
 /**
  * State of the loaded mesh-mode model. Produced by MeshSource.load() and
@@ -118,21 +207,51 @@ export interface MediaArtMeshState {
   };
   /** Dispose all GPU resources owned by this mesh (geometries, materials, textures). */
   dispose(): void;
+  /**
+   * Optional uniform driven by the renderer with elapsed seconds since
+   * startup. Sources that author their own TSL nodes (procedural planet,
+   * holographic GLB) attach this so per-frame shader animation works without
+   * additional plumbing.
+   */
+  uTime?: { value: number };
+  /**
+   * Optional uniform driven by the renderer with the 0..1 transition value
+   * (mesh-mode entry/exit easing).
+   */
+  uTransition?: { value: number };
+  /**
+   * Optional per-frame update hook. Called after the mixer advance and uniform
+   * writes, with elapsed wall-clock seconds and frame delta seconds. Sources
+   * that need to drive group transforms (e.g. procedural planet axial spin)
+   * or other non-uniform state attach this — there is no need to fork the
+   * renderer's frame loop.
+   */
+  update?(elapsed: number, dt: number): void;
+  /**
+   * Optional scene-level attach hook. Called once by the renderer after the
+   * group is added to its scene. Returns an optional cleanup function that
+   * fires when the state is disposed (alongside `dispose()`).
+   *
+   * Use this for scene-graph properties the source can't reach through its
+   * own group — chiefly `scene.environment` for HDR-driven image-based
+   * lighting and scene-level fog. Sources that don't need it omit the hook.
+   */
+  attachToScene?(scene: unknown): (() => void) | void;
 }
 
 /**
- * Mesh source contract. Implementations (GltfMeshSource, future: primitive
- * sources) are constructed from a descriptor and produce a MediaArtMeshState
- * via load(). The renderer never instantiates implementations directly — it
- * dispatches on descriptor.type.
+ * Mesh source contract. Implementations are constructed via the
+ * createMeshSource factory and produce a MediaArtMeshState via load(). The
+ * renderer never instantiates implementations directly — it dispatches on
+ * descriptor.type through the factory.
  */
 export interface MeshSource {
   /** Stable id used for dedup/idempotency (matches descriptor.id). */
   readonly id: string;
   /**
    * Load the mesh. Resolves with state ready to add to the scene; rejects
-   * with a GlymoError on fetch/parse/validation failure. May take seconds for
-   * large GLBs — callers should show loading UI.
+   * with a GlymoError on fetch/parse/validation failure. May take seconds
+   * for large assets — callers should show loading UI.
    *
    * The THREE/tsl modules are passed in (not imported by the source) so the
    * renderer's lazy-import semantics are preserved and the source file stays

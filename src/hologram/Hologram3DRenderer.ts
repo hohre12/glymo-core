@@ -17,7 +17,7 @@ import type {
   MeshSource,
   MeshSourceDescriptor,
 } from './types.js';
-import { GltfMeshSource } from './sources/GltfMeshSource.js';
+import { createMeshSource } from './sources/createMeshSource.js';
 
 // ── Lazy Three.js WebGPU imports ──────────────────────────────────────────────
 // Dynamically imported to keep initial bundle small and avoid SSR issues.
@@ -144,8 +144,27 @@ export class Hologram3DRenderer {
   /** Per-frame uniform driver for the currently loaded mesh's media-art shader. */
   private meshUTime: { value: number } | null = null;
   private meshUTransition: { value: number } | null = null;
+  /**
+   * Optional per-frame update hook surfaced by the mesh source (e.g. procedural
+   * planet axial spin). Called inside renderMeshFrame after uniform writes;
+   * source-owned animation lives here so the renderer's loop stays one-line.
+   */
+  private meshUpdate: ((elapsed: number, dt: number) => void) | null = null;
+  /**
+   * Cleanup function returned by the source's attachToScene hook (e.g. restore
+   * scene.environment after an HDR-driven source detaches). Invoked from
+   * disposeMeshState before the source's own dispose() so scene-level state is
+   * always restored even if dispose() throws.
+   */
+  private meshAttachCleanup: (() => void) | null = null;
   /** Animation mixer clock — separate from startTime so mixer pauses on dispose. */
   private mixerClock: InstanceType<typeof import('three/webgpu').Clock> | null = null;
+  /**
+   * Frame-delta clock for the mesh source's update hook. Independent from
+   * mixerClock so the two advance in step but neither resets the other on
+   * read (Clock.getDelta is destructive).
+   */
+  private meshFrameClock: InstanceType<typeof import('three/webgpu').Clock> | null = null;
   // Note: color and font were removed — the renderer uses hardcoded hologram
   // color (0x00bbff) and loads its own 3D font file. If per-instance color/font
   // customization is needed later, add setter methods instead of constructor args.
@@ -326,15 +345,13 @@ export class Hologram3DRenderer {
     this.meshState = state;
     this.mode = 'mesh';
 
-    // The GltfMeshSource returns aggregate uniforms via non-enumerable
-    // props (see sources/GltfMeshSource.ts); they're our handle to drive
-    // the media-art shader treatment per frame.
-    const stateWithUniforms = state as MediaArtMeshState & {
-      uTime?: { value: number };
-      uTransition?: { value: number };
-    };
-    this.meshUTime = stateWithUniforms.uTime ?? null;
-    this.meshUTransition = stateWithUniforms.uTransition ?? null;
+    // Mesh sources surface aggregate uniforms via plain enumerable props (see
+    // sources/*.ts); they're our handle to drive the media-art shader
+    // treatment per frame. update() and attachToScene() are likewise opt-in —
+    // sources that don't need them omit the hook.
+    this.meshUTime = state.uTime ?? null;
+    this.meshUTransition = state.uTransition ?? null;
+    this.meshUpdate = state.update ? state.update.bind(state) : null;
 
     // Attach to scene under charContainer so the existing rotation/zoom
     // pipeline applies untouched.
@@ -342,9 +359,19 @@ export class Hologram3DRenderer {
       this.charContainer.add(state.group as InstanceType<typeof import('three/webgpu').Object3D>);
     }
 
-    // Initialize mixer clock if the GLB ships animations.
-    if (state.mixer && THREE) {
-      this.mixerClock = new THREE.Clock();
+    // Scene-level attach (e.g. HDR environment for PBR sources). The hook
+    // returns an optional cleanup that disposeMeshState fires on teardown.
+    if (state.attachToScene && this.scene) {
+      const cleanup = state.attachToScene(this.scene);
+      this.meshAttachCleanup = typeof cleanup === 'function' ? cleanup : null;
+    }
+
+    // Initialize clocks. mixerClock only spins up if the source ships an
+    // animation mixer; meshFrameClock is needed whenever the source surfaces
+    // an update() hook so we can hand it a sensible dt.
+    if (THREE) {
+      if (state.mixer) this.mixerClock = new THREE.Clock();
+      if (this.meshUpdate) this.meshFrameClock = new THREE.Clock();
     }
 
     return state;
@@ -363,22 +390,22 @@ export class Hologram3DRenderer {
   // ── Internal: mesh-mode helpers ─────────────────────────────────────────────
 
   private createMeshSource(descriptor: MeshSourceDescriptor): MeshSource {
-    switch (descriptor.type) {
-      case 'gltf':
-        return new GltfMeshSource(descriptor);
-      default: {
-        // Exhaustiveness check — adding a new descriptor type forces this
-        // switch to be updated.
-        const _exhaustive: never = descriptor;
-        throw new Error(
-          `[Hologram3DRenderer] Unknown mesh source descriptor type: ${JSON.stringify(_exhaustive)}`,
-        );
-      }
-    }
+    // Delegate to the factory so this class never sees concrete source types.
+    // Adding a new variant only touches sources/createMeshSource.ts.
+    return createMeshSource(descriptor);
   }
 
   private disposeMeshState(): void {
     if (!this.meshState) return;
+    // Scene-level cleanup BEFORE the source's dispose() so even a throwing
+    // dispose can't strand HDR environment / fog state on the scene.
+    if (this.meshAttachCleanup) {
+      try {
+        this.meshAttachCleanup();
+      } catch (err) {
+        console.error('[Hologram3DRenderer] Mesh attach cleanup threw:', err);
+      }
+    }
     if (this.charContainer) {
       this.charContainer.remove(
         this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>,
@@ -392,7 +419,10 @@ export class Hologram3DRenderer {
     this.meshState = null;
     this.meshUTime = null;
     this.meshUTransition = null;
+    this.meshUpdate = null;
+    this.meshAttachCleanup = null;
     this.mixerClock = null;
+    this.meshFrameClock = null;
   }
 
   /** Find the nearest char to a CSS point using 3D raycasting, returns {id, dist} or null */
@@ -646,6 +676,17 @@ export class Hologram3DRenderer {
     if (this.meshState.mixer && this.mixerClock) {
       const dt = this.mixerClock.getDelta();
       (this.meshState.mixer as { update: (dt: number) => void }).update(dt);
+    }
+
+    // Source-driven update hook (e.g. procedural planet axial spin). Runs
+    // AFTER mixer + uniform writes so the source can read coherent state.
+    if (this.meshUpdate && this.meshFrameClock) {
+      const dt = this.meshFrameClock.getDelta();
+      try {
+        this.meshUpdate(elapsed, dt);
+      } catch (err) {
+        console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
+      }
     }
 
     // Normalize scale so the largest bbox dimension maps to ~2 world units.

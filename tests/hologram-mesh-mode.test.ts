@@ -84,6 +84,15 @@ const stubs = vi.hoisted(() => {
     update = (_dt: number): void => {};
     stopAllAction = (): void => {};
   }
+  // Lights — added when the renderer init() started provisioning scene lights
+  // for PBR irradiance (commit e1a1605). Position is exposed because the
+  // renderer's init writes sunLight.position.set(...).
+  class StubDirectionalLight extends StubObject3D {
+    constructor(_color?: number, _intensity?: number) { super(); }
+  }
+  class StubAmbientLight extends StubObject3D {
+    constructor(_color?: number, _intensity?: number) { super(); }
+  }
   class StubWebGPURenderer {
     domElement: unknown;
     constructor(opts: { canvas: unknown }) { this.domElement = opts.canvas; }
@@ -143,6 +152,8 @@ const stubs = vi.hoisted(() => {
     StubRaycaster,
     StubClock,
     StubAnimationMixer,
+    StubDirectionalLight,
+    StubAmbientLight,
     StubWebGPURenderer,
     StubPostProcessing,
     makeStubGltf,
@@ -166,6 +177,8 @@ vi.mock('three/webgpu', () => ({
   Raycaster: stubs.StubRaycaster,
   Clock: stubs.StubClock,
   AnimationMixer: stubs.StubAnimationMixer,
+  DirectionalLight: stubs.StubDirectionalLight,
+  AmbientLight: stubs.StubAmbientLight,
   WebGPURenderer: stubs.StubWebGPURenderer,
   PostProcessing: stubs.StubPostProcessing,
   FrontSide: 0,

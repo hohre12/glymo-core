@@ -188,20 +188,33 @@ export type {
   Hologram3DRendererOptions,
   HitTestResult,
   HologramGestureState,
-  // ── Media Art (v0.7.0) ──
+  // ── Media Art (v0.8.0 polymorphic source pack) ──
   MeshSource,
   MeshSourceCache,
   MeshSourceDescriptor,
+  BaseMeshSourceDescriptor,
   GltfMeshSourceDescriptor,
+  GltfPbrMeshSourceDescriptor,
+  ProceduralPlanetMeshSourceDescriptor,
   MediaArtMeshState,
 } from './hologram/index.js';
 export {
+  BaseMeshSource,
   GltfMeshSource,
+  GlbPbrMeshSource,
+  ProceduralPlanetMeshSource,
+  createMeshSource,
   createMediaArtShaderNodes,
   applyMediaArtShaderTreatment,
+  applyTexturedMediaArtShaderTreatment,
   MEDIA_ART_LUMINANCE_STOPS,
 } from './hologram/index.js';
-export type { MediaArtShaderNodes } from './hologram/index.js';
+export type {
+  BaseMeshSourceOptions,
+  FetchLike,
+  MediaArtShaderNodes,
+  MediaArtTreatmentResult,
+} from './hologram/index.js';
 
 export { HologramGesture } from './gesture/HologramGesture.js';
 export type { LandmarkPoint } from './gesture/HologramGesture.js';

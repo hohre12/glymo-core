@@ -187,11 +187,39 @@ export function createMediaArtShaderNodes(deps: {
   };
 }
 
+/** Result returned by every applyMediaArt*Treatment helper. */
+export interface MediaArtTreatmentResult {
+  /** Every fresh material attached during the traversal — caller disposes. */
+  materials: unknown[];
+  /** Aggregate time uniform — drive each frame; fans out to per-material uniforms. */
+  uTime: ReturnType<typeof import('three/tsl').uniform>;
+  /** Aggregate transition uniform — drive 0..1; fans out to per-material uniforms. */
+  uTransition: ReturnType<typeof import('three/tsl').uniform>;
+}
+
+/** Original PBR material shape — the subset of fields treatment helpers consume. */
+type SourcePbrMaterialShape = {
+  map?: unknown;
+  normalMap?: unknown;
+  roughnessMap?: unknown;
+  color?: { r: number; g: number; b: number };
+  side?: number;
+  transparent?: boolean;
+  alphaTest?: number;
+};
+
 /**
- * Apply the media-art shader treatment to every Mesh under the given root
- * group. Replaces each Mesh.material with a fresh MeshStandardNodeMaterial
- * carrying the shader nodes. Returns the list of materials AND the list of
- * uniform pairs so the caller can dispose / drive them.
+ * Apply the simple media-art shader treatment to every Mesh under the given
+ * root group. Replaces each Mesh.material with a fresh MeshStandardNodeMaterial
+ * carrying the cyan luminance gradient + fresnel rim emissive (no texture
+ * dependency). Returns the list of materials AND the aggregate uniform pair
+ * so the caller can dispose / drive them.
+ *
+ * Use this for plain GLBs whose original materials carry no useful textures
+ * (most CC0 low-poly catalogs — Kenney, Quaternius). For texture-rich PBR
+ * GLBs (Khronos demo assets, hero models) prefer
+ * applyTexturedMediaArtShaderTreatment which derives the cyan tint from the
+ * GLB's diffuse map for richer surface detail.
  *
  * Implementation note: each mesh gets ITS OWN material instance (not shared)
  * so per-mesh transition fades work independently if needed later. Uniforms
@@ -205,11 +233,7 @@ export function applyMediaArtShaderTreatment(
     THREE: typeof import('three/webgpu');
     tsl: typeof import('three/tsl');
   },
-): {
-  materials: unknown[];
-  uTime: ReturnType<typeof import('three/tsl').uniform>;
-  uTransition: ReturnType<typeof import('three/tsl').uniform>;
-} {
+): MediaArtTreatmentResult {
   const { THREE } = deps;
   const materials: unknown[] = [];
   const allUTimes: ReturnType<typeof import('three/tsl').uniform>[] = [];
@@ -262,31 +286,222 @@ export function applyMediaArtShaderTreatment(
     }
   });
 
-  // Aggregate uniform: a single uniform whose .value setter writes through
-  // to every per-material uniform. This keeps the renderer's per-frame loop
-  // a single assignment regardless of mesh count.
-  const aggregate = (list: ReturnType<typeof import('three/tsl').uniform>[]) => {
-    return new Proxy({ value: 0 } as { value: number }, {
-      set(target, prop, value): boolean {
-        if (prop === 'value') {
-          target.value = value as number;
-          for (const u of list) {
-            (u as unknown as { value: number }).value = value as number;
-          }
-        }
-        return true;
-      },
-      get(target, prop): unknown {
-        if (prop === 'value') return target.value;
-        return undefined;
-      },
-    }) as unknown as ReturnType<typeof import('three/tsl').uniform>;
+  return {
+    materials,
+    uTime: aggregateUniform(allUTimes),
+    uTransition: aggregateUniform(allUTransitions),
   };
+}
+
+/**
+ * Aggregate uniform: a single uniform whose .value setter writes through to
+ * every per-material uniform. Keeps the renderer's per-frame loop a single
+ * assignment regardless of mesh count, and works identically for the simple
+ * and textured treatments.
+ */
+function aggregateUniform(
+  list: ReturnType<typeof import('three/tsl').uniform>[],
+): ReturnType<typeof import('three/tsl').uniform> {
+  return new Proxy({ value: 0 } as { value: number }, {
+    set(target, prop, value): boolean {
+      if (prop === 'value') {
+        target.value = value as number;
+        for (const u of list) {
+          (u as unknown as { value: number }).value = value as number;
+        }
+      }
+      return true;
+    },
+    get(target, prop): unknown {
+      if (prop === 'value') return target.value;
+      return undefined;
+    },
+  }) as unknown as ReturnType<typeof import('three/tsl').uniform>;
+}
+
+/**
+ * Apply the textured media-art shader treatment — derives the cyan tint from
+ * the GLB's diffuse map (if present) so surface detail (fur patterns, panel
+ * lines, label text) bleeds through into the holographic look.
+ *
+ * Per-mesh material build (matches DogPBRPreview.tsx.ref pattern):
+ *   - Sample original `material.map` → compute luminance → 4-tier cyan
+ *     mapping (deep navy → cyan-mid → cyan-bright → cyan-white).
+ *   - Preserve original normalMap (slightly attenuated) and roughnessMap for
+ *     PBR response under HDR environment lighting.
+ *   - Add fresnel-rim emissive (silhouette glow for bloom).
+ *   - Inherit transparency / alpha-test from the original (foliage cards etc).
+ *
+ * Meshes without a diffuse map fall back to the simple gradient (their
+ * colorNode reduces to the base color sampled as a single luminance value).
+ *
+ * Use this for high-fidelity GLBs sourced via Khronos / Sketchfab / hero
+ * Quaternius assets where the original PBR maps carry information worth
+ * preserving. Pair with HDRI environment lighting via
+ * GlbPbrMeshSource for the full DogPBRPreview look.
+ */
+export function applyTexturedMediaArtShaderTreatment(
+  root: unknown,
+  deps: {
+    THREE: typeof import('three/webgpu');
+    tsl: typeof import('three/tsl');
+  },
+): MediaArtTreatmentResult {
+  const { THREE, tsl } = deps;
+  const {
+    Fn, float, vec3, mix,
+    abs, dot, pow, smoothstep, clamp,
+    color, uniform,
+    positionWorld, normalWorld, cameraPosition,
+    sin,
+    texture: tslSampleTexture,
+    uv,
+    normalMap: tslNormalMap,
+  } = tsl;
+
+  const materials: unknown[] = [];
+  const allUTimes: ReturnType<typeof import('three/tsl').uniform>[] = [];
+  const allUTransitions: ReturnType<typeof import('three/tsl').uniform>[] = [];
+
+  // Pre-construct THREE.Color instances per the DogPBRPreview palette.
+  const c0 = new THREE.Color(0x041425);
+  const c1 = new THREE.Color(0x0a4a8c);
+  const c2 = new THREE.Color(0x6fd8ff);
+  const c3 = new THREE.Color(0xc8efff);
+  const cGlow = new THREE.Color(0x00bbff);
+  const lumW = vec3(0.299, 0.587, 0.114);
+
+  (root as { traverse: (cb: (obj: unknown) => void) => void }).traverse((obj) => {
+    if (!(obj instanceof THREE.Mesh)) return;
+
+    const original = (obj as { material: unknown }).material as
+      | SourcePbrMaterialShape
+      | SourcePbrMaterialShape[];
+    const first = Array.isArray(original) ? original[0] : original;
+    if (!first) return;
+
+    // Per-mesh uniforms — keep transition fades independent if needed later.
+    const uTime = uniform(0.0);
+    const uTransition = uniform(0.0);
+
+    const mat = new THREE.MeshStandardNodeMaterial();
+
+    // Per-mesh fresnel — same shape as the simple treatment, slightly softer
+    // for the textured variant so the surface detail isn't washed out by
+    // edge bloom.
+    const fresnel = Fn(() => {
+      const viewDir = cameraPosition.sub(positionWorld).normalize();
+      const nDotV = abs(dot(normalWorld, viewDir));
+      return pow(float(1.0).sub(nDotV), float(3.2));
+    });
+
+    // ── Color: cyan-tinted texture luminance OR fallback gradient ─────────
+    if (first.map) {
+      const sample = tslSampleTexture(
+        first.map as InstanceType<typeof import('three/webgpu').Texture>,
+        uv(),
+      );
+      const baseRGB = sample.rgb;
+      const lum = dot(baseRGB, lumW);
+      const t1 = mix(color(c0), color(c1), smoothstep(float(0.05), float(0.35), lum));
+      const t2 = mix(t1, color(c2), smoothstep(float(0.35), float(0.75), lum));
+      const tFinal = mix(t2, color(c3), smoothstep(float(0.75), float(0.95), lum));
+      (mat as unknown as { colorNode: unknown }).colorNode = tFinal;
+
+      // Inherit alpha-test / transparent if the original used cutout textures.
+      if ((first.alphaTest ?? 0) > 0 || first.transparent) {
+        (mat as unknown as { opacityNode: unknown }).opacityNode = sample.a;
+        mat.transparent = !!first.transparent;
+        mat.alphaTest = first.alphaTest ?? 0.5;
+      }
+    } else {
+      const c = first.color ?? { r: 0.55, g: 0.8, b: 1.0 };
+      const baseLum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+      const lumNode = float(baseLum);
+      const t1 = mix(color(c0), color(c1), smoothstep(float(0.05), float(0.35), lumNode));
+      const t2 = mix(t1, color(c2), smoothstep(float(0.35), float(0.75), lumNode));
+      (mat as unknown as { colorNode: unknown }).colorNode = mix(
+        t2,
+        color(c3),
+        smoothstep(float(0.75), float(0.95), lumNode),
+      );
+    }
+
+    // ── Normal: preserve original normalMap (softened) ─────────────────────
+    if (first.normalMap) {
+      try {
+        (mat as unknown as { normalNode: unknown }).normalNode = tslNormalMap(
+          tslSampleTexture(
+            first.normalMap as InstanceType<typeof import('three/webgpu').Texture>,
+            uv(),
+          ),
+          float(0.85),
+        );
+      } catch {
+        // normalMap node unavailable on this build — skip silently.
+      }
+    }
+
+    // ── Roughness: from original roughnessMap.g if present ─────────────────
+    if (first.roughnessMap) {
+      (mat as unknown as { roughnessNode: unknown }).roughnessNode = tslSampleTexture(
+        first.roughnessMap as InstanceType<typeof import('three/webgpu').Texture>,
+        uv(),
+      ).g;
+    } else {
+      (mat as unknown as { roughnessNode: unknown }).roughnessNode = float(0.55);
+    }
+
+    // ── Metalness: zero (matches DogPBRPreview canonical) ──────────────────
+    (mat as unknown as { metalnessNode: unknown }).metalnessNode = float(0.0);
+
+    // ── Opacity: high base + fresnel boost + transition gate ──────────────
+    if (!(first.alphaTest ?? 0) && !first.transparent) {
+      (mat as unknown as { opacityNode: unknown }).opacityNode = clamp(
+        float(0.92).add(fresnel().mul(0.08)).mul(uTransition),
+        float(0.0),
+        float(1.0),
+      );
+      mat.transparent = true;
+      mat.depthWrite = false;
+    }
+
+    // ── Emissive: cyan rim (silhouette glow into bloom) ────────────────────
+    (mat as unknown as { emissiveNode: unknown }).emissiveNode = color(cGlow).mul(
+      fresnel().mul(0.65),
+    );
+
+    // ── Side: preserve original (foliage often DoubleSide) ────────────────
+    if (first.side !== undefined) mat.side = first.side as typeof mat.side;
+
+    // Dispose the original material — we own the visual treatment now.
+    if (Array.isArray(original)) {
+      for (const m of original) {
+        if (m && typeof (m as { dispose?: () => void }).dispose === 'function') {
+          (m as { dispose: () => void }).dispose();
+        }
+      }
+    } else {
+      if (original && typeof (original as { dispose?: () => void }).dispose === 'function') {
+        (original as { dispose: () => void }).dispose();
+      }
+    }
+
+    (obj as { material: unknown }).material = mat;
+    materials.push(mat);
+    allUTimes.push(uTime);
+    allUTransitions.push(uTransition);
+
+    // Suppress unused-variable warnings for tsl helpers we imported but
+    // don't reference in every code path (sin/clamp may go unused under
+    // some compiler flags).
+    void sin;
+  });
 
   return {
     materials,
-    uTime: aggregate(allUTimes),
-    uTransition: aggregate(allUTransitions),
+    uTime: aggregateUniform(allUTimes),
+    uTransition: aggregateUniform(allUTransitions),
   };
 }
 
