@@ -1,14 +1,16 @@
 import {
   CameraCapture,
   PINCH_THRESHOLD,
-  Z_PEN_THRESHOLD,
-  SPEED_GATE_THRESHOLD,
   MODEL_URL,
   WASM_URL,
   computePinchDistance,
   computeSpeed,
   zToPressure,
 } from '../src/input/CameraCapture.js';
+
+// NOTE: Z_PEN_THRESHOLD and SPEED_GATE_THRESHOLD were removed from the public
+// API in commit 118dad5 (refactor: extract GestureDetector and camera utils).
+// Tests for those exports have been removed accordingly.
 
 // Cross-compatible mock function
 const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
@@ -28,17 +30,24 @@ function createMockCanvas() {
 // ── Constants ────────────────────────────────────────
 
 describe('CameraCapture constants', () => {
-  it('exports PINCH_THRESHOLD', () => {
-    expect(PINCH_THRESHOLD).toBe(0.06);
+  // PINCH_THRESHOLD was tuned from 0.055 → 0.045 in commit be952d6
+  // ("fix: reduce PINCH_THRESHOLD for better magic tool sensitivity",
+  //  rationale: ~18% tighter to reduce accidental pinch activations).
+  // Deliberate — the test must track the production constant, not infer it.
+  // Per CLAUDE.md: no changing OneEuroFilter/gesture parameters without testing;
+  // this test is the enforcement gate.
+  it('exports PINCH_THRESHOLD as the locked value 0.045', () => {
+    expect(PINCH_THRESHOLD).toBe(0.045);
   });
 
-  it('exports Z_PEN_THRESHOLD', () => {
-    expect(Z_PEN_THRESHOLD).toBe(-0.02);
-  });
-
-  it('exports SPEED_GATE_THRESHOLD', () => {
-    expect(SPEED_GATE_THRESHOLD).toBe(3.0);
-  });
+  // Z_PEN_THRESHOLD and SPEED_GATE_THRESHOLD were removed in the refactor
+  // commit 118dad5 ("extract GestureDetector and camera utils from CameraCapture").
+  // These constants were never part of the public API and were not re-exported
+  // after extraction. The tests below are removed because the exports no longer
+  // exist.  Any future re-introduction must be a deliberate public-API addition
+  // with its own test entry here.
+  //
+  // (tests previously at lines 35–43 removed as part of Cat A cleanup — 2026-04-20)
 
   it('exports MODEL_URL', () => {
     expect(MODEL_URL).toContain('hand_landmarker');
@@ -99,40 +108,51 @@ describe('computeSpeed', () => {
     expect(computeSpeed(prev, curr, 200)).toBe(0);
   });
 
-  it('rejects ultra-fast movements above speed gate', () => {
+  // SPEED_GATE_THRESHOLD is no longer exported (removed in refactor commit 118dad5).
+  // These tests verify the numeric output of computeSpeed directly:
+  //   ultra-fast: 600px / 10ms = 60 px/ms — should be very large
+  //   normal draw: 5px / 33ms ≈ 0.15 px/ms — should be very small
+  it('returns large speed for ultra-fast movements (60 px/ms)', () => {
     const prev = { x: 0, y: 0, t: 100 };
     const curr = { x: 600, y: 0 };
-    expect(computeSpeed(prev, curr, 110)).toBeGreaterThan(SPEED_GATE_THRESHOLD);
+    expect(computeSpeed(prev, curr, 110)).toBeCloseTo(60, 0);
   });
 
-  it('accepts normal drawing speed below speed gate', () => {
+  it('returns small speed for normal drawing movements (~0.15 px/ms)', () => {
     const prev = { x: 100, y: 100, t: 100 };
     const curr = { x: 105, y: 100 };
-    expect(computeSpeed(prev, curr, 133)).toBeLessThan(SPEED_GATE_THRESHOLD);
+    expect(computeSpeed(prev, curr, 133)).toBeCloseTo(5 / 33, 2);
   });
 });
 
 // ── zToPressure ─────────────────────────────────────
 
+// zToPressure: maps [-0.15, 0] → [1.0, 0.6]
+// The floor was raised from 0.3 to 0.6 in commit 118dad5
+// ("refactor: extract GestureDetector and camera utils") with the note:
+// "Raised floor from 0.3 to 0.6 so camera strokes are never too thin."
+// Deliberate — this is a UX decision, not an accident.
+// Formula: 0.6 + clamp(0, 1, -z / 0.15) * 0.4
 describe('zToPressure', () => {
   it('returns max pressure (1.0) for z = -0.15', () => {
     expect(zToPressure(-0.15)).toBeCloseTo(1.0, 5);
   });
 
-  it('returns min pressure (0.3) for z = 0', () => {
-    expect(zToPressure(0)).toBeCloseTo(0.3, 5);
+  it('returns min pressure (0.6) for z = 0 (floor raised from 0.3 in commit 118dad5)', () => {
+    expect(zToPressure(0)).toBeCloseTo(0.6, 5);
   });
 
-  it('returns min pressure (0.3) for positive z', () => {
-    expect(zToPressure(0.05)).toBeCloseTo(0.3, 5);
+  it('returns min pressure (0.6) for positive z (clamped at floor)', () => {
+    expect(zToPressure(0.05)).toBeCloseTo(0.6, 5);
   });
 
-  it('returns clamped max for z < -0.15', () => {
+  it('returns clamped max (1.0) for z < -0.15', () => {
     expect(zToPressure(-0.3)).toBeCloseTo(1.0, 5);
   });
 
-  it('returns mid-range pressure for z = -0.075', () => {
-    expect(zToPressure(-0.075)).toBeCloseTo(0.65, 5);
+  it('returns mid-range pressure (0.8) for z = -0.075', () => {
+    // 0.6 + clamp(0.5) * 0.4 = 0.6 + 0.2 = 0.8
+    expect(zToPressure(-0.075)).toBeCloseTo(0.8, 5);
   });
 });
 
