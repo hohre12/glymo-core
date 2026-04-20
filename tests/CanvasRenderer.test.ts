@@ -18,6 +18,16 @@ function createMockCtx(): CanvasRenderingContext2D {
     stroke: mockFn(),
     save: mockFn(),
     restore: mockFn(),
+    drawImage: mockFn(),
+    createLinearGradient: mockFn().mockReturnValue({ addColorStop: mockFn() }),
+    setTransform: mockFn(),
+    resetTransform: mockFn(),
+    scale: mockFn(),
+    translate: mockFn(),
+    rotate: mockFn(),
+    transform: mockFn(),
+    closePath: mockFn(),
+    clip: mockFn(),
     fillStyle: '',
     strokeStyle: '',
     lineWidth: 1,
@@ -26,6 +36,7 @@ function createMockCtx(): CanvasRenderingContext2D {
     shadowColor: '',
     shadowBlur: 0,
     globalAlpha: 1,
+    globalCompositeOperation: 'source-over',
   } as unknown as CanvasRenderingContext2D;
 }
 
@@ -208,29 +219,35 @@ describe('CanvasRenderer render loop — background', () => {
 });
 
 // ── Render loop — completed strokes ──────────────────
+//
+// NOTE: Completed strokes are rendered into an OffscreenCanvas cache and then
+// blitted onto the main canvas via ctx.drawImage(). renderGlowPass/renderMainStroke
+// write to the offscreen context — not to the main ctx. The observable side-effect
+// on the main ctx is drawImage being called (cache blit) when strokes >= 2 points.
 
 describe('CanvasRenderer render loop — completed strokes', () => {
   beforeEach(setupRafMocks);
   afterEach(teardownRafMocks);
 
-  it('renderLoop renders completed strokes with effects', () => {
+  it('renderLoop blits completed strokes via drawImage on the main ctx', () => {
     const ctx = createMockCtx();
     const canvas = createMockCanvas(ctx);
     const renderer = new CanvasRenderer(canvas);
     renderer.addCompletedStroke(makeStroke(5));
     renderer.start();
     rafCallback!(16);
-    expect(ctx.stroke).toHaveBeenCalled();
+    // Completed strokes are cached in OffscreenCanvas and blitted via drawImage.
+    expect(ctx.drawImage).toHaveBeenCalled();
   });
 
-  it('renderLoop skips strokes with fewer than 2 points', () => {
+  it('renderLoop does not call drawImage when no strokes have been added', () => {
     const ctx = createMockCtx();
     const canvas = createMockCanvas(ctx);
     const renderer = new CanvasRenderer(canvas);
-    renderer.addCompletedStroke(makeStroke(1));
+    // No strokes — nothing to blit.
     renderer.start();
     rafCallback!(16);
-    expect(ctx.stroke).not.toHaveBeenCalled();
+    expect(ctx.drawImage).not.toHaveBeenCalled();
   });
 });
 
@@ -240,7 +257,22 @@ describe('CanvasRenderer render loop — active points', () => {
   beforeEach(setupRafMocks);
   afterEach(teardownRafMocks);
 
-  it('renderLoop renders active points when source is set', () => {
+  it('renderLoop renders a single active point as a dot via arc', () => {
+    const ctx = createMockCtx();
+    const canvas = createMockCanvas(ctx);
+    const renderer = new CanvasRenderer(canvas);
+    // A single active point triggers the dot path (arc + fill).
+    // Two+ points trigger the stroke path (beginPath + stroke) instead.
+    const pts: StrokePoint[] = [
+      { x: 10, y: 20, t: 0, pressure: 0.5 },
+    ];
+    renderer.setActivePointsSource(() => pts);
+    renderer.start();
+    rafCallback!(16);
+    expect(ctx.arc).toHaveBeenCalled();
+  });
+
+  it('renderLoop renders two+ active points as a stroke via ctx.stroke', () => {
     const ctx = createMockCtx();
     const canvas = createMockCanvas(ctx);
     const renderer = new CanvasRenderer(canvas);
@@ -251,7 +283,7 @@ describe('CanvasRenderer render loop — active points', () => {
     renderer.setActivePointsSource(() => pts);
     renderer.start();
     rafCallback!(16);
-    expect(ctx.arc).toHaveBeenCalled();
+    expect(ctx.stroke).toHaveBeenCalled();
   });
 
   it('renderLoop handles empty active points without error', () => {

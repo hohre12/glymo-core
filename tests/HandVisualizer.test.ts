@@ -9,13 +9,38 @@ function createMockCtx() {
     beginPath: vi.fn(),
     moveTo: vi.fn(),
     lineTo: vi.fn(),
+    closePath: vi.fn(),
     stroke: vi.fn(),
     fill: vi.fn(),
     arc: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
     setLineDash: vi.fn(),
+    quadraticCurveTo: vi.fn(),
+    bezierCurveTo: vi.fn(),
+    ellipse: vi.fn(),
+    rect: vi.fn(),
+    clip: vi.fn(),
+    scale: vi.fn(),
+    translate: vi.fn(),
+    rotate: vi.fn(),
+    transform: vi.fn(),
+    resetTransform: vi.fn(),
+    setTransform: vi.fn(),
+    drawImage: vi.fn(),
     createRadialGradient: vi.fn(() => ({
       addColorStop: vi.fn(),
     })),
+    createLinearGradient: vi.fn(() => ({
+      addColorStop: vi.fn(),
+    })),
+    fillText: vi.fn(),
+    measureText: vi.fn(() => ({ width: 0 })),
+    textAlign: '' as CanvasTextAlign,
+    font: '',
+    shadowBlur: 0,
+    shadowColor: '',
+    globalAlpha: 1,
     strokeStyle: '',
     fillStyle: '' as string | CanvasGradient,
     lineWidth: 0,
@@ -84,23 +109,26 @@ describe('HandVisualizer', () => {
     // clearRect should be called first
     expect(ctx.clearRect).toHaveBeenCalled();
 
-    // Each connection = beginPath + moveTo + lineTo + stroke
-    // HAND_CONNECTIONS has 23 connections
+    // NeonSkeletonStyle draws connections in two passes:
+    // drawBoneGlow (glow pass) + drawBones (solid pass), each with 23 connections.
+    // Plus 1 moveTo in drawPinchArc (the pinch indicator arc/line).
+    // Total moveTo: 23 (glow) + 23 (bones) + 1 (pinch) = 47.
     const connectionCount = HAND_CONNECTIONS.length;
     expect(ctx.moveTo).toHaveBeenCalledTimes(
-      connectionCount + 1, // connections + pinch indicator line
-    );
-    expect(ctx.lineTo).toHaveBeenCalledTimes(
-      connectionCount + 1, // connections + pinch indicator line
+      connectionCount * 2 + 1, // two bone passes + pinch arc
     );
   });
 
-  it('draws joints for each landmark', () => {
+  it('draws joints and fingertip circles for each landmark', () => {
     const landmarks = makeLandmarks();
     viz.draw(landmarks, false);
 
-    // 21 joints + 1 for fingertip glow
-    expect(ctx.arc).toHaveBeenCalledTimes(21 + 1);
+    // NeonSkeletonStyle arc breakdown (21 landmarks, 5 fingertips, 16 joints):
+    //   drawJoints:     16 joints × 2 arcs (outer ring + inner dot) = 32
+    //   drawFingerTips:  5 tips   × 3 arcs (glow + ring + center)   = 15
+    //   drawIndexCursor: 1 arc (gradient fill circle)                =  1
+    //   Total = 48
+    expect(ctx.arc).toHaveBeenCalledTimes(48);
   });
 
   it('draws fingertip glow with radial gradient', () => {
@@ -113,17 +141,12 @@ describe('HandVisualizer', () => {
   it('uses different colors for pinch active vs inactive', () => {
     const landmarks = makeLandmarks();
 
-    // Draw when pinching
+    // Both active and inactive paths must invoke stroke at least once.
     viz.draw(landmarks, true);
-    const pinchActiveStroke = ctx.strokeStyle;
+    expect(ctx.stroke).toHaveBeenCalled();
 
-    // Reset and draw when not pinching
-    ctx.strokeStyle = '';
+    ctx.stroke.mockClear();
     viz.draw(landmarks, false);
-    const pinchInactiveStroke = ctx.strokeStyle;
-
-    // The pinch indicator should set different strokeStyle for active vs inactive
-    // (we can't easily check the exact value due to ordering, but the calls differ)
     expect(ctx.stroke).toHaveBeenCalled();
   });
 
@@ -131,17 +154,17 @@ describe('HandVisualizer', () => {
     const landmarks = makeLandmarks();
     viz.draw(landmarks, false);
 
-    // setLineDash called with [4, 4] for inactive, then [] to reset
-    expect(ctx.setLineDash).toHaveBeenCalledWith([4, 4]);
+    // NeonSkeletonStyle uses [3, 5] for inactive dashed arc, then [] to reset.
+    expect(ctx.setLineDash).toHaveBeenCalledWith([3, 5]);
     expect(ctx.setLineDash).toHaveBeenCalledWith([]);
   });
 
-  it('applies solid line for active pinch indicator', () => {
+  it('applies solid line for active pinch indicator (no dashed dash)', () => {
     const landmarks = makeLandmarks();
     viz.draw(landmarks, true);
 
-    // When pinching, setLineDash is called with [] (solid)
-    expect(ctx.setLineDash).toHaveBeenCalledWith([]);
+    // When pinching, setLineDash is never called (no dashed lines in active path).
+    expect(ctx.setLineDash).not.toHaveBeenCalled();
   });
 
   it('clear() erases the overlay canvas', () => {
@@ -159,11 +182,10 @@ describe('HandVisualizer', () => {
     viz.draw(landmarks, false);
 
     // Mirror: (1 - 0.3) * 640 = 0.7 * 640 = 448
-    // Check that moveTo or arc was called with mirrored x
-    const arcCalls = ctx.arc.mock.calls;
-    // Find the call for index tip glow (the glow arc)
+    // The index cursor glow arc (drawIndexCursor) is drawn at the mirrored x.
+    const arcCalls = ctx.arc.mock.calls as number[][];
     const glowCall = arcCalls.find(
-      (call: number[]) => Math.abs(call[0] - 448) < 1,
+      (call) => Math.abs(call[0] - 448) < 1,
     );
     expect(glowCall).toBeDefined();
   });

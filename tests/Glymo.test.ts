@@ -62,6 +62,17 @@ function createMockCtx(): CanvasRenderingContext2D {
     stroke: noop,
     save: noop,
     restore: noop,
+    // Required by CanvasRenderer.renderCompletedStrokes (offscreen cache blit):
+    drawImage: noop,
+    // Required by selection and transform layers:
+    setTransform: noop,
+    resetTransform: noop,
+    scale: noop,
+    translate: noop,
+    rotate: noop,
+    transform: noop,
+    createLinearGradient: () => ({ addColorStop: noop }),
+    setLineDash: noop,
     fillStyle: '',
     strokeStyle: '',
     lineWidth: 1,
@@ -70,6 +81,7 @@ function createMockCtx(): CanvasRenderingContext2D {
     shadowColor: '',
     shadowBlur: 0,
     globalAlpha: 1,
+    globalCompositeOperation: 'source-over',
   } as unknown as CanvasRenderingContext2D;
 }
 
