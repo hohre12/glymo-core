@@ -63,10 +63,14 @@ describe('renderGlowPass', () => {
     expect(ctx.stroke).toHaveBeenCalled();
   });
 
-  it('sets globalAlpha to 0.6 for glow', () => {
+  // globalAlpha changed from 0.6 → 0.7 in commit e38bb96
+  // ("feat: drawing mode tools, SpatialGrouper, Fill, recognition-based text split"),
+  // rationale: "Fix animation memory leaks, glow transparency, morph timing".
+  // Deliberate UX improvement — brighter glow pass for better visual quality.
+  it('sets globalAlpha to 0.7 for glow (raised from 0.6 in commit e38bb96)', () => {
     const ctx = createMockCtx();
     renderGlowPass(ctx, makePoints(2), neonStyle);
-    expect(ctx.globalAlpha).toBe(0.6);
+    expect(ctx.globalAlpha).toBe(0.7);
   });
 });
 

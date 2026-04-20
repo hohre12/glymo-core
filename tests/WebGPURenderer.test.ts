@@ -188,8 +188,14 @@ describe('WebGPURenderer effect management', () => {
   let renderer: WebGPURenderer;
   beforeEach(() => { renderer = new WebGPURenderer(createMockCanvas()); });
 
-  it('defaults to neon effect', () => {
-    expect(renderer.getEffect()).toBe('neon');
+  // WebGPURenderer defaults to 'liquid' (the first GPU effect), not 'neon'
+  // (a Canvas2D effect). This was set in commit 29cd400 ("feat: add StrokeAnimator
+  // with particle-based sparkle effect + fix TS errors") where WebGPURenderer was
+  // first introduced with activeEffect: EffectPresetName = 'liquid'.
+  // 'neon' is a Canvas2D effect and would fall back to resolveEffect()'s neon
+  // preset if used, but the intent is that WebGPURenderer starts with a GPU effect.
+  it('defaults to liquid effect (first GPU effect, not canvas neon)', () => {
+    expect(renderer.getEffect()).toBe('liquid');
   });
 
   it('setEffect changes the active effect', () => {

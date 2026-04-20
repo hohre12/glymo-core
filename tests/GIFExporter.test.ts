@@ -210,28 +210,35 @@ describe('GIFExporter canvas validation', () => {
   });
 });
 
-// ── Size Warning ────────────────────────────────────
+// ── Size check via blob.size ─────────────────────────
+//
+// Deliberate change in commit 500e843 ("remove console.log from library"):
+// GIFExporter no longer calls console.warn for large GIFs — callers inspect
+// blob.size themselves against GIF_SIZE_WARN_BYTES. The constant is still
+// exported so host apps can enforce their own warning/error policy.
 
-describe('GIFExporter size warning', () => {
-  it('warns when output exceeds 5MB', async () => {
-    const largeData = new Uint8Array(6_000_000);
-    mockBytes.mockReturnValueOnce(largeData);
-
-    const warnSpy = mockFn();
-    const originalWarn = console.warn;
-    console.warn = warnSpy;
-
-    const canvas = createMockCanvas();
-    await mod.exportGIF(canvas);
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('exceeds'),
-    );
-    console.warn = originalWarn;
+describe('GIFExporter size — blob.size contract', () => {
+  it('GIF_SIZE_WARN_BYTES is exported and equals 5MB', () => {
+    expect(mod.GIF_SIZE_WARN_BYTES).toBe(5_000_000);
   });
 
-  it('does not warn when output is under 5MB', async () => {
-    mockBytes.mockReturnValueOnce(new Uint8Array(3));
+  it('returns a Blob whose size reflects the encoded bytes', async () => {
+    const encoded = new Uint8Array([71, 73, 70, 56, 57, 97]); // 6 bytes
+    mockBytes.mockReturnValueOnce(encoded);
+
+    const canvas = createMockCanvas();
+    const blob = await mod.exportGIF(canvas);
+
+    // Blob wraps the encoded bytes — size must match
+    expect(blob.size).toBe(encoded.byteLength);
+  });
+
+  it('does not call console.warn for large GIFs (no-console library policy)', async () => {
+    // Size warning was removed in 500e843: "Remove all console.log/warn/error
+    // from library source code." GIF_SIZE_WARN_BYTES is kept as a public
+    // constant for host apps, not used internally.
+    const largeData = new Uint8Array(6_000_000);
+    mockBytes.mockReturnValueOnce(largeData);
 
     const warnSpy = mockFn();
     const originalWarn = console.warn;
