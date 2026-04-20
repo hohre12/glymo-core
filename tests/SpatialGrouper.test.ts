@@ -1,9 +1,19 @@
 /**
- * SpatialGrouper tests — focused on the A+B stroke-loss boundary fix.
+ * SpatialGrouper tests — verifying the current spatial-grouping contract.
  *
- * Fix A: time-based boundary. If the pause between strokes exceeds half
- *        the finalizeDelay, the previous group finalizes even if the
- *        new stroke is spatially near.
+ * History:
+ *   fd2b506 — Added time-based boundary (Fix A): pause > finalizeDelay/2 → split
+ *   d4688ce — REMOVED Fix A: the time check caused every camera/air-drawn stroke
+ *             to finalize individually (hand movement naturally exceeds 600ms).
+ *             Reverted to spatial-only grouping in feedStroke().
+ *
+ * Current contract:
+ *   - feedStroke() groups by spatial proximity only. Time-gap does NOT cause
+ *     an immediate split. The finalizeDelay timer still fires, but feedStroke()
+ *     itself is time-agnostic.
+ *   - notifyStrokeStart() resets the timer (extends the group lifetime).
+ *   - finalizeGroupById() (Fix B) — force-finalize by ID — is still present.
+ *
  * Fix B: finalizeGroupById — force finalize a specific group immediately,
  *        regardless of timer or proximity.
  */
@@ -52,7 +62,12 @@ function makeGrouper(opts?: Partial<{
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-describe('SpatialGrouper time-based boundary (Fix A)', () => {
+// Time-based boundary was removed in commit d4688ce
+// ("fix(grouping): remove time-boundary check that broke camera multi-stroke grouping").
+// feedStroke() is now spatial-only: time gap does NOT split groups.
+// The suite is renamed to reflect the current contract.
+
+describe('SpatialGrouper spatial-only grouping contract (d4688ce)', () => {
   let nowMs = 1000;
   let originalNow: () => number;
 
@@ -67,25 +82,22 @@ describe('SpatialGrouper time-based boundary (Fix A)', () => {
     performance.now = originalNow;
   });
 
-  it('two strokes within half-delay stay in SAME group (close)', () => {
+  it('two spatially near strokes stay in SAME group regardless of time gap', () => {
     const { grouper, finalized } = makeGrouper({ finalizeDelay: 1500 });
-    // delay = 1500 → half = 750 → 500 < 750 → same group
     grouper.feedStroke(mkStroke(100, 100));
-    nowMs += 500;
-    grouper.feedStroke(mkStroke(110, 110));
+    // Advance 800ms — MORE than finalizeDelay/2, but feedStroke() is time-agnostic.
+    nowMs += 800;
+    grouper.feedStroke(mkStroke(110, 110)); // spatially near → merges
 
-    // Force finalize all so we can inspect
     grouper.flushAll();
     expect(finalized.length).toBe(1);
     expect(finalized[0]!.strokes.length).toBe(2);
   });
 
-  it('two strokes > half-delay apart end up in DIFFERENT groups even if near', () => {
+  it('two spatially FAR strokes end up in DIFFERENT groups (proximity split)', () => {
     const { grouper, finalized } = makeGrouper({ finalizeDelay: 1500 });
-    // delay = 1500 → half = 750 → 800 > 750 → boundary
     grouper.feedStroke(mkStroke(100, 100));
-    nowMs += 800;
-    grouper.feedStroke(mkStroke(110, 110)); // spatially near — would merge without time guard
+    grouper.feedStroke(mkStroke(900, 900)); // spatially far → new group
 
     grouper.flushAll();
     expect(finalized.length).toBe(2);

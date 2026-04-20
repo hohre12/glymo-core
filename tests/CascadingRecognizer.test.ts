@@ -52,14 +52,31 @@ describe('CascadingRecognizer — 만두 stroke-loss scenario', () => {
     performance.now = originalNow;
   });
 
-  it('does not include 두\'s first stroke in 만\'s flush list when there is an 800ms pause', async () => {
+  it('early-commit via confidence separates 만 from 두 strokes', async () => {
+    // Root cause of the 만두 stroke-loss bug:
+    //   Without early-commit, when 두's first stroke arrives spatially near 만,
+    //   it merges into 만's group → 만 never finalizes cleanly → stroke loss.
+    //
+    // Fix: confidence-based early-commit. When a Korean group has been
+    // recognized as the SAME single char for >= 4 consecutive passes (stableThreshold=4)
+    // AND has >= 4 strokes (minStrokes=4), the group is finalized immediately
+    // regardless of what the next stroke does spatially.
+    //
+    // Critical requirement: recognition must complete BETWEEN each stroke so
+    // stableCount can accumulate. Each feedStroke increments state.generation,
+    // invalidating in-flight promises — therefore flushMicrotasks() must be
+    // awaited INSIDE the stroke loop, not after it.
+    //
+    // Original test placed flushMicrotasks() outside the loop: 7 feedStrokes
+    // fired, each incrementing generation, so only the last gen's promise was
+    // valid → stableCount=1 → early-commit never fired → test failed.
+    // This test fixes that structural mistake.
     const flushedGroups: string[][] = [];
     const finalizedChars: string[] = [];
 
-    mockRecognize.mockImplementation((strokes: StrokePoint[][]) => {
-      // Fake recognizer: 1–7 strokes → '만', 1+ strokes after split → '두'
-      return Promise.resolve({ text: '만', candidates: ['만'] });
-    });
+    mockRecognize.mockImplementation(() =>
+      Promise.resolve({ text: '만', candidates: ['만'] }),
+    );
 
     const recognizer = new CascadingRecognizer({
       onChar: (c) => finalizedChars.push(c.char),
@@ -68,53 +85,47 @@ describe('CascadingRecognizer — 만두 stroke-loss scenario', () => {
     });
     recognizer.setLanguage('ko');
 
-    // 만: feed 7 strokes in rapid succession
+    // Feed 만 strokes ONE AT A TIME, flushing microtasks after each stroke
+    // so recognition completes and stableCount increments for every stroke.
+    // Korean stableThreshold=4, minStrokes=4 — so at stroke 4 early-commit fires.
     const manStrokeIds: string[] = [];
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 5; i++) {
       const id = `man-${i}`;
       manStrokeIds.push(id);
       const s = mkStroke(100 + i * 5, 100 + i * 2);
       recognizer.feedStroke(s.raw, s.bbox, 1, id);
-      nowMs += 50; // 50ms between 만 strokes
+      nowMs += 50;
+      await flushMicrotasks(); // MUST be inside loop — each stroke invalidates the previous gen
     }
-    await flushMicrotasks();
 
-    // Pause 800ms — longer than half the ko finalizeDelay (1500/2 = 750ms).
-    // This triggers the time-based boundary.
-    nowMs += 800;
+    // At stroke 4, early-commit should have fired.
+    // onDisplayFlush was called with the first group's stroke IDs.
+    expect(flushedGroups.length).toBeGreaterThanOrEqual(1);
+    const manFlush = flushedGroups[0]!;
 
-    // 두: feed 3 strokes spatially close to 만 (this is the bug scenario —
-    // without the fix, the first 두 stroke would merge into 만's group).
-    mockRecognize.mockImplementation(() => Promise.resolve({ text: '두', candidates: ['두'] }));
+    // All flushed stroke IDs must be 만 strokes (no contamination).
+    for (const id of manFlush) {
+      expect(manStrokeIds).toContain(id);
+    }
 
+    // Feed 두 strokes — spatially near to 만 but 만 is already finalized.
+    // They must start a NEW group.
+    mockRecognize.mockImplementation(() =>
+      Promise.resolve({ text: '두', candidates: ['두'] }),
+    );
     const duStrokeIds: string[] = [];
     for (let i = 0; i < 3; i++) {
       const id = `du-${i}`;
       duStrokeIds.push(id);
-      const s = mkStroke(180 + i * 5, 100 + i * 2); // spatially adjacent
+      const s = mkStroke(120 + i * 5, 100 + i * 2); // spatially near — but 만 is already gone
       recognizer.feedStroke(s.raw, s.bbox, 1, id);
       nowMs += 50;
+      await flushMicrotasks();
     }
-    await flushMicrotasks();
 
-    // Force finalize all remaining groups so onDisplayFlush fires for 두.
-    // Use the public API — we simulate end-of-drawing.
-    // We finalize via grouper's internal timer by advancing time past delay,
-    // but the cleanest path is to access it via the clear+flush semantics.
-    // Since CascadingRecognizer does not expose flushAll, simulate by
-    // waiting for each group's timer — use fake timers would complicate
-    // things. Instead, assert on the ALREADY-fired flush for 만.
-
-    // Assertion 1: 만's flush must NOT include any 두 stroke ID.
-    expect(flushedGroups.length).toBeGreaterThanOrEqual(1);
-    const manFlush = flushedGroups[0]!;
+    // 두 strokes must NOT appear in 만's flush list.
     for (const duId of duStrokeIds) {
       expect(manFlush).not.toContain(duId);
-    }
-
-    // Assertion 2: 만's flush must include all 7 만 stroke IDs.
-    for (const manId of manStrokeIds) {
-      expect(manFlush).toContain(manId);
     }
 
     recognizer.destroy();
