@@ -337,8 +337,11 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
     }
     const tex = new THREE.Texture(bitmap as unknown as HTMLImageElement);
     tex.colorSpace = opts.srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    // Both axes RepeatWrapping — matches EarthPreview canonical.
+    // ClampToEdge on T causes pole-row banding AND poisons the Sobel
+    // coastline filter near the poles (lumUp/lumDown sample boundary).
     tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
     tex.generateMipmaps = true;

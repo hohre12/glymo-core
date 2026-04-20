@@ -133,10 +133,20 @@ export function disposeObject3DTree(
           map?: { dispose?: () => void };
           normalMap?: { dispose?: () => void };
           emissiveMap?: { dispose?: () => void };
+          roughnessMap?: { dispose?: () => void };
+          metalnessMap?: { dispose?: () => void };
+          aoMap?: { dispose?: () => void };
+          envMap?: { dispose?: () => void };
         };
+        // Standard MeshStandardMaterial map slots — every PBR map must be
+        // released or its GPU texture leaks for the lifetime of the page.
         if (dispMat.map?.dispose) dispMat.map.dispose();
         if (dispMat.normalMap?.dispose) dispMat.normalMap.dispose();
         if (dispMat.emissiveMap?.dispose) dispMat.emissiveMap.dispose();
+        if (dispMat.roughnessMap?.dispose) dispMat.roughnessMap.dispose();
+        if (dispMat.metalnessMap?.dispose) dispMat.metalnessMap.dispose();
+        if (dispMat.aoMap?.dispose) dispMat.aoMap.dispose();
+        if (dispMat.envMap?.dispose) dispMat.envMap.dispose();
         if (dispMat.dispose) dispMat.dispose();
       }
     }

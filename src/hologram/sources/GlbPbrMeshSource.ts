@@ -146,12 +146,12 @@ export class GlbPbrMeshSource extends BaseMeshSource {
       }
       disposeObject3DTree(sceneRoot, {
         extraMaterials: treatment.materials,
-        extraTextures: hdrTexture ? [hdrTexture] : undefined,
       });
-      // Defensive: if attachToScene was never called but the HDR was loaded,
-      // dispose the HDR explicitly (the extraTextures path above covers the
-      // happy case).
-      if (hdrTexture && !attachedScene) {
+      // HDR texture is owned by this source regardless of attach state. The
+      // attachToScene cleanup callback restores scene.environment (typically
+      // to null) BEFORE the renderer calls dispose, so disposing the GPU
+      // resource here is safe AND required (no double-free path).
+      if (hdrTexture) {
         (hdrTexture as { dispose?: () => void }).dispose?.();
       }
     };
