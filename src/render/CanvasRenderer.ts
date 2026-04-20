@@ -315,6 +315,13 @@ export class CanvasRenderer implements IRenderer {
   // ── Private: Render Loop ────────────────────────────
 
   private renderLoop(timestamp: number): void {
+    // Teardown guard: rAF callbacks queued in `requestAnimationFrame(... renderLoop)`
+    // can fire AFTER an external `stop()` has run if the host environment
+    // (notably JSDOM in tests) has already drained the cancellation. If
+    // animationId is null we know stop() / dispose has happened — bail out
+    // before touching `this.ctx`, which the test harness may have already
+    // unmounted, throwing a noisy (but harmless) drawing exception.
+    if (this.animationId === null) return;
     this.perfMonitor.startFrame();
 
     const dt = timestamp - this.lastFrameTime;
