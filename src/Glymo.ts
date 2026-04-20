@@ -511,6 +511,47 @@ export class Glymo {
   }
 
   /**
+   * Translate every stroke that belongs to {@link GlymoObject} `id` by
+   * `(dx, dy)` in canvas-space and shift the cached bbox by the same delta.
+   *
+   * Drawing-mode counterpart to text-mode glyph translation. Returns `false`
+   * when the object id is unknown so callers can fall back to no-op without
+   * a try/catch. Mutates stroke points in place because the renderer holds
+   * the same `Stroke` references — markDirty invalidates the offscreen cache.
+   *
+   * Limitation: fills are full-canvas bitmaps (no per-pixel offset), so
+   * fills inside the object are intentionally NOT translated.
+   */
+  translateObject(id: string, dx: number, dy: number): boolean {
+    this.assertNotDestroyed();
+    const obj = this.objectStore.getObject(id);
+    if (!obj) return false;
+    if (dx === 0 && dy === 0) return true;
+
+    const strokeIndex = new Map(this.strokes.map((s) => [s.id, s]));
+    for (const sid of obj.strokeIds) {
+      const stroke = strokeIndex.get(sid);
+      if (!stroke) continue;
+      for (const pt of stroke.raw) {
+        pt.x += dx;
+        pt.y += dy;
+      }
+      for (const pt of stroke.smoothed) {
+        pt.x += dx;
+        pt.y += dy;
+      }
+    }
+
+    // ObjectStore.getObject() returns the live reference, so in-place
+    // bbox mutation is the persistence path (no setter needed).
+    obj.bbox.x += dx;
+    obj.bbox.y += dy;
+    this.renderer.markDirty();
+    this.eventBus.emit('object:translated', { id, dx, dy });
+    return true;
+  }
+
+  /**
    * Hydrate the session from a pre-recorded stroke set (e.g. a project
    * loaded from the server). Replaces all existing strokes and fills.
    *

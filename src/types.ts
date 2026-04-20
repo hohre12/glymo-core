@@ -515,6 +515,7 @@ export interface GlymoEventMap {
   'character:change': [{ characters: CharacterDoc[] }];
   'correction:applied': [{ objectId: string; corrections: string[] }];
   'correction:reverted': [{ objectId: string }];
+  'object:translated': [{ id: string; dx: number; dy: number }];
   [key: `gesture:${string}`]: [import('./gesture/types.js').GestureEvent];
 }
 
