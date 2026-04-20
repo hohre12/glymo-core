@@ -27,9 +27,11 @@ import { GlymoError } from '../../types.js';
 import type {
   GltfMeshSourceDescriptor,
   MediaArtMeshState,
+  MeshSourceLoadContext,
 } from '../types.js';
 import { applyMediaArtShaderTreatment } from '../mediaArtTSL.js';
 import { BaseMeshSource, type BaseMeshSourceOptions } from './BaseMeshSource.js';
+import { getDracoLoader, getKtx2Loader } from './loaders.js';
 import {
   assertDescriptorField,
   assertDescriptorType,
@@ -47,20 +49,46 @@ export class GltfMeshSource extends BaseMeshSource {
     this.url = descriptor.url;
   }
 
-  async load(deps: {
-    THREE: typeof import('three/webgpu');
-    tsl: typeof import('three/tsl');
-  }): Promise<MediaArtMeshState> {
+  async load(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MediaArtMeshState> {
     const { THREE } = deps;
 
     // ── 1. Acquire the GLB binary (cache or network) ──────────────────────
+    const reportProgress = ctx?.onProgress;
     const buffer = await this.fetchBuffer({
       url: this.url,
       errorCode: 'media-art/fetch-failed',
+      ...(reportProgress
+        ? {
+            onProgress: (loaded: number, total: number | null) => {
+              // Single-fetch source: byte ratio == load progress. Clamp at
+              // 0.95 when the server omitted Content-Length so the bar does
+              // not lie about completion before the parse finishes.
+              const ratio = total && total > 0 ? loaded / total : 0.95;
+              try {
+                reportProgress(Math.min(ratio, 1));
+              } catch {
+                /* swallow consumer throws */
+              }
+            },
+          }
+        : {}),
     });
 
     // ── 2. Parse GLB via GLTFLoader ───────────────────────────────────────
-    const gltf = await this.parseGlb(buffer);
+    const gltf = await this.parseGlb(deps, buffer);
+    if (reportProgress) {
+      try {
+        reportProgress(1);
+      } catch {
+        /* swallow consumer throws */
+      }
+    }
 
     if (!gltf.scene && (!gltf.scenes || gltf.scenes.length === 0)) {
       throw new GlymoError(
@@ -111,7 +139,13 @@ export class GltfMeshSource extends BaseMeshSource {
 
   // ── Private ──────────────────────────────────────────────────────────────
 
-  private async parseGlb(buffer: ArrayBuffer): Promise<{
+  private async parseGlb(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    buffer: ArrayBuffer,
+  ): Promise<{
     scene?: { traverse: (cb: (obj: unknown) => void) => void };
     scenes: { traverse: (cb: (obj: unknown) => void) => void }[];
     animations?: unknown[];
@@ -132,6 +166,40 @@ export class GltfMeshSource extends BaseMeshSource {
     }
 
     const loader = new GLTFLoaderClass();
+
+    // Register the KTX2 + Draco decoder loaders. Both are infra-level wires
+    // for forward compatibility — current curated GLBs are uncompressed and
+    // load fine without them, but registering here means a future curator
+    // can drop in a Draco-encoded GLB or one with KTX2 textures and the
+    // existing pipeline will parse it without any further code changes.
+    //
+    // Both registrations are non-fatal on failure (try/catch with warn) —
+    // the host might serve from a non-default mount, in which case the
+    // singletons resolve their decoder paths to a 404. Plain GLBs still
+    // parse; only Draco/KTX2-compressed payloads would fail downstream.
+    try {
+      const dracoLoader = await getDracoLoader();
+      (loader as unknown as { setDRACOLoader: (l: unknown) => unknown }).setDRACOLoader(
+        dracoLoader,
+      );
+    } catch (err) {
+      console.warn(
+        `[GltfMeshSource] DRACOLoader registration failed for ${this.id}`,
+        err,
+      );
+    }
+    try {
+      const ktx2Loader = await getKtx2Loader(deps);
+      (loader as unknown as { setKTX2Loader: (l: unknown) => unknown }).setKTX2Loader(
+        ktx2Loader,
+      );
+    } catch (err) {
+      console.warn(
+        `[GltfMeshSource] KTX2Loader registration failed for ${this.id}`,
+        err,
+      );
+    }
+
     return new Promise((resolve, reject) => {
       try {
         loader.parse(

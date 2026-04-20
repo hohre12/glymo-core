@@ -37,9 +37,11 @@
 import { GlymoError } from '../../types.js';
 import type {
   MediaArtMeshState,
+  MeshSourceLoadContext,
   ProceduralPlanetMeshSourceDescriptor,
 } from '../types.js';
 import { BaseMeshSource, type BaseMeshSourceOptions } from './BaseMeshSource.js';
+import { getKtx2Loader } from './loaders.js';
 import {
   assertDescriptorField,
   assertDescriptorType,
@@ -109,30 +111,78 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
     };
   }
 
-  async load(deps: {
-    THREE: typeof import('three/webgpu');
-    tsl: typeof import('three/tsl');
-  }): Promise<MediaArtMeshState> {
+  async load(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MediaArtMeshState> {
     const { THREE, tsl } = deps;
 
     // ── 1. Fetch all three textures in parallel ─────────────────────────────
+    //
+    // Three-fetch source weighting: each texture contributes 1/3 of the bar.
+    // We track per-slot last-known ratios (clamped at 0.95 when Content-Length
+    // is missing) and emit the sum on every chunk so the consumer gets a
+    // monotonic 0 → 1 sweep across the whole load. Slots are accumulated
+    // independently, so the user sees parallel-load progress instead of a
+    // step-function.
+    const reportProgress = ctx?.onProgress;
+    const slotRatios: Record<'daymap' | 'clouds' | 'normal', number> = {
+      daymap: 0,
+      clouds: 0,
+      normal: 0,
+    };
+    const emitAggregate = (): void => {
+      if (!reportProgress) return;
+      const aggregate =
+        (slotRatios.daymap + slotRatios.clouds + slotRatios.normal) / 3;
+      try {
+        reportProgress(Math.min(aggregate, 1));
+      } catch {
+        /* swallow consumer throws */
+      }
+    };
+    const makeSlotProgress = (slot: 'daymap' | 'clouds' | 'normal') =>
+      (loaded: number, total: number | null): void => {
+        const ratio = total && total > 0 ? loaded / total : 0.95;
+        slotRatios[slot] = Math.min(ratio, 1);
+        emitAggregate();
+      };
     const [dayBuf, cloudBuf, normalBuf] = await Promise.all([
       this.fetchBuffer({
         url: this.textures.daymap,
         errorCode: 'media-art/fetch-failed',
         cacheKeySuffix: 'daymap',
+        ...(reportProgress ? { onProgress: makeSlotProgress('daymap') } : {}),
       }),
       this.fetchBuffer({
         url: this.textures.clouds,
         errorCode: 'media-art/fetch-failed',
         cacheKeySuffix: 'clouds',
+        ...(reportProgress ? { onProgress: makeSlotProgress('clouds') } : {}),
       }),
       this.fetchBuffer({
         url: this.textures.normal,
         errorCode: 'media-art/fetch-failed',
         cacheKeySuffix: 'normal',
+        ...(reportProgress ? { onProgress: makeSlotProgress('normal') } : {}),
       }),
     ]);
+    // Final monotonic 100% — covers the parse + scene-assembly tail that
+    // happens after the last fetch chunk arrives.
+    if (reportProgress) {
+      try {
+        reportProgress(1);
+      } catch {
+        /* swallow consumer throws */
+      }
+    }
+    // Reference imported helper to silence unused-import lint when KTX2 wiring
+    // remains a TODO (see bufferToTexture below). This is a non-functional
+    // anchor; treeshaking removes it from production builds.
+    void getKtx2Loader;
 
     // ── 2. Decode each buffer into a Three.Texture ──────────────────────────
     const [dayTex, cloudTex, normalTex] = await Promise.all([
@@ -317,6 +367,17 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
    *
    * createImageBitmap is preferred over Blob URL + TextureLoader — it skips
    * the DOM round-trip and works in workers if we ever move there.
+   *
+   * TODO(KTX2 textures): When a slot URL ends in `.ktx2`, the canonical wire
+   * is to call `getKtx2Loader(deps).then(l => l.parse(buffer))`. KTX2Loader
+   * needs a one-time `detectSupport(renderer)` call against the WebGPU
+   * renderer instance, which the source does not have a reference to here
+   * (the renderer lives in `Hologram3DRenderer`). Resolving this requires
+   * either threading the renderer through `MeshSourceLoadContext` or moving
+   * KTX2 parse into the renderer itself. Current curated planet textures
+   * (NASA-PD daymap / clouds / normal) are JPEG, so this stays a TODO until
+   * a curator ships the first .ktx2-encoded planet asset. See
+   * `docs/plans/media-art-mvp.md` §D11.4 for the limitation.
    */
   private async bufferToTexture(
     THREE: typeof import('three/webgpu'),

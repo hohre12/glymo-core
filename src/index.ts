@@ -192,6 +192,7 @@ export type {
   MeshSource,
   MeshSourceCache,
   MeshSourceDescriptor,
+  MeshSourceLoadContext,
   BaseMeshSourceDescriptor,
   GltfMeshSourceDescriptor,
   GltfPbrMeshSourceDescriptor,
@@ -204,6 +205,9 @@ export {
   GlbPbrMeshSource,
   ProceduralPlanetMeshSource,
   createMeshSource,
+  setLoaderDecoderPaths,
+  getKtx2Loader,
+  getDracoLoader,
   createMediaArtShaderNodes,
   applyMediaArtShaderTreatment,
   applyTexturedMediaArtShaderTreatment,
@@ -212,6 +216,7 @@ export {
 export type {
   BaseMeshSourceOptions,
   FetchLike,
+  FetchProgressCallback,
   MediaArtShaderNodes,
   MediaArtTreatmentResult,
 } from './hologram/index.js';

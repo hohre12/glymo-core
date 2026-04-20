@@ -10,6 +10,7 @@ export type {
   MeshSource,
   MeshSourceCache,
   MeshSourceDescriptor,
+  MeshSourceLoadContext,
   BaseMeshSourceDescriptor,
   GltfMeshSourceDescriptor,
   GltfPbrMeshSourceDescriptor,
@@ -24,8 +25,15 @@ export {
   GlbPbrMeshSource,
   ProceduralPlanetMeshSource,
   createMeshSource,
+  setLoaderDecoderPaths,
+  getKtx2Loader,
+  getDracoLoader,
 } from './sources/index.js';
-export type { BaseMeshSourceOptions, FetchLike } from './sources/index.js';
+export type {
+  BaseMeshSourceOptions,
+  FetchLike,
+  FetchProgressCallback,
+} from './sources/index.js';
 export {
   createMediaArtShaderNodes,
   applyMediaArtShaderTreatment,

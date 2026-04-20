@@ -16,6 +16,7 @@ import type {
   MediaArtMeshState,
   MeshSource,
   MeshSourceDescriptor,
+  MeshSourceLoadContext,
 } from './types.js';
 import { createMeshSource } from './sources/createMeshSource.js';
 
@@ -297,8 +298,17 @@ export class Hologram3DRenderer {
    * Errors from the underlying MeshSource (network, parse, validation) reject
    * the promise as a typed `GlymoError` — callers should fall back to text
    * mode and surface a user-visible error.
+   *
+   * `ctx` is optional and forwarded to the underlying MeshSource — pass
+   * `{ onProgress }` to receive load progress as a fraction in [0, 1] for
+   * UI hookup (e.g. percentage chip during a heavy GLB download). Progress
+   * callbacks fired AFTER the load is superseded by a newer setModel are
+   * ignored — only the latest in-flight load reaches the consumer.
    */
-  async setModel(descriptor: MeshSourceDescriptor | null): Promise<MediaArtMeshState | null> {
+  async setModel(
+    descriptor: MeshSourceDescriptor | null,
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MediaArtMeshState | null> {
     if (this.destroyed) {
       throw new Error('[Hologram3DRenderer] setModel called on disposed renderer');
     }
@@ -321,7 +331,17 @@ export class Hologram3DRenderer {
     const source = this.createMeshSource(descriptor);
     let state: MediaArtMeshState;
     try {
-      state = await source.load({ THREE, tsl });
+      // Wrap the consumer's onProgress so a callback firing after this load
+      // is superseded does not leak stale progress into the consumer's UI.
+      const sourceCtx: MeshSourceLoadContext | undefined = ctx?.onProgress
+        ? {
+            onProgress: (p: number) => {
+              if (myToken !== this.loadToken || this.destroyed) return;
+              ctx.onProgress?.(p);
+            },
+          }
+        : undefined;
+      state = await source.load({ THREE, tsl }, sourceCtx);
     } catch (err) {
       // If we were superseded mid-load, swallow the error — the new load
       // owns the slot. Otherwise propagate.

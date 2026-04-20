@@ -30,9 +30,11 @@ import { GlymoError } from '../../types.js';
 import type {
   GltfPbrMeshSourceDescriptor,
   MediaArtMeshState,
+  MeshSourceLoadContext,
 } from '../types.js';
 import { applyTexturedMediaArtShaderTreatment } from '../mediaArtTSL.js';
 import { BaseMeshSource, type BaseMeshSourceOptions } from './BaseMeshSource.js';
+import { getDracoLoader, getKtx2Loader } from './loaders.js';
 import {
   assertDescriptorField,
   assertDescriptorType,
@@ -57,20 +59,41 @@ export class GlbPbrMeshSource extends BaseMeshSource {
     this.environmentIntensity = descriptor.environmentIntensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
   }
 
-  async load(deps: {
-    THREE: typeof import('three/webgpu');
-    tsl: typeof import('three/tsl');
-  }): Promise<MediaArtMeshState> {
+  async load(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MediaArtMeshState> {
     const { THREE } = deps;
 
     // ── 1. Acquire GLB (cache or network) ─────────────────────────────────
+    //
+    // Two-fetch source weighting: GLB takes 60% of the bar (typically the
+    // larger payload), HDR takes the remaining 40%. The HDR is also
+    // non-fatal — its progress is still reported even if the texture fetch
+    // ends up failing (the consumer gets a clean 0 → 1 sweep regardless).
+    const reportProgress = ctx?.onProgress;
     const glbBuffer = await this.fetchBuffer({
       url: this.url,
       errorCode: 'media-art/fetch-failed',
+      ...(reportProgress
+        ? {
+            onProgress: (loaded: number, total: number | null) => {
+              const ratio = total && total > 0 ? loaded / total : 0.95;
+              try {
+                reportProgress(Math.min(ratio, 1) * 0.6);
+              } catch {
+                /* swallow consumer throws */
+              }
+            },
+          }
+        : {}),
     });
 
     // ── 2. Parse GLB ──────────────────────────────────────────────────────
-    const gltf = await this.parseGlb(glbBuffer);
+    const gltf = await this.parseGlb(deps, glbBuffer);
     if (!gltf.scene && (!gltf.scenes || gltf.scenes.length === 0)) {
       throw new GlymoError(
         'media-art/empty-gltf',
@@ -87,12 +110,28 @@ export class GlbPbrMeshSource extends BaseMeshSource {
     const treatment = applyTexturedMediaArtShaderTreatment(sceneRoot, deps);
 
     // ── 5. Acquire HDR environment (cache or network — non-fatal on fail) ─
-    const hdrTexture = await this.tryLoadHdri(deps).catch((err) => {
+    //
+    // Progress weighting: HDR contributes the remaining 40% of the bar after
+    // the GLB's 60%. Total stays monotonic because `0.6 + Math.min(ratio, 1) * 0.4`
+    // peaks at exactly 1.0 even when Content-Length is missing (the inner
+    // ratio is clamped at 0.95 in that case).
+    const hdrTexture = await this.tryLoadHdri(deps, reportProgress).catch((err) => {
       // Image-based lighting is a quality-add, not a correctness gate. Log
       // and continue; the asset still renders against scene lights.
       console.warn(`[GlbPbrMeshSource] HDRI load failed for ${this.id} — continuing without IBL`, err);
       return null;
     });
+
+    // Final monotonic 100% — clean signal to consumers regardless of whether
+    // the HDR succeeded, failed, or skipped (no Content-Length means the bar
+    // never quite reached 1.0 from byte progress alone).
+    if (reportProgress) {
+      try {
+        reportProgress(1);
+      } catch {
+        /* swallow consumer throws */
+      }
+    }
 
     // ── 6. Optional animation mixer ───────────────────────────────────────
     let mixer: unknown = undefined;
@@ -170,13 +209,28 @@ export class GlbPbrMeshSource extends BaseMeshSource {
 
   // ── Private ──────────────────────────────────────────────────────────────
 
-  private async tryLoadHdri(deps: {
-    THREE: typeof import('three/webgpu');
-  }): Promise<InstanceType<typeof import('three/webgpu').DataTexture>> {
+  private async tryLoadHdri(
+    deps: {
+      THREE: typeof import('three/webgpu');
+    },
+    reportProgress?: (p: number) => void,
+  ): Promise<InstanceType<typeof import('three/webgpu').DataTexture>> {
     const buffer = await this.fetchBuffer({
       url: this.hdriUrl,
       errorCode: 'media-art/fetch-failed',
       cacheKeySuffix: 'hdri',
+      ...(reportProgress
+        ? {
+            onProgress: (loaded: number, total: number | null) => {
+              const ratio = total && total > 0 ? loaded / total : 0.95;
+              try {
+                reportProgress(0.6 + Math.min(ratio, 1) * 0.4);
+              } catch {
+                /* swallow consumer throws */
+              }
+            },
+          }
+        : {}),
     });
 
     let RGBELoaderClass: typeof import('three/examples/jsm/loaders/RGBELoader.js').RGBELoader;
@@ -211,7 +265,13 @@ export class GlbPbrMeshSource extends BaseMeshSource {
     return tex;
   }
 
-  private async parseGlb(buffer: ArrayBuffer): Promise<{
+  private async parseGlb(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    buffer: ArrayBuffer,
+  ): Promise<{
     scene?: { traverse: (cb: (obj: unknown) => void) => void };
     scenes: { traverse: (cb: (obj: unknown) => void) => void }[];
     animations?: unknown[];
@@ -229,6 +289,35 @@ export class GlbPbrMeshSource extends BaseMeshSource {
     }
 
     const loader = new GLTFLoaderClass();
+
+    // Register Draco + KTX2 decoder loaders. See GltfMeshSource.parseGlb for
+    // rationale — the same forward-compat infrastructure applies here, so a
+    // future PBR catalog entry shipped with KTX2 textures or Draco-encoded
+    // primitives parses without code changes. Both registrations are
+    // non-fatal so missing decoder binaries do not break uncompressed loads.
+    try {
+      const dracoLoader = await getDracoLoader();
+      (loader as unknown as { setDRACOLoader: (l: unknown) => unknown }).setDRACOLoader(
+        dracoLoader,
+      );
+    } catch (err) {
+      console.warn(
+        `[GlbPbrMeshSource] DRACOLoader registration failed for ${this.id}`,
+        err,
+      );
+    }
+    try {
+      const ktx2Loader = await getKtx2Loader(deps);
+      (loader as unknown as { setKTX2Loader: (l: unknown) => unknown }).setKTX2Loader(
+        ktx2Loader,
+      );
+    } catch (err) {
+      console.warn(
+        `[GlbPbrMeshSource] KTX2Loader registration failed for ${this.id}`,
+        err,
+      );
+    }
+
     return new Promise((resolve, reject) => {
       try {
         loader.parse(

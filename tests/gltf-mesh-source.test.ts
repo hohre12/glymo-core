@@ -31,6 +31,15 @@ const stubGltf = { scene: stubScene, scenes: [stubScene], animations: [] };
 
 vi.mock('three/examples/jsm/loaders/GLTFLoader.js', () => ({
   GLTFLoader: class {
+    // KTX2/Draco extension wires registered by GltfMeshSource.parseGlb. The
+    // real GLTFLoader exposes both as fluent setters; the stubs are no-ops so
+    // the registration path runs cleanly without polluting stderr with
+    // "loader.setKTX2Loader is not a function" warnings during the test
+    // suite. Production code path is identical — the warn-and-continue
+    // try/catch around the real registration would still shield us if a
+    // future three release dropped the setter.
+    setKTX2Loader(_l: unknown): this { return this; }
+    setDRACOLoader(_l: unknown): this { return this; }
     parse(
       _buffer: ArrayBuffer,
       _path: string,
@@ -39,6 +48,18 @@ vi.mock('three/examples/jsm/loaders/GLTFLoader.js', () => ({
     ): void {
       onLoad(stubGltf);
     }
+  },
+}));
+// KTX2Loader / DRACOLoader are dynamically imported by `loaders.ts` on first
+// use — stub them so the imports resolve in the jsdom test environment.
+vi.mock('three/examples/jsm/loaders/KTX2Loader.js', () => ({
+  KTX2Loader: class {
+    setTranscoderPath(_p: string): this { return this; }
+  },
+}));
+vi.mock('three/examples/jsm/loaders/DRACOLoader.js', () => ({
+  DRACOLoader: class {
+    setDecoderPath(_p: string): this { return this; }
   },
 }));
 

@@ -13,9 +13,16 @@
 // THREE / tsl are NEVER imported here — kept in load(deps) signatures so the
 // abstract base file stays out of the initial bundle.
 
-import type { BaseMeshSourceDescriptor, MediaArtMeshState, MeshSource, MeshSourceCache } from '../types.js';
+import type {
+  BaseMeshSourceDescriptor,
+  MediaArtMeshState,
+  MeshSource,
+  MeshSourceCache,
+  MeshSourceLoadContext,
+} from '../types.js';
 import {
   type FetchLike,
+  type FetchProgressCallback,
   defaultFetcher,
   fetchArrayBufferWithCache,
   assertDescriptorField,
@@ -46,10 +53,13 @@ export abstract class BaseMeshSource implements MeshSource {
     this.fetcher = options.fetcher ?? defaultFetcher();
   }
 
-  abstract load(deps: {
-    THREE: typeof import('three/webgpu');
-    tsl: typeof import('three/tsl');
-  }): Promise<MediaArtMeshState>;
+  abstract load(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MediaArtMeshState>;
 
   /**
    * Fetch a remote URL as ArrayBuffer using the configured cache + fetcher.
@@ -58,11 +68,17 @@ export abstract class BaseMeshSource implements MeshSource {
    *
    * `cacheKey` defaults to `${this.id}:${url}` so a multi-asset source (planet
    * with three textures) gets distinct cache slots without subclass effort.
+   *
+   * `onProgress` is forwarded into the underlying streaming fetch so subclasses
+   * implementing multi-fetch loads (GLB + HDR, three textures) can compose
+   * weighted progress fractions on top of per-fetch byte progress without
+   * duplicating the cache short-circuit semantics.
    */
   protected fetchBuffer(opts: {
     url: string;
     errorCode: string;
     cacheKeySuffix?: string;
+    onProgress?: FetchProgressCallback;
   }): Promise<ArrayBuffer> {
     const cacheKey = opts.cacheKeySuffix
       ? `${this.id}:${opts.cacheKeySuffix}`
@@ -74,6 +90,7 @@ export abstract class BaseMeshSource implements MeshSource {
       fetcher: this.fetcher,
       errorCode: opts.errorCode,
       assetLabel: this.id,
+      ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     });
   }
 }

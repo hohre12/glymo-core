@@ -240,6 +240,25 @@ export interface MediaArtMeshState {
 }
 
 /**
+ * Optional per-load context passed alongside the THREE/tsl deps. Carries
+ * cross-cutting concerns (progress reporting today; cancellation tokens or
+ * priority hints in the future) that subclasses opt into individually.
+ *
+ * `onProgress` receives a fraction in `[0, 1]` covering the entire load —
+ * single-fetch sources pass the network ratio directly; multi-fetch sources
+ * (GLB + HDR, three textures) compose weighted fractions per asset and emit
+ * a final `1.0` once the parse + scene assembly completes.
+ */
+export interface MeshSourceLoadContext {
+  /**
+   * Optional progress consumer. Fires monotonically in `[0, 1]`. Callbacks
+   * thrown inside are swallowed by the source pack — a misbehaving consumer
+   * must not abort the load.
+   */
+  onProgress?: (progress: number) => void;
+}
+
+/**
  * Mesh source contract. Implementations are constructed via the
  * createMeshSource factory and produce a MediaArtMeshState via load(). The
  * renderer never instantiates implementations directly — it dispatches on
@@ -256,9 +275,16 @@ export interface MeshSource {
    * The THREE/tsl modules are passed in (not imported by the source) so the
    * renderer's lazy-import semantics are preserved and the source file stays
    * tree-shakeable.
+   *
+   * `ctx` is optional and back-compatible: callers that omit it get the
+   * historical behaviour. Sources that opt into progress reporting forward
+   * `ctx.onProgress` through {@link MeshSourceLoadContext}.
    */
-  load(deps: {
-    THREE: typeof import('three/webgpu');
-    tsl: typeof import('three/tsl');
-  }): Promise<MediaArtMeshState>;
+  load(
+    deps: {
+      THREE: typeof import('three/webgpu');
+      tsl: typeof import('three/tsl');
+    },
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MediaArtMeshState>;
 }

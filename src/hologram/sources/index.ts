@@ -18,4 +18,9 @@ export {
   assertDescriptorType,
   assertDescriptorField,
 } from './common.js';
-export type { FetchLike } from './common.js';
+export type { FetchLike, FetchProgressCallback } from './common.js';
+export {
+  getKtx2Loader,
+  getDracoLoader,
+  setLoaderDecoderPaths,
+} from './loaders.js';

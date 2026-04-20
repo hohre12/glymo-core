@@ -27,12 +27,37 @@ export function defaultFetcher(): FetchLike {
 }
 
 /**
+ * Per-fetch progress callback.
+ *
+ * Fires monotonically as bytes arrive on the wire. `loaded` is the running
+ * byte count; `total` is the Content-Length when the server sent one and
+ * `null` otherwise (chunked-transfer responses, opaque CORS, etc.). Consumers
+ * that want to render a percentage should clamp at ~95% when `total === null`
+ * so the bar does not appear to lie about completion before the stream
+ * actually finishes assembling.
+ *
+ * Cache hits invoke the callback exactly once with `loaded === total ===
+ * buffer.byteLength` so consumers see a clean 0 → 100% transition rather than
+ * a stuck 0% (since the cache short-circuit skips the streaming branch
+ * entirely).
+ *
+ * Throws inside the callback are swallowed — a misbehaving consumer must not
+ * abort the network fetch.
+ */
+export type FetchProgressCallback = (loaded: number, total: number | null) => void;
+
+/**
  * Fetch a remote URL as ArrayBuffer with optional cache short-circuit.
  *
- * - Cache hit: returns the cached buffer untouched.
+ * - Cache hit: returns the cached buffer untouched (firing `onProgress`
+ *   exactly once with 100% if a callback was supplied).
  * - Cache miss: fetches, persists on success, returns the buffer.
  * - Cache write failure is non-fatal (logged via swallow — caller still gets
  *   the buffer it asked for).
+ * - When `onProgress` is supplied AND `response.body` is a streamable
+ *   ReadableStream, the function reads chunks via the reader and fires the
+ *   callback per chunk. Otherwise it falls back to `response.arrayBuffer()`
+ *   (no progress events) so non-streaming environments still load correctly.
  *
  * Errors are wrapped in GlymoError with a stable `code` so the picker / UI
  * layer can dispatch on the failure mode.
@@ -46,13 +71,27 @@ export async function fetchArrayBufferWithCache(opts: {
   errorCode: string;
   /** Human-readable id for error messages (typically descriptor.id). */
   assetLabel: string;
+  /** Optional per-chunk progress callback. See {@link FetchProgressCallback}. */
+  onProgress?: FetchProgressCallback;
 }): Promise<ArrayBuffer> {
-  const { cacheKey, url, cache, fetcher, errorCode, assetLabel } = opts;
+  const { cacheKey, url, cache, fetcher, errorCode, assetLabel, onProgress } = opts;
 
   if (cache) {
     try {
       const cached = await cache.get(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        // Fire a single 100% tick so consumers transition cleanly from
+        // 0 → done without seeing a stuck zero (the cache hit skips the
+        // streaming branch where progress would normally land).
+        if (onProgress) {
+          try {
+            onProgress(cached.byteLength, cached.byteLength);
+          } catch {
+            /* Callback throws are swallowed — see FetchProgressCallback docs. */
+          }
+        }
+        return cached;
+      }
     } catch {
       // Cache read failure is non-fatal — fall through to network.
     }
@@ -77,7 +116,41 @@ export async function fetchArrayBufferWithCache(opts: {
     );
   }
 
-  const buffer = await response.arrayBuffer();
+  // Stream the body when both a progress consumer AND a readable body are
+  // available. Without either we fall back to the simple arrayBuffer() path
+  // so older fetch shims (jsdom, certain workers) still work end-to-end.
+  const reader = onProgress ? response.body?.getReader?.() : undefined;
+  let buffer: ArrayBuffer;
+  if (reader && onProgress) {
+    const totalHeader = response.headers.get('Content-Length');
+    const total = totalHeader ? Number(totalHeader) : null;
+    const totalSafe = Number.isFinite(total) && (total ?? 0) > 0 ? total : null;
+    let loaded = 0;
+    const chunks: Uint8Array[] = [];
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        loaded += value.byteLength;
+        try {
+          onProgress(loaded, totalSafe);
+        } catch {
+          /* Swallow callback throws — see FetchProgressCallback docs. */
+        }
+      }
+    }
+    const merged = new Uint8Array(loaded);
+    let off = 0;
+    for (const c of chunks) {
+      merged.set(c, off);
+      off += c.byteLength;
+    }
+    buffer = merged.buffer;
+  } else {
+    buffer = await response.arrayBuffer();
+  }
 
   if (cache) {
     try {
