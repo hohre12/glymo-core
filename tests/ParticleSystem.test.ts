@@ -96,12 +96,24 @@ describe('ParticleSystem render', () => {
   });
 
   it('calls fill for each alive particle', () => {
+    // Spawn formula (from ParticleSystem.ts constants):
+    //   PARTICLES_PER_POINT = 4  (particles per interior point)
+    //   ENDPOINT_BURST      = 15 (extra particles at stroke start + end)
+    //
+    // For a 3-point stroke:
+    //   endpoint burst start : 15
+    //   interior points loop : 3 × 4 = 12  (i=0,1,2 — all 3 points iterated)
+    //   endpoint burst end   : 15
+    //   Total alive after 1 frame (dt=16, all still alive): 15 + 12 + 15 = 42
+    //
+    // The previous assertion of 19 was wrong (based on old constants 3/5 that
+    // never existed in the codebase — PARTICLES_PER_POINT was 4 and
+    // ENDPOINT_BURST was 15 from the first commit, 29cd400).
     const ps = new ParticleSystem();
     ps.spawnForStroke(makeStroke(3));
     const ctx = createMockCtx();
     ps.updateAndRender(ctx, 16);
-    // 3 points * 3 particles/point (9) + endpoint bursts (5+5) = 19
-    expect(ctx.fill).toHaveBeenCalledTimes(19);
+    expect(ctx.fill).toHaveBeenCalledTimes(42);
   });
 
   it('renders nothing when no strokes have been added', () => {
