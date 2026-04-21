@@ -14,9 +14,11 @@
 //
 // Stub infrastructure mirrors hologram-mesh-mode.test.ts: vi.hoisted() classes
 // registered via vi.mock() factories, a mock fetch that returns empty GLB
-// buffers, and a createMockCanvas() helper. Using the `gltf` descriptor keeps
-// the test self-contained — GLTFLoader already has a working stub that parses
-// into a StubGroup + StubMesh tree.
+// buffers, and a createMockCanvas() helper. The mock canvas is required
+// because Vitest's jsdom environment has <canvas> but no WebGPU context —
+// Three.js WebGPURenderer would blow up on a real jsdom canvas. Using the
+// `gltf` descriptor keeps the test self-contained — GLTFLoader already has
+// a working stub that parses into a StubGroup + StubMesh tree.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -308,6 +310,7 @@ describe('Hologram3DRenderer multi-mesh', () => {
   });
 
   it('returns null for unknown objectId', () => {
+    // @ts-expect-error — getMesh lands in Task 1.3; this directive self-removes once implemented.
     expect(renderer.getMesh('unknown')).toBeNull();
     renderer.dispose();
   });
@@ -318,9 +321,12 @@ describe('Hologram3DRenderer multi-mesh', () => {
       id: 'earth',
       url: 'https://cdn.test/earth.glb',
     };
+    // @ts-expect-error — addMesh lands in Task 1.3; this directive self-removes once implemented.
     const handle = await renderer.addMesh('obj-1', 'earth', descriptor);
     expect(handle).not.toBeNull();
+    // @ts-expect-error — getMesh lands in Task 1.3; this directive self-removes once implemented.
     expect(renderer.getMesh('obj-1')).toBe(handle);
+    // @ts-expect-error — getAllMeshIds lands in Task 1.3; this directive self-removes once implemented.
     expect(renderer.getAllMeshIds()).toEqual(['obj-1']);
     renderer.dispose();
   });
