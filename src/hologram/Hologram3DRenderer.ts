@@ -642,6 +642,26 @@ export class Hologram3DRenderer {
     return this.meshes.size > 0;
   }
 
+  /**
+   * Tear down the mesh registered under `objectId` and release its GPU /
+   * scene-graph resources. Returns `true` when a slot existed and was
+   * disposed, `false` when no slot was registered — idempotent for the
+   * second call on the same id. Sibling meshes under different `objectId`s
+   * are not touched.
+   *
+   * The async signature is reserved: Task 1.3 `disposeMeshSlot` is sync, but
+   * keeping `Promise<boolean>` here matches the multi-mesh plan and lets
+   * future variants (e.g. awaiting scene-graph transitions) land without a
+   * call-site migration.
+   */
+  async removeMesh(objectId: string): Promise<boolean> {
+    const slot = this.meshes.get(objectId);
+    if (!slot) return false;
+    this.disposeMeshSlot(slot);
+    this.meshes.delete(objectId);
+    return true;
+  }
+
   /** Current rendering mode — useful for tools that adapt picker UI. */
   getMode(): 'text' | 'mesh' {
     return this.mode;

@@ -301,6 +301,18 @@ function createMockCanvas(): HTMLCanvasElement {
   } as unknown as HTMLCanvasElement;
 }
 
+// Shared descriptor factory for multi-mesh tests. Uses the `gltf` variant
+// because it matches the existing GLTFLoader stub (StubGroup + StubMesh tree)
+// and keeps each test self-contained — every call returns a fresh descriptor
+// with the same stable id so the cache key is consistent across mounts.
+function earthDescriptor(): MeshSourceDescriptor {
+  return {
+    type: 'gltf',
+    id: 'earth',
+    url: 'https://cdn.test/earth.glb',
+  };
+}
+
 describe('Hologram3DRenderer multi-mesh', () => {
   let renderer: Hologram3DRenderer;
 
@@ -324,6 +336,22 @@ describe('Hologram3DRenderer multi-mesh', () => {
     expect(handle).not.toBeNull();
     expect(renderer.getMesh('obj-1')).toBe(handle);
     expect(renderer.getAllMeshIds()).toEqual(['obj-1']);
+    renderer.dispose();
+  });
+
+  it('removes a mesh and returns true; second call returns false', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    expect(await renderer.removeMesh('obj-1')).toBe(true);
+    expect(renderer.getMesh('obj-1')).toBeNull();
+    expect(await renderer.removeMesh('obj-1')).toBe(false);
+    renderer.dispose();
+  });
+
+  it('removing one mesh leaves others intact', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    await renderer.addMesh('obj-2', 'earth', earthDescriptor());
+    await renderer.removeMesh('obj-1');
+    expect(renderer.getAllMeshIds()).toEqual(['obj-2']);
     renderer.dispose();
   });
 });
