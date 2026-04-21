@@ -21,6 +21,8 @@ export type {
   ClassifierStatus,
   ClassifyResponse,
   ClassifierClientOptions,
+  ClassifierLoadMode,
+  TypeProbs,
 } from './ClassifierClient.js';
 
 export {

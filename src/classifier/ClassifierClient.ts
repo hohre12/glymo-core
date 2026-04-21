@@ -1,10 +1,29 @@
 // Main thread client for the ONNX classifier Web Worker.
 // Handles worker lifecycle, message passing, and provides a Promise-based API.
 
+/**
+ * Which ONNX sessions the worker should load, and how `classify()` dispatches.
+ *
+ *  - `'all'`          — loads type-classifier + drawing / text / symbol
+ *                        specialist heads (symbol is optional in the
+ *                        manifest). Every classify() runs the TYPE router
+ *                        cascade. Used by the landing game page where the
+ *                        3-way TYPE signal drives the "AI thought" UX.
+ *  - `'drawing-only'` — loads only the drawing-classifier head. Every
+ *                        classify() runs the single head and the response
+ *                        synthesises `detectedType='drawing'` and
+ *                        `typeProbs={drawing:1,text:0,symbol:0}` so callers
+ *                        read the same shape as 'all' mode. ~30MB → ~8MB
+ *                        bundle, ~150ms → ~50ms per classify call. Used by
+ *                        Studio drawing mode via `@glymo/ui`'s
+ *                        `useDrawingClassifier`.
+ */
+export type ClassifierLoadMode = 'all' | 'drawing-only';
+
 export interface Prediction {
   label: string;
   confidence: number;
-  category: 'drawing';
+  category: 'drawing' | 'text' | 'symbol';
 }
 
 export interface ClassifierStatus {
@@ -15,15 +34,34 @@ export interface ClassifierStatus {
 }
 
 /**
+ * TYPE router probabilities (from the `type-classifier` ONNX head).
+ * Always sums to ~1. Exposed for consumers (landing's AI Personality UX)
+ * that need to react to router indecision or type flips without re-running
+ * inference.
+ *
+ * In `'drawing-only'` mode the router is not actually executed — the worker
+ * synthesises `{ drawing: 1, text: 0, symbol: 0 }` so the wire shape stays
+ * uniform across modes.
+ */
+export interface TypeProbs {
+  text: number;
+  drawing: number;
+  symbol: number;
+}
+
+/**
  * Result returned by {@link ClassifierClient.classify}.
  *
- * Drawing-only pipeline (0.11.0): the worker runs a single ONNX head
- * (`drawing-classifier`) and returns its top-5 predictions. The TYPE
- * router and text / symbol heads were removed — text mode handles its
- * own recognition via Gemini on a separate path.
+ *  - `predictions`   — top-5 from the routed winner head ('all' mode) or
+ *                       from the drawing head ('drawing-only' mode).
+ *  - `typeProbs`     — TYPE router output; synthesised in 'drawing-only' mode.
+ *  - `detectedType`  — routed category for this call; always `'drawing'` in
+ *                       'drawing-only' mode.
  */
 export interface ClassifyResponse {
   predictions: Prediction[];
+  typeProbs: TypeProbs;
+  detectedType: 'text' | 'drawing' | 'symbol';
 }
 
 interface PendingRequest {
@@ -44,23 +82,22 @@ const REQUEST_TIMEOUT_MS = 5000;
  * Next.js Turbopack / Vite for Web Worker URL resolution; the URL must be
  * constructed at the consumer's call site so the bundler sees it.
  *
- * Default: in-package callers (e.g. tests, examples) use the bundled
- * `classifier.worker.js` shipped alongside this file at
- * `dist/classifier/classifier.worker.js`.
+ * `models` selects which ONNX heads the worker loads. Defaults to `'all'`
+ * — pass `'drawing-only'` from Studio-style consumers that only need the
+ * drawing head.
  */
 export interface ClassifierClientOptions {
   /**
    * URL of the classifier Web Worker entry. Construct with
    * `new URL('@glymo/core/classifier/classifier.worker.js', import.meta.url)`
    * from the consumer call site so the bundler emits a hashed asset.
-   *
-   * If omitted, the in-package default
-   * (`new URL('./classifier.worker.js', import.meta.url)`) is used. The
-   * default works for code paths that already live inside the published
-   * `@glymo/core/classifier` bundle (or for the source-side dev build via
-   * Vite's worker rewrite); downstream apps MUST pass an explicit URL.
    */
   workerUrl?: URL;
+  /**
+   * Which sessions to load / how `classify()` should behave.
+   * Defaults to `'all'` — loads the full 3-way cascade.
+   */
+  models?: ClassifierLoadMode;
 }
 
 export class ClassifierClient {
@@ -75,6 +112,7 @@ export class ClassifierClient {
   private statusListeners = new Set<(status: ClassifierStatus) => void>();
   private initPromise: Promise<void> | null = null;
   private readonly workerUrl: URL;
+  private readonly models: ClassifierLoadMode;
 
   /**
    * Construct a classifier client.
@@ -83,11 +121,15 @@ export class ClassifierClient {
    * downstream consumer bundlers that need to see the URL literal at the
    * call site (webpack / Turbopack / Vite). Without it, the in-package
    * default points at `./classifier.worker.js` next to this file.
+   *
+   * Pass `models: 'drawing-only'` to load only the drawing-classifier head
+   * and skip the TYPE router + text / symbol specialists entirely.
    */
   constructor(options: ClassifierClientOptions = {}) {
     this.workerUrl =
       options.workerUrl ??
       new URL('./classifier.worker.js', import.meta.url);
+    this.models = options.models ?? 'all';
   }
 
   /**
@@ -154,16 +196,20 @@ export class ClassifierClient {
         }
       };
 
-      // Send init command
-      this.worker.postMessage({ type: 'init' });
+      // Send init command with the configured load mode. Omitting `models`
+      // would make the worker fall back to its own default ('all') which is
+      // still correct, but sending it explicitly makes the protocol
+      // self-describing in network traces.
+      this.worker.postMessage({ type: 'init', models: this.models });
     });
   }
 
   /**
-   * Classify a 64x64 grayscale image against the drawing head.
+   * Classify a 64x64 grayscale image.
    *
-   * Returns the top-5 predictions from the single `drawing-classifier`
-   * ONNX session.
+   * Returns the top-5 predictions alongside the TYPE router signal. In
+   * `'drawing-only'` mode the router fields are synthesised so downstream
+   * code can read the same shape regardless of load mode.
    */
   async classify(imageData: Float32Array): Promise<ClassifyResponse> {
     if (!this.worker) {
@@ -251,6 +297,8 @@ export class ClassifierClient {
           this.pendingRequests.delete(requestId);
           const response: ClassifyResponse = {
             predictions: data.predictions as Prediction[],
+            typeProbs: data.typeProbs as TypeProbs,
+            detectedType: data.detectedType as ClassifyResponse['detectedType'],
           };
           pending.resolve(response);
         }

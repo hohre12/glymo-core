@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-04-21
+
+### Added
+- **`ClassifierClientOptions.models: 'all' | 'drawing-only'`** (default
+  `'all'`). Selects which ONNX sessions the classifier Web Worker loads
+  on init and how `classify()` dispatches:
+    - `'all'` — loads `type-classifier` + `drawing-classifier` +
+      `text-classifier` and (optionally, per manifest) `symbol-classifier`.
+      Every `classify()` call runs the TYPE-router cascade and returns the
+      routed winner. Consumed by the landing game page, whose AI-thought UX
+      (type-flip bubbles, confidence bars) is driven by the 3-way signal.
+    - `'drawing-only'` — loads only `drawing-classifier`. Every
+      `classify()` call runs the single head and the response synthesises
+      `detectedType: 'drawing'` and `typeProbs: { drawing: 1, text: 0,
+      symbol: 0 }` so the wire shape stays uniform with `'all'` mode.
+      Bundle drops from ~30 MB to ~8 MB and per-call latency from ~150 ms to
+      ~50 ms. Consumed by Studio drawing mode via `@glymo/ui`'s
+      `useDrawingClassifier`.
+- **`ClassifierLoadMode`** type export (string-literal union of the two
+  modes above).
+
+### Restored
+- **`ClassifyResponse`** regains `typeProbs` and `detectedType`. These
+  were removed in 0.11.0 under the assumption that no consumer read them;
+  in practice the landing game page's AI-thought pipeline
+  (`lib/game/personality.ts`, `components/game/GameContainer.tsx`,
+  `components/game/TypeConfidenceBars.tsx`) relied on them throughout and
+  the removal broke type-check the moment the bump reached `^0.11.0` in
+  landing's lockfile. Per `docs/plans/drawing-classifier-migration.md §7.4`,
+  landing was always meant to keep the 3-way router — only Studio was the
+  drawing-only consumer. This release re-aligns the shipping API with that
+  migration plan.
+- **`TypeProbs`** type export, re-added to `@glymo/core/classifier`.
+- **`Prediction.category`** widened back to `'text' | 'drawing' | 'symbol'`
+  (was narrowed to literal `'drawing'` in 0.11.0).
+
+### Notes
+- The per-head `heads` / `HeadSnapshot` / `TypeHeadSnapshot` diagnostic
+  payload introduced in the pre-migration landing client is NOT restored
+  — a repo-wide grep (`*.ts`, `*.tsx`) for `.heads`, `HeadSnapshot`, and
+  `TypeHeadSnapshot` across landing + app + ui shows zero consumer
+  references post-migration, so reviving the field would add wire weight
+  with no caller. Can be reintroduced later if a genuine consumer needs it.
+- This is a minor bump (additive `models` option + restorative field
+  reinstatement). Consumers on 0.11.x that only read `predictions` continue
+  to work unchanged; consumers on 0.10.x or earlier that read
+  `typeProbs` / `detectedType` / `Prediction.category === 'text'` etc.
+  regain their behaviour without code changes.
+
 ## [0.11.2] - 2026-04-21
 
 ### Fixed
