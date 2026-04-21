@@ -20,6 +20,12 @@ export function renderFills(
   const now = performance.now();
 
   for (const fill of fills) {
+    // Skip fills whose owning object has a 3D mesh applied (mediaArt guard)
+    if (objectStore) {
+      const obj = objectStore.getObjectByFillId(fill.id);
+      if (obj?.metadata?.mediaArt) continue;
+    }
+
     // Check if this fill belongs to an object with an active animation
     if (objectStore && animator) {
       const obj = objectStore.getObjectByFillId(fill.id);

@@ -63,6 +63,10 @@ export function renderCompletedStrokes(
     cacheCtx.clearRect(0, 0, cache.width, cache.height);
     for (const stroke of staticStrokes) {
       if (stroke.smoothed.length < 2) continue;
+      if (objectStore) {
+        const obj = objectStore.getObjectByStrokeId(stroke.id);
+        if (obj?.metadata?.mediaArt) continue;
+      }
       const style = resolveEffect(stroke.effect);
       const overrides = getOverrides(stroke);
       renderGlowPass(cacheCtx, stroke.smoothed, style, 1.0, overrides);
@@ -81,6 +85,10 @@ export function renderCompletedStrokes(
       const transform = transformCache.get(stroke.id);
       if (!transform) continue;
       if (stroke.smoothed.length < 2) continue;
+      if (objectStore) {
+        const obj = objectStore.getObjectByStrokeId(stroke.id);
+        if (obj?.metadata?.mediaArt) continue;
+      }
 
       const style = resolveEffect(stroke.effect);
       const overrides = getOverrides(stroke);
