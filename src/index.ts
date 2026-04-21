@@ -198,6 +198,7 @@ export type {
   GltfPbrMeshSourceDescriptor,
   ProceduralPlanetMeshSourceDescriptor,
   MediaArtMeshState,
+  MeshHandle,
 } from './hologram/index.js';
 export {
   BaseMeshSource,

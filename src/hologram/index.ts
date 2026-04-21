@@ -16,6 +16,7 @@ export type {
   GltfPbrMeshSourceDescriptor,
   ProceduralPlanetMeshSourceDescriptor,
   MediaArtMeshState,
+  MeshHandle,
 } from './types.js';
 
 // ── Media Art (v0.8.0 — polymorphic source pack) ────────────────────────────
