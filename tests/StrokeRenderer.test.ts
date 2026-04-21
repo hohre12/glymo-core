@@ -2,8 +2,7 @@ import { renderGlowPass, renderMainStroke } from '../src/render/StrokeRenderer.j
 import type { EffectStyle, StrokePoint } from '../src/types.js';
 import { EFFECT_PRESETS } from '../src/types.js';
 
-// Cross-compatible mock function
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const mockFn = vi.fn;
 
 // ── Helpers ────────────────────────────────────────────
 

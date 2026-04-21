@@ -147,8 +147,10 @@ export class GltfMeshSource extends BaseMeshSource {
       ...(mixer ? { mixer } : {}),
       bbox,
       dispose,
-      uTime: treatment.uTime,
-      uTransition: treatment.uTransition,
+      // TSL UniformNode exposes `.value` at runtime; bridge to the renderer's
+      // structural `{ value: number }` contract documented on MediaArtMeshState.
+      uTime: treatment.uTime as unknown as { value: number },
+      uTransition: treatment.uTransition as unknown as { value: number },
     };
   }
 
@@ -233,7 +235,7 @@ export class GltfMeshSource extends BaseMeshSource {
               new GlymoError(
                 'media-art/parse-failed',
                 `GLTFLoader rejected ${this.id}`,
-                { recoverable: true, originalError: err as Error },
+                { recoverable: true, originalError: err as unknown as Error },
               ),
             ),
         );

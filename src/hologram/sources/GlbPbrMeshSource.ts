@@ -176,8 +176,7 @@ export class GlbPbrMeshSource extends BaseMeshSource {
       }
     }
 
-    // ── 7. attachToScene: set scene.environment (collected for cleanup) ──
-    let attachedScene: { environment?: unknown; environmentIntensity?: number } | null = null;
+    // ── 7. attachToScene: set scene.environment (closure restores on cleanup) ──
     let priorEnvironment: unknown = undefined;
     let priorIntensity: number | undefined = undefined;
     const attachToScene = hdrTexture
@@ -191,7 +190,6 @@ export class GlbPbrMeshSource extends BaseMeshSource {
           priorIntensity = s.environmentIntensity;
           s.environment = hdrTexture;
           s.environmentIntensity = this.environmentIntensity;
-          attachedScene = s;
           return () => {
             // Restore prior scene.environment (usually null) so a subsequent
             // text-mode session does not inherit our HDR.
@@ -224,8 +222,10 @@ export class GlbPbrMeshSource extends BaseMeshSource {
       ...(mixer ? { mixer } : {}),
       bbox,
       dispose,
-      uTime: treatment.uTime,
-      uTransition: treatment.uTransition,
+      // TSL UniformNode exposes `.value` at runtime; bridge to the renderer's
+      // structural `{ value: number }` contract documented on MediaArtMeshState.
+      uTime: treatment.uTime as unknown as { value: number },
+      uTransition: treatment.uTransition as unknown as { value: number },
       ...(attachToScene ? { attachToScene } : {}),
     };
   }
@@ -361,7 +361,7 @@ export class GlbPbrMeshSource extends BaseMeshSource {
               new GlymoError(
                 'media-art/parse-failed',
                 `GLTFLoader rejected ${this.id}`,
-                { recoverable: true, originalError: err as Error },
+                { recoverable: true, originalError: err as unknown as Error },
               ),
             ),
         );

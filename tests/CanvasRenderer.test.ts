@@ -1,8 +1,7 @@
 import { CanvasRenderer } from '../src/render/CanvasRenderer.js';
 import type { Stroke, StrokePoint } from '../src/types.js';
 
-// Cross-compatible mock function
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const mockFn = vi.fn;
 
 // ── Helpers ────────────────────────────────────────────
 

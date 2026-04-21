@@ -209,20 +209,13 @@ export interface CanvasSession {
   isExporting: boolean;        // Lock during export
 }
 
-/** Structured error for pipeline failures */
-export interface GlymoError {
-  code: string;
-  message: string;
-  stage?: string;
-  originalError?: Error;
-  recoverable: boolean;
-}
-
 /**
- * Throwable form of {@link GlymoError}. Use when an API must surface a
- * failure synchronously (e.g., {@link Glymo.exportSession} when a fill PNG
- * exceeds the 500 KB wire limit). Declaration-merges with the interface of
- * the same name so `const e: GlymoError = new GlymoError(...)` is valid.
+ * Structured error for pipeline failures. Thrown synchronously when an API
+ * must surface a failure (e.g., {@link Glymo.exportSession} when a fill PNG
+ * exceeds the 500 KB wire limit). The class doubles as the structural type
+ * for `const e: GlymoError = new GlymoError(...)` — no separate interface is
+ * needed because the class surface already exposes every field the consumer
+ * contract cares about.
  */
 export class GlymoError extends Error {
   readonly code: string;

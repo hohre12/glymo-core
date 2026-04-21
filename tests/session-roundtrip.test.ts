@@ -9,7 +9,6 @@ import {
   Glymo,
   type SessionDoc,
   type ObjectDoc,
-  type FillDoc,
   type BitmapUploader,
   type BitmapLoader,
   type StrokeDoc,
@@ -204,8 +203,8 @@ describe('session-roundtrip', () => {
 
     // Animation params (D4: elapsed / startedAt / active must NOT survive)
     const reloadedSerials = g2.strokeAnimator.serialize();
-    expect(reloadedSerials.map(e => ({ strokeIds: e.strokeIds, type: e.params.type, duration: e.params.durationMs ?? e.params.duration }))).toEqual(
-      origAnimSerials.map(e => ({ strokeIds: e.strokeIds, type: e.params.type, duration: e.params.durationMs ?? e.params.duration })),
+    expect(reloadedSerials.map(e => ({ strokeIds: e.strokeIds, type: e.params.type, duration: e.params.duration }))).toEqual(
+      origAnimSerials.map(e => ({ strokeIds: e.strokeIds, type: e.params.type, duration: e.params.duration })),
     );
     for (const entry of reloadedSerials) {
       expect(entry).not.toHaveProperty('elapsed');
@@ -386,6 +385,6 @@ describe('session-roundtrip', () => {
     expect(g2.getCharacters()).toHaveLength(2);
     expect(g2.getCharacters().map(c => c.id)).toEqual(['c1', 'c2']);
     expect(received).toHaveLength(1);
-    expect(received[0].characters).toHaveLength(2);
+    expect(received[0]!.characters).toHaveLength(2);
   });
 });

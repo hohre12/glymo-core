@@ -1,7 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-// Cross-compatible mock function
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const mockFn = vi.fn;
 
 // ── gifenc mock ─────────────────────────────────────
 // Store on globalThis so mock factory can access after hoisting
@@ -10,8 +9,7 @@ const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
 (globalThis as any).__gifencFinish = mockFn();
 (globalThis as any).__gifencBytes = mockFn(() => new Uint8Array([71, 73, 70]));
 
-const mockModule = typeof vi !== 'undefined' ? vi : jest;
-mockModule.mock('gifenc', () => ({
+vi.mock('gifenc', () => ({
   GIFEncoder: () => ({
     writeFrame: (globalThis as any).__gifencWriteFrame,
     finish: (globalThis as any).__gifencFinish,
@@ -152,8 +150,8 @@ describe('GIFExporter progress callback', () => {
     await mod.exportGIF(canvas, { onProgress });
 
     for (let i = 1; i < progressValues.length; i++) {
-      expect(progressValues[i]).toBeGreaterThanOrEqual(
-        progressValues[i - 1],
+      expect(progressValues[i]!).toBeGreaterThanOrEqual(
+        progressValues[i - 1]!,
       );
     }
   });

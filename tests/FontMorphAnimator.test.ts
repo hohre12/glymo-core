@@ -148,9 +148,6 @@ describe('FontMorphAnimator cascade delay', () => {
     const char0Points = frame.points.filter(
       (_, idx) => idx < 5,  // first char has 5 points
     );
-    const char2Points = frame.points.filter(
-      (_, idx) => idx >= 10, // third char starts at index 10
-    );
 
     // Char 0 should be more morphed (closer to target) than char 2
     // Char 0's hand starts at (0,0) font at (50,50) — if morphed, x > 0

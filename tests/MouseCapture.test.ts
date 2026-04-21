@@ -1,8 +1,7 @@
 import { MouseCapture } from '../src/input/MouseCapture.js';
 import type { RawInputPoint } from '../src/types.js';
 
-// Cross-compatible mock function
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const mockFn = vi.fn;
 
 // ── Helpers ────────────────────────────────────────────
 

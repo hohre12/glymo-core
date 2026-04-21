@@ -189,7 +189,7 @@ export class CascadingRecognizer {
       this.groupState.set(group.id, state);
     }
 
-    this.recognizeGroup(group, state, dpr);
+    this.recognizeGroup(group, state);
   }
 
   private handleGroupFinalized(group: SpatialGroup): void {
@@ -203,7 +203,7 @@ export class CascadingRecognizer {
   }
 
   /** Trigger recognition for a group's strokes */
-  private recognizeGroup(group: SpatialGroup, state: RecognitionState, dpr: number): void {
+  private recognizeGroup(group: SpatialGroup, state: RecognitionState): void {
     const gen = ++state.generation;
     const strokeCountNow = group.strokes.length;
     // raw is typed loosely in GroupedStroke, but we know it's StrokePoint[]

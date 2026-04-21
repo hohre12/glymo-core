@@ -14,11 +14,8 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "exactOptionalPropertyTypes": false,
-    "declaration": true,
-    "declarationDir": "dist",
-    "outDir": "dist",
-    "rootDir": "src",
-    "types": ["@webgpu/types"]
+    "noEmit": true,
+    "types": ["@webgpu/types", "vitest/globals"]
   },
   "include": ["src", "tests"]
 }

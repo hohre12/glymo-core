@@ -185,7 +185,7 @@ describe('HandVisualizer', () => {
     // The index cursor glow arc (drawIndexCursor) is drawn at the mirrored x.
     const arcCalls = ctx.arc.mock.calls as number[][];
     const glowCall = arcCalls.find(
-      (call) => Math.abs(call[0] - 448) < 1,
+      (call) => Math.abs(call[0]! - 448) < 1,
     );
     expect(glowCall).toBeDefined();
   });

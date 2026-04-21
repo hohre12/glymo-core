@@ -34,8 +34,6 @@ export class PipelineEngine {
   private activeStrokeId = '';
   /** Points accumulated into segment since penDown — diag accounting. */
   private accumulatedCount = 0;
-  /** Points dropped inside realTime stages (stabilize/pressure reject). */
-  private droppedRealTimeCount = 0;
 
   constructor(eventBus: EventBus) {
     this.eventBus = eventBus;
@@ -127,7 +125,6 @@ export class PipelineEngine {
     this.strokeCounter += 1;
     this.activeStrokeId = `stroke-${this.strokeCounter}`;
     this.accumulatedCount = 0;
-    this.droppedRealTimeCount = 0;
     this.segmentStage.penDown();
     this.eventBus.emit('stroke:start');
     if (DiagBus.enabled) {

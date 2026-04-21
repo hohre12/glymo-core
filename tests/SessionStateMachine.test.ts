@@ -1,13 +1,10 @@
 import { SessionStateMachine, MORPH_DELAY_MS } from '../src/state/SessionStateMachine.js';
 import { EventBus } from '../src/state/EventBus.js';
 
-// Cross-compatible timer helpers for vitest + jest
-const useFakeTimers = typeof vi !== 'undefined' ? () => vi.useFakeTimers() : () => jest.useFakeTimers();
-const useRealTimers = typeof vi !== 'undefined' ? () => vi.useRealTimers() : () => jest.useRealTimers();
-const advanceTimers = typeof vi !== 'undefined'
-  ? (ms: number) => vi.advanceTimersByTime(ms)
-  : (ms: number) => jest.advanceTimersByTime(ms);
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const useFakeTimers = () => vi.useFakeTimers();
+const useRealTimers = () => vi.useRealTimers();
+const advanceTimers = (ms: number) => vi.advanceTimersByTime(ms);
+const mockFn = vi.fn;
 
 // ── State Transitions ───────────────────────────────
 

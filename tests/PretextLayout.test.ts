@@ -33,14 +33,6 @@ function horizontalPath(x0: number, x1: number, y: number, n: number): Point[] {
   return Array.from({ length: n }, (_, i) => ({ x: x0 + step * i, y }));
 }
 
-/** Create a circular path with n points */
-function circularPath(cx: number, cy: number, r: number, n: number): Point[] {
-  return Array.from({ length: n }, (_, i) => {
-    const angle = (Math.PI * 2 * i) / n;
-    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
-  });
-}
-
 /** Create a square path (closed) */
 function squarePath(x: number, y: number, size: number): Point[] {
   return [

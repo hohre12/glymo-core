@@ -4,8 +4,7 @@ import type { IRenderer } from '../src/render/IRenderer.js';
 import type { Stroke, StrokePoint, EffectPresetName } from '../src/types.js';
 import { GPU_EFFECT_NAMES, CANVAS_EFFECT_NAMES, EFFECT_PRESETS } from '../src/types.js';
 
-// Cross-compatible mock function
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const mockFn = vi.fn;
 
 // ── Helpers ────────────────────────────────────────────
 

@@ -184,6 +184,11 @@ export class Hologram3DRenderer {
   private activeMeshDrag = false;
   private meshGrabPosition: { x: number; y: number } | null = null;
 
+  /** Last committed mesh-mode grab position in world units (read by tests and future commit paths). */
+  getLastMeshGrabPosition(): { x: number; y: number } | null {
+    return this.meshGrabPosition;
+  }
+
   private startTime = performance.now();
 
   /** Whether the renderer has been successfully initialized */

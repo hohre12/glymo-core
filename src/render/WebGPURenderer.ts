@@ -179,7 +179,6 @@ export class WebGPURenderer implements IRenderer {
   private overlayCtx: CanvasRenderingContext2D | null = null;
 
   private bgTransparent = false;
-  private backgroundColor = '#000000';
   private parsedBgColor: GPUColor = { ...DEFAULT_BG_COLOR };
 
   private initialized = false;
@@ -266,7 +265,6 @@ export class WebGPURenderer implements IRenderer {
 
   /** Set background color (hex string, e.g. '#000000' or '#ffffff') */
   setBackgroundColor(color: string): void {
-    this.backgroundColor = color;
     const rgb = hexToRgb(color);
     this.parsedBgColor = { r: rgb.r / 255, g: rgb.g / 255, b: rgb.b / 255, a: 1 };
   }

@@ -76,7 +76,6 @@ export function createMediaArtShaderNodes(deps: {
   const {
     Fn,
     float,
-    vec3,
     uniform,
     color,
     mix,

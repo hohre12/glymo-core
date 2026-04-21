@@ -1,5 +1,5 @@
 import { PointMatcher } from '../src/text/PointMatcher.js';
-import type { StrokePoint, Point } from '../src/types.js';
+import type { StrokePoint } from '../src/types.js';
 import type { GlyphOutline } from '../src/text/types.js';
 
 // ── Helpers ─────────────────────────────────────────

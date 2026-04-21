@@ -12,8 +12,7 @@ import {
 // API in commit 118dad5 (refactor: extract GestureDetector and camera utils).
 // Tests for those exports have been removed accordingly.
 
-// Cross-compatible mock function
-const mockFn = typeof vi !== 'undefined' ? vi.fn : jest.fn;
+const mockFn = vi.fn;
 
 // ── Mock setup ───────────────────────────────────────
 
