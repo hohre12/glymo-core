@@ -423,6 +423,10 @@ export class Hologram3DRenderer {
       // Clocks were renderer-wide under the legacy single-mesh path; with no
       // mesh present they release here so the next setModel's addMesh call
       // re-initialises them cleanly.
+      // Task 1.5 TODO: when the frame loop starts iterating every mesh slot
+      // (not just LEGACY_SINGLE_ID), gate this null-out on
+      // `this.meshes.size === 0` so concurrent meshes added via addMesh()
+      // against non-legacy objectIds keep their animation clocks.
       this.mixerClock = null;
       this.meshFrameClock = null;
       return null;
