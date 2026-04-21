@@ -38,15 +38,27 @@ import {
   computeBboxFromObject,
   disposeObject3DTree,
 } from './common.js';
+import { DEFAULT_ENVIRONMENT_INTENSITY } from './mediaArtDefaults.js';
+import { createNeutralEnvironmentTexture } from './neutralEnvironment.js';
+import {
+  createNeutralLightRig,
+  type NeutralLightRigConfig,
+} from './neutralLightRig.js';
 
 export class GltfMeshSource extends BaseMeshSource {
   private readonly url: string;
+  private readonly environmentIntensity: number;
+  private readonly lightRigConfig: NeutralLightRigConfig;
 
   constructor(descriptor: GltfMeshSourceDescriptor, options: BaseMeshSourceOptions = {}) {
     assertDescriptorType(descriptor, 'gltf', 'GltfMeshSource');
     assertDescriptorField(descriptor.url, 'url', 'GltfMeshSource');
     super(descriptor, options);
     this.url = descriptor.url;
+    this.environmentIntensity = descriptor.environmentIntensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
+    this.lightRigConfig = descriptor.lightRigIntensity
+      ? { intensity: descriptor.lightRigIntensity }
+      : {};
   }
 
   async load(
@@ -133,12 +145,47 @@ export class GltfMeshSource extends BaseMeshSource {
       action.play();
     }
 
-    // ── 6. Wire up disposal — close over the resources we own ─────────────
+    // ── 6. Create neutral environment + 3-point light rig ─────────────────
+    //
+    // HR5 (production-by-default): every gltf asset inherits Earth/Dog-grade
+    // quality without per-asset HDRI authoring. Environment is a tiny
+    // procedural gradient DataTexture (three generates PMREM internally on
+    // first use); the rig is a conventional key/fill/ambient stack.
+    const environmentTexture = createNeutralEnvironmentTexture(THREE);
+    const lightRig = createNeutralLightRig(THREE, this.lightRigConfig);
+
+    // ── 7. attachToScene: wire environment + rig, close over prior state ──
+    let priorEnvironment: unknown = undefined;
+    let priorIntensity: number | undefined = undefined;
+    const envIntensity = this.environmentIntensity;
+    const rigGroup = lightRig.group as InstanceType<typeof import('three/webgpu').Object3D>;
+    const attachToScene = (scene: unknown): (() => void) => {
+      const s = scene as {
+        environment?: unknown;
+        environmentIntensity?: number;
+        add?: (obj: unknown) => void;
+        remove?: (obj: unknown) => void;
+      };
+      priorEnvironment = s.environment;
+      priorIntensity = s.environmentIntensity;
+      s.environment = environmentTexture;
+      s.environmentIntensity = envIntensity;
+      s.add?.(rigGroup);
+      return () => {
+        s.remove?.(rigGroup);
+        s.environment = priorEnvironment;
+        s.environmentIntensity = priorIntensity;
+      };
+    };
+
+    // ── 8. Wire up disposal — close over the resources we own ─────────────
     const dispose = () => {
       if (mixer) {
         (mixer as { stopAllAction: () => void }).stopAllAction();
       }
       disposeObject3DTree(sceneRoot, { extraMaterials: treatment.materials });
+      environmentTexture.dispose?.();
+      lightRig.dispose();
     };
 
     return {
@@ -151,6 +198,7 @@ export class GltfMeshSource extends BaseMeshSource {
       // structural `{ value: number }` contract documented on MediaArtMeshState.
       uTime: treatment.uTime as unknown as { value: number },
       uTransition: treatment.uTransition as unknown as { value: number },
+      attachToScene,
     };
   }
 

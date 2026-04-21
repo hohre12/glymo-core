@@ -41,8 +41,7 @@ import {
   computeBboxFromObject,
   disposeObject3DTree,
 } from './common.js';
-
-const DEFAULT_ENVIRONMENT_INTENSITY = 0.6;
+import { DEFAULT_ENVIRONMENT_INTENSITY } from './mediaArtDefaults.js';
 
 export class GlbPbrMeshSource extends BaseMeshSource {
   private readonly url: string;

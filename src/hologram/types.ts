@@ -99,11 +99,31 @@ export interface BaseMeshSourceDescriptor {
  * Descriptor for loading a plain GLB asset whose visual treatment is the
  * cyan holographic media-art shader. Used by simple object/food/vehicle
  * categories where the asset is just a shape.
+ *
+ * v0.13.0 (2026-04-21, media-art-production-catalog HR5) — every gltf asset
+ * now renders against a core-bundled neutral environment texture + 3-point
+ * light rig by default, so plain GLBs inherit Earth/Dog-grade quality without
+ * per-asset HDRI authoring. Both are optional overrides via the fields below.
  */
 export interface GltfMeshSourceDescriptor extends BaseMeshSourceDescriptor {
   type: 'gltf';
   /** Public URL resolving to the GLB binary. */
   url: string;
+  /**
+   * Image-based lighting intensity multiplier applied to the bundled neutral
+   * environment (scene.environmentIntensity). Default 0.6 — shared with the
+   * gltf-pbr variant via DEFAULT_ENVIRONMENT_INTENSITY.
+   */
+  environmentIntensity?: number;
+  /**
+   * Optional override of the 3-point light rig intensities. Omitted keys fall
+   * back to DEFAULT_LIGHT_RIG_INTENSITY (key 1.6, fill 0.4, ambient 0.2).
+   */
+  lightRigIntensity?: {
+    key?: number;
+    fill?: number;
+    ambient?: number;
+  };
 }
 
 /**
@@ -172,6 +192,12 @@ export interface ProceduralPlanetMeshSourceDescriptor extends BaseMeshSourceDesc
     body?: number;
     clouds?: number;
   };
+  /**
+   * Override the atmosphere BackSide shell colour. Default 0x00ccff (cyan,
+   * matches Earth). Set a warm hex (e.g. 0xffaa55 for Sun corona, 0xff5522
+   * for Mars dust) to re-tone the planet without forking the shader.
+   */
+  atmosphereColorHex?: number;
 }
 
 /**

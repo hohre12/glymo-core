@@ -37,10 +37,12 @@ const stubs = vi.hoisted(() => {
     rotation = makeVec3Stub();
     children: StubObject3D[] = [];
     visible = true;
+    name = '';
     add(o: StubObject3D): void { this.children.push(o); }
     remove(o: StubObject3D): void {
       this.children = this.children.filter((c) => c !== o);
     }
+    clear(): void { this.children = []; }
     traverse(cb: (obj: unknown) => void): void {
       cb(this);
       for (const c of this.children) c.traverse(cb);
@@ -195,6 +197,18 @@ vi.mock('three/webgpu', () => ({
   PostProcessing: stubs.StubPostProcessing,
   FrontSide: 0,
   DoubleSide: 2,
+  // v0.13.0 — neutral environment texture stubs consumed by the bundled
+  // rendering defaults installed in GltfMeshSource.attachToScene.
+  DataTexture: class {
+    mapping = 0;
+    needsUpdate = false;
+    name = '';
+    dispose(): void {}
+    constructor(_data: unknown, _w: number, _h: number, _fmt: number, _type: number) {}
+  },
+  RGBAFormat: 1023,
+  FloatType: 1015,
+  EquirectangularReflectionMapping: 303,
 }));
 
 vi.mock('three/tsl', () => {

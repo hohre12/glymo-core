@@ -24,3 +24,36 @@ export {
   getDracoLoader,
   setLoaderDecoderPaths,
 } from './loaders.js';
+export {
+  BUNDLED_NEUTRAL_ENVIRONMENT,
+  DEFAULT_ATMOSPHERE_COLOR_HEX,
+  DEFAULT_AXIAL_TILT_DEG,
+  DEFAULT_ENVIRONMENT_INTENSITY,
+  DEFAULT_FILL_LIGHT_POSITION,
+  DEFAULT_KEY_LIGHT_POSITION,
+  DEFAULT_LIGHT_RIG_INTENSITY,
+  DEFAULT_ROTATION_BODY,
+  DEFAULT_ROTATION_CLOUDS,
+} from './mediaArtDefaults.js';
+export type {
+  BundledNeutralEnvironment,
+  LightPosition,
+  LightRigIntensity,
+} from './mediaArtDefaults.js';
+export {
+  VARIANT_DEFAULTS,
+  getVariantDefaults,
+} from './variantDefaults.js';
+export type {
+  GltfPbrVariantDefaults,
+  GltfVariantDefaults,
+  ProceduralPlanetVariantDefaults,
+  VariantDefaults,
+  VariantKey,
+} from './variantDefaults.js';
+export { createNeutralEnvironmentTexture } from './neutralEnvironment.js';
+export { createNeutralLightRig } from './neutralLightRig.js';
+export type {
+  NeutralLightRig,
+  NeutralLightRigConfig,
+} from './neutralLightRig.js';

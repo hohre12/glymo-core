@@ -212,6 +212,20 @@ export {
   applyMediaArtShaderTreatment,
   applyTexturedMediaArtShaderTreatment,
   MEDIA_ART_LUMINANCE_STOPS,
+  // v0.13.0 — shared rendering defaults + neutral environment/rig helpers
+  BUNDLED_NEUTRAL_ENVIRONMENT,
+  DEFAULT_ATMOSPHERE_COLOR_HEX,
+  DEFAULT_AXIAL_TILT_DEG,
+  DEFAULT_ENVIRONMENT_INTENSITY,
+  DEFAULT_FILL_LIGHT_POSITION,
+  DEFAULT_KEY_LIGHT_POSITION,
+  DEFAULT_LIGHT_RIG_INTENSITY,
+  DEFAULT_ROTATION_BODY,
+  DEFAULT_ROTATION_CLOUDS,
+  VARIANT_DEFAULTS,
+  getVariantDefaults,
+  createNeutralEnvironmentTexture,
+  createNeutralLightRig,
 } from './hologram/index.js';
 export type {
   BaseMeshSourceOptions,
@@ -219,6 +233,17 @@ export type {
   FetchProgressCallback,
   MediaArtShaderNodes,
   MediaArtTreatmentResult,
+  // v0.13.0 types
+  BundledNeutralEnvironment,
+  LightPosition,
+  LightRigIntensity,
+  GltfVariantDefaults,
+  GltfPbrVariantDefaults,
+  ProceduralPlanetVariantDefaults,
+  VariantDefaults,
+  VariantKey,
+  NeutralLightRig,
+  NeutralLightRigConfig,
 } from './hologram/index.js';
 
 export { HologramGesture } from './gesture/HologramGesture.js';

@@ -48,10 +48,12 @@ import {
   computeBboxFromObject,
   disposeObject3DTree,
 } from './common.js';
-
-const DEFAULT_AXIAL_TILT_DEG = 23.4;
-const DEFAULT_ROTATION_BODY = 0.10;
-const DEFAULT_ROTATION_CLOUDS = 0.13;
+import {
+  DEFAULT_ATMOSPHERE_COLOR_HEX,
+  DEFAULT_AXIAL_TILT_DEG,
+  DEFAULT_ROTATION_BODY,
+  DEFAULT_ROTATION_CLOUDS,
+} from './mediaArtDefaults.js';
 
 interface TextureSlots {
   daymap: string;
@@ -69,6 +71,7 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
   private readonly textureSize: { width: number; height: number };
   private readonly axialTiltDeg: number;
   private readonly rotationRate: RotationRates;
+  private readonly atmosphereColorHex: number;
 
   constructor(
     descriptor: ProceduralPlanetMeshSourceDescriptor,
@@ -109,6 +112,7 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
       body: descriptor.rotationRate?.body ?? DEFAULT_ROTATION_BODY,
       clouds: descriptor.rotationRate?.clouds ?? DEFAULT_ROTATION_CLOUDS,
     };
+    this.atmosphereColorHex = descriptor.atmosphereColorHex ?? DEFAULT_ATMOSPHERE_COLOR_HEX;
   }
 
   async load(
@@ -244,6 +248,9 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
     const cyanMid = color(new THREE.Color(0x0a4a8c));
     const cyanBright = color(new THREE.Color(0x6fd8ff));
     const cyanGlow = color(new THREE.Color(0x00bbff));
+    // Atmosphere shell tint — cyan by default (Earth), overridable via
+    // descriptor.atmosphereColorHex for warm corona (Sun) or dusty halo (Mars).
+    const atmoGlow = color(new THREE.Color(this.atmosphereColorHex));
     const lumW = vec3(0.299, 0.587, 0.114);
 
     // ── 3a. Sobel coastline (3x3 luminance gradient on the daymap) ─────────
@@ -322,8 +329,8 @@ export class ProceduralPlanetMeshSource extends BaseMeshSource {
     atmoMat.transparent = true;
     atmoMat.depthWrite = false;
     atmoMat.side = THREE.BackSide;
-    (atmoMat as unknown as { colorNode: unknown }).colorNode = cyanGlow;
-    (atmoMat as unknown as { emissiveNode: unknown }).emissiveNode = cyanGlow
+    (atmoMat as unknown as { colorNode: unknown }).colorNode = atmoGlow;
+    (atmoMat as unknown as { emissiveNode: unknown }).emissiveNode = atmoGlow
       .mul(1.6)
       .mul(uTransition);
     (atmoMat as unknown as { opacityNode: unknown }).opacityNode = clamp(

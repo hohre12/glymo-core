@@ -78,6 +78,35 @@ const fakeDeps = {
         this.b = (hex & 0xff) / 255;
       }
     },
+    // ── v0.13.0 stubs for bundled neutral environment + rig ───────────────
+    DataTexture: class {
+      mapping = 0;
+      needsUpdate = false;
+      name = '';
+      dispose(): void {}
+      constructor(_data: unknown, _w: number, _h: number, _fmt: number, _type: number) {}
+    },
+    RGBAFormat: 1023,
+    FloatType: 1015,
+    EquirectangularReflectionMapping: 303,
+    Group: class {
+      name = '';
+      children: unknown[] = [];
+      add(obj: unknown): this { this.children.push(obj); return this; }
+      remove(obj: unknown): this { this.children = this.children.filter((c) => c !== obj); return this; }
+      clear(): this { this.children = []; return this; }
+    },
+    DirectionalLight: class {
+      name = '';
+      position = {
+        set(_x: number, _y: number, _z: number): void { /* noop */ },
+      };
+      constructor(_color: number, _intensity: number) {}
+    },
+    AmbientLight: class {
+      name = '';
+      constructor(_color: number, _intensity: number) {}
+    },
   } as unknown as Parameters<GltfMeshSource['load']>[0]['THREE'],
   tsl: {
     Fn: (cb: () => unknown) => cb,
@@ -248,6 +277,89 @@ describe('GltfMeshSource', () => {
         { fetcher },
       );
       const state = await src.load(fakeDeps);
+      expect(() => state.dispose()).not.toThrow();
+    });
+  });
+
+  describe('HR5 production-by-default rendering (v0.13.0)', () => {
+    // Every gltf asset inherits a bundled neutral environment + 3-point rig
+    // via attachToScene — callers never have to author per-asset HDRI.
+    // The cleanup closure must restore every scene property it touched so a
+    // subsequent revert / text-mode entry does not inherit our env or lights.
+    it('attachToScene installs env + rig and cleanup restores prior state', async () => {
+      const fetcher = vi.fn(async () =>
+        new Response(new ArrayBuffer(8), { status: 200 }),
+      );
+      const src = new GltfMeshSource(
+        { type: 'gltf', id: 'a', url: 'https://cdn.test/a.glb' },
+        { fetcher },
+      );
+      const state = await src.load(fakeDeps);
+      expect(state.attachToScene).toBeTypeOf('function');
+
+      const priorEnv = { name: 'prior-env' };
+      const scene = {
+        environment: priorEnv as unknown,
+        environmentIntensity: 0.25,
+        children: [] as unknown[],
+        add(obj: unknown) { this.children.push(obj); },
+        remove(obj: unknown) { this.children = this.children.filter((c) => c !== obj); },
+      };
+
+      const cleanup = state.attachToScene!(scene) as () => void;
+      expect(scene.environment).not.toBe(priorEnv);
+      expect(scene.environmentIntensity).toBe(0.6);
+      expect(scene.children).toHaveLength(1);
+
+      cleanup();
+      expect(scene.environment).toBe(priorEnv);
+      expect(scene.environmentIntensity).toBe(0.25);
+      expect(scene.children).toHaveLength(0);
+    });
+
+    it('descriptor environmentIntensity override wins over the default', async () => {
+      const fetcher = vi.fn(async () =>
+        new Response(new ArrayBuffer(8), { status: 200 }),
+      );
+      const src = new GltfMeshSource(
+        {
+          type: 'gltf',
+          id: 'a',
+          url: 'https://cdn.test/a.glb',
+          environmentIntensity: 1.25,
+        },
+        { fetcher },
+      );
+      const state = await src.load(fakeDeps);
+      const scene = {
+        environment: undefined as unknown,
+        environmentIntensity: 0,
+        children: [] as unknown[],
+        add(obj: unknown) { this.children.push(obj); },
+        remove(obj: unknown) { this.children = this.children.filter((c) => c !== obj); },
+      };
+      state.attachToScene!(scene);
+      expect(scene.environmentIntensity).toBe(1.25);
+    });
+
+    it('dispose() after cleanup does not throw', async () => {
+      const fetcher = vi.fn(async () =>
+        new Response(new ArrayBuffer(8), { status: 200 }),
+      );
+      const src = new GltfMeshSource(
+        { type: 'gltf', id: 'a', url: 'https://cdn.test/a.glb' },
+        { fetcher },
+      );
+      const state = await src.load(fakeDeps);
+      const scene = {
+        environment: undefined as unknown,
+        environmentIntensity: 0,
+        children: [] as unknown[],
+        add(obj: unknown) { this.children.push(obj); },
+        remove(obj: unknown) { this.children = this.children.filter((c) => c !== obj); },
+      };
+      const cleanup = state.attachToScene!(scene) as () => void;
+      cleanup();
       expect(() => state.dispose()).not.toThrow();
     });
   });

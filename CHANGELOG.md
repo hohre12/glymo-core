@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-04-21
+
+### Added — Media Art production-by-default rendering (HR5)
+
+See `docs/plans/media-art-production-catalog.md` (Glymo root) for the full
+design. Summary: every `gltf` asset now inherits Earth/Dog-grade rendering
+quality without per-asset HDRI authoring by bundling a neutral environment
+texture + 3-point light rig directly into `GltfMeshSource`. The constants
+driving the look are extracted from the source classes into a shared module
+so gltf / gltf-pbr / procedural-planet variants stay visually coherent and
+future variants plug in without re-discovering the values.
+
+- **`src/hologram/sources/mediaArtDefaults.ts`** — pure-data module exporting
+  shared rendering constants: `DEFAULT_ENVIRONMENT_INTENSITY` (0.6),
+  `DEFAULT_LIGHT_RIG_INTENSITY` (`{ key: 1.6, fill: 0.4, ambient: 0.2 }`),
+  `DEFAULT_KEY_LIGHT_POSITION` / `DEFAULT_FILL_LIGHT_POSITION`,
+  `DEFAULT_AXIAL_TILT_DEG` (23.4), `DEFAULT_ROTATION_BODY` (0.10),
+  `DEFAULT_ROTATION_CLOUDS` (0.13), `DEFAULT_ATMOSPHERE_COLOR_HEX` (0x00ccff),
+  and the `BUNDLED_NEUTRAL_ENVIRONMENT` marker (`kind: 'room-environment'`).
+- **`src/hologram/sources/variantDefaults.ts`** — `VARIANT_DEFAULTS` registry
+  exposing per-variant default config (`gltf` / `gltf-pbr` /
+  `procedural-planet`) + `getVariantDefaults(variant)` helper with generic
+  narrowing. Adding a fourth variant forces a compile-time exhaustiveness
+  update.
+- **`src/hologram/sources/neutralEnvironment.ts`** —
+  `createNeutralEnvironmentTexture(THREE)` generates a 128×64 equirectangular
+  float DataTexture with a 3-tone vertical gradient (warm floor → bright
+  horizon → cool ceiling). Assigned to `scene.environment` with
+  `EquirectangularReflectionMapping`; three.js generates the PMREM internally
+  on first use, so no binary HDR asset ships with the package.
+- **`src/hologram/sources/neutralLightRig.ts`** —
+  `createNeutralLightRig(THREE, config?)` builds a Group containing a
+  key/fill DirectionalLight pair + AmbientLight. Consumer closes over the
+  `NeutralLightRigConfig` optional intensity overrides.
+- **`GltfMeshSource.load()`** now creates the neutral environment + rig after
+  parsing the GLB and returns an `attachToScene` hook that (1) stashes the
+  prior `scene.environment` + `environmentIntensity`, (2) installs the new
+  environment + intensity, (3) adds the rig group to the scene, and (4)
+  returns a cleanup closure restoring the prior state. Dispose disposes both
+  the environment texture and the rig.
+- **`GltfMeshSourceDescriptor`** gains optional `environmentIntensity?`
+  (default 0.6) and `lightRigIntensity?: { key?; fill?; ambient? }` fields.
+- **`ProceduralPlanetMeshSourceDescriptor`** gains optional
+  `atmosphereColorHex?: number` override (default 0x00ccff — cyan for
+  Earth; set warm hex for Sun corona or Mars dust without forking the
+  shader).
+
+### Changed
+
+- **`GlbPbrMeshSource`** local `DEFAULT_ENVIRONMENT_INTENSITY = 0.6` removed;
+  imported from `mediaArtDefaults` instead. Behaviour identical.
+- **`ProceduralPlanetMeshSource`** local `DEFAULT_AXIAL_TILT_DEG`,
+  `DEFAULT_ROTATION_BODY`, `DEFAULT_ROTATION_CLOUDS` removed; imported from
+  `mediaArtDefaults`. Adds `atmosphereColorHex` constructor arg +
+  `atmoGlow` TSL node for the atmosphere shell (body / clouds palette
+  unchanged so Earth renders bit-identical).
+
+### Tests
+
+- `tests/mediaArtDefaults.test.ts` — pins every exported constant.
+- `tests/variantDefaults.test.ts` — asserts registry shape + narrowing.
+- `tests/gltf-mesh-source.test.ts` — new "HR5 production-by-default
+  rendering" describe block covers attachToScene installing env + rig,
+  cleanup restoring prior state, descriptor override precedence, and
+  dispose-after-cleanup safety.
+- `tests/hologram-mesh-mode.test.ts` — three/webgpu stub extended with
+  DataTexture / RGBAFormat / FloatType / EquirectangularReflectionMapping;
+  StubObject3D gains `.clear()` and `.name` so the rig dispose path runs
+  cleanly.
+
 ## [0.12.0] - 2026-04-21
 
 ### Added
