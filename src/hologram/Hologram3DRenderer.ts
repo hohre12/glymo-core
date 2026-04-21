@@ -4,10 +4,13 @@
 // Self-contained Three.js WebGPU renderer for holographic 3D text.
 // No React dependency — operates on a plain HTMLCanvasElement.
 //
-// v0.7.0 added mesh mode (per docs/plans/media-art-mvp.md §5 D5): the same
-// renderer can show a single GLB mesh instead of per-character text. Mode
-// flag routes geometry construction; bloom + holo color + rotation/zoom/spread
+// v0.7.0 added media-art meshes (per docs/plans/media-art-mvp.md §5 D5): the
+// same renderer can show one or more GLB / procedural scenes alongside the
+// per-character text. Presence of any entry in `this.meshes` routes the frame
+// loop through the mesh path; bloom + holo color + rotation/zoom/spread
 // effects are shared so text and media-art holograms feel like one product.
+// Multi-mesh is canonical since 0.16.0 — the original `setModel` single-mesh
+// shim was removed in Task 1.7 of docs/plans/media-art-multi-mesh.md.
 
 import type {
   HologramChar,
@@ -43,8 +46,8 @@ import { createMeshSource } from './sources/createMeshSource.js';
 //
 // `animationPaused` is per-slot so each mesh can pause independently (Studio
 // convention: every freshly-loaded mesh is frozen until the user's air-magic
-// pinch resumes it). The legacy isMeshAnimationPaused / toggleMeshAnimation API
-// reads/writes only the legacy-single-id slot for backward compatibility.
+// pinch resumes it). `isMeshAnimationPaused(objectId)` /
+// `toggleMeshAnimation(objectId)` address a specific slot.
 interface InternalMeshSlot {
   objectId: string;
   modelId: string;
@@ -181,20 +184,6 @@ export class Hologram3DRenderer {
   private handActive = false;
   private enabled = true;
 
-  // ── Mesh mode (v0.7.0, refactored Task 1.3 of multi-mesh plan) ──
-  //
-  // 'text' (default) renders per-char meshes from the chars[] array.
-  // 'mesh' renders one or more GLB/procedural scenes loaded via setModel() /
-  // addMesh().
-  //
-  // `mode` no longer routes the frame loop — `renderFrame` now dispatches
-  // the mesh path via `this.meshes.size > 0` (Task 1.5). The flag is still
-  // consulted by the legacy mesh API (`hitTestMesh`, `grabMesh`,
-  // `toggleMeshAnimation`, `translateMeshTo`) and by `setModel`'s mode
-  // bookkeeping; those call sites retire in Task 1.7 when `setModel` is
-  // removed.
-  private mode: 'text' | 'mesh' = 'text';
-
   /**
    * Map of loaded/loading meshes keyed by caller-assigned `objectId`.
    *
@@ -202,12 +191,10 @@ export class Hologram3DRenderer {
    * (meshState, loadToken, meshUTime, meshUTransition, meshUpdate,
    * meshAttachCleanup, mixerClock, meshFrameClock, meshAnimationPaused).
    *
-   * The legacy `setModel(descriptor | null)` API is preserved as a shim that
-   * routes through `addMesh(LEGACY_SINGLE_ID, ...)` / `disposeMeshSlot` for
-   * the single-mesh objectId. Every current consumer of the legacy mesh API
-   * (hitTestMesh, grabMesh, toggleMeshAnimation, getMeshState, …) reads the
-   * slot under `LEGACY_SINGLE_ID` — Task 1.7 removes that shim once the app
-   * and UI have migrated to the per-object API.
+   * Since Task 1.7 (0.16.0) the multi-mesh API is canonical — the legacy
+   * single-mesh `setModel` shim and its `mode` flag are gone. Presence of any
+   * entry here is the only signal that a media-art mesh is active; consumers
+   * call `addMesh(objectId, …)` and `removeMesh(objectId)` directly.
    */
   private meshes = new Map<string, InternalMeshSlot>();
 
@@ -218,16 +205,6 @@ export class Hologram3DRenderer {
    * same-objectId race case (the only case that matters).
    */
   private nextLoadToken = 0;
-
-  /**
-   * Canonical objectId for the legacy single-mesh path. The `setModel` shim
-   * funnels every load through this slot so all the legacy readers
-   * (hitTestMesh / grabMesh / toggleMeshAnimation / …) can resolve a single
-   * slot. `renderMeshFrame` iterates every entry in `this.meshes`, so it
-   * does not depend on this constant. Task 1.7 deletes the shim together
-   * with this constant.
-   */
-  private readonly LEGACY_SINGLE_ID = '__legacy_single__';
 
   /**
    * Animation mixer clock — separate from startTime so mixer pauses on dispose.
@@ -251,11 +228,13 @@ export class Hologram3DRenderer {
   /** Which char is currently being actively dragged (null = none) */
   private activeDragId: string | null = null;
   /**
-   * Mesh-mode single-hand pinch-grab state. `activeMeshDrag` fades the pivot
+   * Mesh single-hand pinch-grab state. `activeMeshDrag` fades the pivot
    * indicator in during translate (same channel as two-hand `handActive`);
    * `meshGrabPosition` records the last committed charContainer position in
    * world units so tests and future commit paths can inspect the release
-   * value without reaching into Three.js internals.
+   * value without reaching into Three.js internals. Both fields are
+   * renderer-wide — drag is inherently a single-hand affordance, so even
+   * with multi-mesh only one mesh is being dragged at a time.
    */
   private activeMeshDrag = false;
   private meshGrabPosition: { x: number; y: number } | null = null;
@@ -379,77 +358,7 @@ export class Hologram3DRenderer {
     }
   }
 
-  // ── Mesh mode API (v0.7.0) ──────────────────────────────────────────────────
-
-  /**
-   * Switch the renderer to mesh mode and load a GLB asset. Pass `null` to
-   * return to text mode. Disposes the prior model (or text mesh map) before
-   * the new one is committed.
-   *
-   * Resolves with the loaded mesh state (for inspection — bbox useful for
-   * placement) or `null` if the load was superseded by a later setModel call,
-   * or if the renderer was disposed mid-load.
-   *
-   * Errors from the underlying MeshSource (network, parse, validation) reject
-   * the promise as a typed `GlymoError` — callers should fall back to text
-   * mode and surface a user-visible error.
-   *
-   * `ctx` is optional and forwarded to the underlying MeshSource — pass
-   * `{ onProgress }` to receive load progress as a fraction in [0, 1] for
-   * UI hookup (e.g. percentage chip during a heavy GLB download). Progress
-   * callbacks fired AFTER the load is superseded by a newer setModel are
-   * ignored — only the latest in-flight load reaches the consumer.
-   *
-   * Pass `{ onCacheHit }` to receive a single signal when EVERY underlying
-   * fetch was a cache hit (warm reload). Hosts use this to suppress a
-   * loading-chip flash on instantaneous loads — see MediaArtOrchestrator.
-   * Like onProgress, the signal is suppressed if a newer setModel races
-   * ahead.
-   */
-  async setModel(
-    descriptor: MeshSourceDescriptor | null,
-    ctx?: MeshSourceLoadContext,
-  ): Promise<MediaArtMeshState | null> {
-    // Backward-compat shim over the new multi-mesh API. Funnels every load
-    // through `addMesh(LEGACY_SINGLE_ID, …)` so all the legacy mesh readers
-    // (hitTestMesh, grabMesh, toggleMeshAnimation, getMeshState, …) continue
-    // to resolve a single slot. Task 1.7 of docs/plans/media-art-multi-mesh.md
-    // deletes this shim once every caller has migrated to addMesh/removeMesh.
-    if (this.destroyed) {
-      throw new Error('[Hologram3DRenderer] setModel called on disposed renderer');
-    }
-
-    // ── Switch to text mode ────────────────────────────────────────────────
-    if (descriptor === null) {
-      const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
-      if (slot) {
-        this.disposeMeshSlot(slot);
-        this.meshes.delete(this.LEGACY_SINGLE_ID);
-      }
-      this.mode = 'text';
-      // Clocks are renderer-wide — one tick drives every slot in lock-step —
-      // so only release them when the map is actually empty. If a caller has
-      // already added a non-legacy mesh via addMesh() before calling
-      // setModel(null) to clear the legacy slot, the surviving mesh keeps
-      // its animation clocks and continues to tick through renderMeshFrame.
-      if (this.meshes.size === 0) {
-        this.mixerClock = null;
-        this.meshFrameClock = null;
-      }
-      return null;
-    }
-
-    // ── Load via addMesh and flip mode on success ──────────────────────────
-    const handle = await this.addMesh(
-      this.LEGACY_SINGLE_ID,
-      descriptor.id,
-      descriptor,
-      ctx,
-    );
-    if (!handle) return null;
-    this.mode = 'mesh';
-    return handle.state;
-  }
+  // ── Mesh mode API (v0.7.0 / canonical multi-mesh since 0.16.0) ──────────────
 
   /**
    * Load a mesh and register it under `objectId`. Resolves with the
@@ -668,55 +577,33 @@ export class Hologram3DRenderer {
     return true;
   }
 
-  /** Current rendering mode — useful for tools that adapt picker UI. */
-  getMode(): 'text' | 'mesh' {
-    return this.mode;
-  }
-
   /**
-   * Read-only handle to the legacy single-mesh state. Null in text mode or
-   * when the legacy slot has not finished loading. Task 1.7 removes this —
-   * callers should migrate to `getMesh(objectId)`.
+   * Whether the mesh registered under `objectId` is currently paused. Returns
+   * `true` when the slot doesn't exist or hasn't finished loading — defensive
+   * for hosts that poll the API before `addMesh` resolves, and a sane default
+   * for "no mesh, nothing to play".
    */
-  getMeshState(): MediaArtMeshState | null {
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
-    if (!slot || !slot.loaded) return null;
-    return slot.state;
-  }
-
-  /**
-   * Whether mesh-mode animation is currently paused. Always `true` immediately
-   * after a `setModel` call until `toggleMeshAnimation()` resumes it.
-   * Returns `true` in text mode (no mesh to animate).
-   *
-   * Reads the legacy single-mesh slot only — Task 3.5 adds per-object
-   * pause APIs for multi-mesh consumers.
-   */
-  isMeshAnimationPaused(): boolean {
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+  isMeshAnimationPaused(objectId: string): boolean {
+    const slot = this.meshes.get(objectId);
     if (!slot || !slot.loaded) return true;
     return slot.animationPaused;
   }
 
   /**
-   * Flip the mesh-mode animation paused flag. Returns the new paused state:
-   * `true` if the mesh is now paused, `false` if now playing. No-op in text
-   * mode (returns `true` — there is no mesh to animate).
+   * Flip the paused flag for the mesh registered under `objectId`. Returns the
+   * new paused state (`true` paused, `false` playing), or `null` when the slot
+   * doesn't exist or isn't loaded.
    *
    * Called by the air-magic pinch handler in
    * `glymo-ui/src/canvas/hooks/useGestureDispatcher.ts` when the pinch
-   * intersects the media-art mesh bounding box. The underlying clocks'
-   * deltas are always drained per frame while paused (see `renderMeshFrame`)
-   * so a resume never fast-forwards — playback always picks up from the
-   * paused pose rather than jumping ahead.
-   *
-   * Writes the legacy single-mesh slot only — Task 3.5 adds per-object
-   * toggles for multi-mesh consumers.
+   * intersects a media-art mesh bounding box. The underlying clocks' deltas
+   * are always drained per frame while every loaded slot is paused (see
+   * `renderMeshFrame`) so a resume never fast-forwards — playback always
+   * picks up from the paused pose rather than jumping ahead.
    */
-  toggleMeshAnimation(): boolean {
-    if (this.mode !== 'mesh') return true;
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
-    if (!slot || !slot.loaded) return true;
+  toggleMeshAnimation(objectId: string): boolean | null {
+    const slot = this.meshes.get(objectId);
+    if (!slot || !slot.loaded) return null;
     slot.animationPaused = !slot.animationPaused;
     return slot.animationPaused;
   }
@@ -724,8 +611,7 @@ export class Hologram3DRenderer {
   /**
    * Convert a CSS-space point to NDC coordinates in [-1, 1] using the current
    * canvas dimensions. Returns `null` when the canvas has zero extent (e.g.
-   * not attached to the DOM yet). Shared by `hitTestMesh` and
-   * `hitTestMeshForSelection` so both hit-test paths use identical math.
+   * not attached to the DOM yet).
    */
   private cssToNdc(cssX: number, cssY: number): { x: number; y: number } | null {
     if (!this.canvas) return null;
@@ -737,9 +623,7 @@ export class Hologram3DRenderer {
 
   /**
    * Fresh Raycaster instance for a single hit-test pass. Returns `null` when
-   * Three.js has not finished dynamic import yet. Shared by `hitTestMesh`
-   * and `hitTestMeshForSelection` so both paths allocate a raycaster the
-   * same way.
+   * Three.js has not finished dynamic import yet.
    */
   private getRaycaster(): InstanceType<typeof import('three/webgpu').Raycaster> | null {
     if (!THREE) return null;
@@ -748,8 +632,7 @@ export class Hologram3DRenderer {
 
   /**
    * Resolve the Object3D group the raycaster should traverse for a given
-   * slot, or `null` if the slot has not finished loading. Shared by
-   * `hitTestMesh` and `hitTestMeshForSelection`.
+   * slot, or `null` if the slot has not finished loading.
    */
   private sourceGroupFor(slot: InternalMeshSlot):
     | InstanceType<typeof import('three/webgpu').Object3D>
@@ -759,46 +642,10 @@ export class Hologram3DRenderer {
   }
 
   /**
-   * Hit-test the active mesh via 3D raycasting from a CSS coordinate.
-   *
-   * Returns `null` when there is no mesh to test (text mode, or mesh mode
-   * before `setModel()` resolved). In mesh mode returns `{ hit: true }` when
-   * the ray intersects any descendant of the mesh group and `{ hit: false }`
-   * when it misses — callers do not receive distance/child-id because the
-   * mesh is translated as a whole (unlike per-char hit testing which selects
-   * one of many targets).
-   *
-   * Tests only the legacy single-mesh slot. See `hitTestMeshForSelection`
-   * for the multi-mesh variant that iterates all slots and returns the
-   * nearest objectId.
-   */
-  hitTestMesh(x: number, y: number): { hit: boolean } | null {
-    if (this.mode !== 'mesh') return null;
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
-    if (!slot || !slot.loaded || !slot.state) return null;
-    if (!this.camera) return { hit: false };
-
-    const ndc = this.cssToNdc(x, y);
-    if (!ndc) return { hit: false };
-    const raycaster = this.getRaycaster();
-    if (!raycaster || !THREE) return { hit: false };
-    // sourceGroupFor is null only when !slot.loaded || !slot.state — both rejected above.
-    const group = this.sourceGroupFor(slot)!;
-
-    raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), this.camera);
-    const intersects = raycaster.intersectObjects([group], true);
-    return { hit: intersects.length > 0 };
-  }
-
-  /**
    * Pick the top-most mesh under a CSS-space point across ALL loaded slots.
    * Returns the `objectId` of the nearest intersected mesh or `null` when
    * the ray misses every slot. Used by `Glymo.selectObjectAtPoint` to route
    * clicks on a media-art mesh to the underlying GlymoObject.
-   *
-   * Unlike `hitTestMesh`, this variant does not gate on `this.mode` — the
-   * single-mesh `mode` flag is a legacy shim (Task 1.7 removes it) and
-   * multi-mesh consumers need per-object selection regardless of the flag.
    */
   hitTestMeshForSelection(cssX: number, cssY: number): string | null {
     if (!this.camera) return null;
@@ -823,33 +670,37 @@ export class Hologram3DRenderer {
   }
 
   /**
-   * Begin a single-hand pinch-grab on the active mesh. Returns `false` when
-   * there is no mesh loaded (text mode or pre-load mesh mode) — callers
-   * should not call `translateMeshTo` in that case. Turning the grab flag on
-   * fades the pivot indicator in for the duration of the drag, matching the
-   * visual affordance used by two-hand rotation.
+   * Begin a single-hand pinch-grab on the mesh registered under `objectId`.
+   * Returns `true` on success, or `false` when the slot doesn't exist / isn't
+   * loaded yet — callers should not call `translateMeshTo` in that case.
+   * Turning the grab flag on fades the pivot indicator in for the duration
+   * of the drag, matching the visual affordance used by two-hand rotation.
+   *
+   * The drag flag is intentionally a single renderer-wide boolean: only one
+   * mesh can be dragged at a time by a single hand, so per-slot drag state
+   * would be complication without benefit.
    */
-  grabMesh(): boolean {
-    if (this.mode !== 'mesh') return false;
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+  grabMesh(objectId: string): boolean {
+    const slot = this.meshes.get(objectId);
     if (!slot || !slot.loaded) return false;
     this.activeMeshDrag = true;
     return true;
   }
 
   /**
-   * Translate the mesh so its visual center tracks the supplied CSS point.
-   * Implemented as a charContainer translation — the mesh group is a child
-   * of charContainer (see setModel) and the renderMeshFrame pass keeps the
-   * mesh self-centered inside that container, so moving the container
-   * moves the mesh without disturbing the rotation pivot.
+   * Translate the mesh registered under `objectId` so its visual center
+   * tracks the supplied CSS point. Implemented as a charContainer
+   * translation — the mesh group is a child of charContainer and the
+   * renderMeshFrame pass keeps the mesh self-centered inside that container,
+   * so moving the container moves the mesh without disturbing the rotation
+   * pivot.
    *
-   * No-op when not in mesh mode or when the renderer has not finished
-   * initialising (camera/canvas/container all need to be live).
+   * No-op when the slot doesn't exist / isn't loaded, or when the renderer
+   * has not finished initialising (camera/canvas/container all need to be
+   * live).
    */
-  translateMeshTo(x: number, y: number): void {
-    if (this.mode !== 'mesh') return;
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+  translateMeshTo(objectId: string, x: number, y: number): void {
+    const slot = this.meshes.get(objectId);
     if (!slot || !slot.loaded) return;
     if (!this.camera || !this.canvas || !this.charContainer) return;
 
@@ -876,8 +727,13 @@ export class Hologram3DRenderer {
    * End the pinch-grab gesture. The final container position persists on
    * the Three.js group so the mesh stays where the user released it;
    * `resetTransform()` is the escape hatch that returns it to origin.
+   *
+   * `objectId` is accepted for symmetry with `grabMesh`/`translateMeshTo`
+   * but is advisory — drag state is renderer-wide (a single boolean), so
+   * passing an objectId does not change behaviour. Kept in the signature so
+   * consumers can wire `releaseMesh(activeId)` without special-casing.
    */
-  releaseMesh(): void {
+  releaseMesh(_objectId?: string): void {
     this.activeMeshDrag = false;
   }
 
@@ -892,7 +748,7 @@ export class Hologram3DRenderer {
   /**
    * Tear down a single mesh slot's GPU / scene-graph resources. Does NOT
    * remove the slot from `this.meshes` — the caller decides whether to
-   * delete the entry (e.g. addMesh replaces the entry in place, setModel
+   * delete the entry (e.g. addMesh replaces the entry in place, removeMesh
    * deletes it outright). Scene-level attach cleanup runs BEFORE the state's
    * own dispose so even a throwing dispose() can't strand HDR environment /
    * fog state on the scene.

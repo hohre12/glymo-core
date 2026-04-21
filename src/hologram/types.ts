@@ -56,19 +56,23 @@ export interface HologramGestureState {
 // ── Media Art Mesh Source ─────────────────────────────────────────────────────
 //
 // Added in v0.7.0 (P3 of docs/plans/media-art-mvp.md). The Hologram3DRenderer
-// switches between text mode (per-char TextGeometry, existing) and mesh mode
-// via setModel(). Both modes share the same Three.js scene, camera, bloom
-// postprocessing, and rotation/zoom/spread effects.
+// shows media-art meshes alongside per-character text: a single Three.js scene
+// with shared camera, bloom postprocessing, and rotation/zoom/spread effects,
+// with one or more meshes loaded via addMesh(objectId, …) (see Task 1.3+ of
+// docs/plans/media-art-multi-mesh.md). The presence of any entry in the
+// renderer's `meshes` map routes the frame loop through the mesh path.
 //
-// Per §5 D5: a single Three.js context, internal mode flag routes geometry
-// construction. The MeshSource interface keeps text/mesh paths cleanly
-// separated without forcing the renderer into a god-class shape.
+// The MeshSource interface keeps text/mesh paths cleanly separated without
+// forcing the renderer into a god-class shape.
 //
 // v0.8.0 (2026-04-20) made the descriptor union polymorphic so each catalog
 // category can ship its own production-grade mesh source (procedural planets,
 // PBR-with-HDRI scenes, plain GLB) without forcing every asset through one
 // loader. The factory createMeshSource(descriptor) dispatches on type; each
 // concrete source extends BaseMeshSource for shared cache/dispose plumbing.
+//
+// 0.16.0 (2026-04-22 / Task 1.7) dropped the single-mesh `setModel` shim —
+// multi-mesh is the canonical API.
 
 /**
  * Cache adapter for fetched binaries (GLB, HDR, image). Implementations may
@@ -201,7 +205,7 @@ export interface ProceduralPlanetMeshSourceDescriptor extends BaseMeshSourceDesc
 }
 
 /**
- * Union of all descriptors accepted by setModel(). The factory
+ * Union of all descriptors accepted by Hologram3DRenderer.addMesh. The factory
  * createMeshSource(descriptor) dispatches on `type`; adding a new variant
  * forces the switch to be updated (exhaustiveness check).
  */
@@ -211,9 +215,10 @@ export type MeshSourceDescriptor =
   | ProceduralPlanetMeshSourceDescriptor;
 
 /**
- * State of the loaded mesh-mode model. Produced by MeshSource.load() and
- * managed internally by Hologram3DRenderer. Disposing the renderer (or calling
- * setModel(null)) must call dispose() on this state to free GPU resources.
+ * State of a loaded media-art mesh. Produced by MeshSource.load() and
+ * managed internally by Hologram3DRenderer. Disposing the renderer (or
+ * calling removeMesh(objectId)) must call dispose() on this state to free
+ * GPU resources.
  */
 export interface MediaArtMeshState {
   /** Stable id from the descriptor — survives across reloads for cache hits. */

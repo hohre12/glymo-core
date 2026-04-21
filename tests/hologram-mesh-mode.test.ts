@@ -1,13 +1,12 @@
-// Tests for Hologram3DRenderer mesh mode (P3 / D5).
+// Tests for Hologram3DRenderer media-art mesh lifecycle (P3 / D5).
 //
-// We mock the three/webgpu + three/tsl + three/addons stack to keep the test
-// in pure node, exercising:
-//   - mode flag starts as 'text'
-//   - setModel switches mode and attaches the loaded scene to charContainer
-//   - setModel(null) returns to text mode and disposes the prior mesh
-//   - in-flight setModel races are decided by token (latest wins)
-//   - dispose() during in-flight load aborts cleanly (no throw, no late attach)
-//   - setModel after dispose throws (consumer programming error)
+// Canonical multi-mesh API (0.16.0+, Task 1.7 of docs/plans/media-art-multi-mesh.md):
+//   - addMesh(objectId, modelId, descriptor, ctx?) loads and attaches a mesh
+//     under a caller-assigned objectId; returns a stable MeshHandle.
+//   - removeMesh(objectId) disposes the slot and removes it from the map.
+//   - in-flight addMesh races are decided by token (latest wins) per-objectId.
+//   - dispose() during in-flight load aborts cleanly (no throw, no late attach).
+//   - addMesh after dispose is a no-op that resolves to null.
 //
 // Implementation note: vi.mock factories are HOISTED to the top of the file
 // before any other code runs, so any class/value referenced inside a factory
@@ -21,8 +20,6 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const stubs = vi.hoisted(() => {
   // Position/scale/rotation stubs track writes so hit-test / translate-mesh
   // tests can assert the renderer reached through to charContainer.position.
-  // Existing mesh-mode-basic tests do not read these values, so promoting
-  // from no-op to tracking is backward-compatible.
   const makeVec3Stub = () => {
     const v: { x: number; y: number; z: number; set: (x: number, y: number, z: number) => void; setScalar: (s: number) => void } = {
       x: 0, y: 0, z: 0,
@@ -321,87 +318,93 @@ function createMockCanvas(): HTMLCanvasElement {
   } as unknown as HTMLCanvasElement;
 }
 
-describe('Hologram3DRenderer mesh mode', () => {
+describe('Hologram3DRenderer media-art mesh lifecycle', () => {
   beforeEach(() => {
     stubFetch.mockClear();
   });
 
-  it('starts in text mode', () => {
+  it('starts with no meshes', () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    expect(r.getMode()).toBe('text');
-    expect(r.getMeshState()).toBeNull();
+    expect(r.hasAnyMesh()).toBe(false);
+    expect(r.getMesh('obj-1')).toBeNull();
     r.dispose();
   });
 
-  it('setModel(null) on a fresh renderer is a no-op', async () => {
+  it('removeMesh on a fresh renderer is a no-op', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    const result = await r.setModel(null);
-    expect(result).toBeNull();
-    expect(r.getMode()).toBe('text');
+    const removed = await r.removeMesh('obj-1');
+    expect(removed).toBe(false);
+    expect(r.hasAnyMesh()).toBe(false);
     r.dispose();
   });
 
-  it('setModel switches to mesh mode and attaches the loaded scene', async () => {
+  it('addMesh loads, attaches, and exposes a stable handle via getMesh', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    const state = await r.setModel({
+    const handle = await r.addMesh('obj-1', 'test-asset', {
       type: 'gltf',
       id: 'test-asset',
       url: 'https://cdn.test/asset.glb',
     });
-    expect(state).not.toBeNull();
-    expect(state?.id).toBe('test-asset');
-    expect(r.getMode()).toBe('mesh');
-    expect(r.getMeshState()).toBe(state);
+    expect(handle).not.toBeNull();
+    expect(handle?.objectId).toBe('obj-1');
+    expect(handle?.modelId).toBe('test-asset');
+    expect(handle?.state.id).toBe('test-asset');
+    expect(r.hasAnyMesh()).toBe(true);
+    // Stable reference — same object on subsequent gets.
+    expect(r.getMesh('obj-1')).toBe(handle);
     r.dispose();
   });
 
-  it('setModel(null) after a mesh load returns to text mode and disposes', async () => {
+  it('removeMesh after addMesh disposes the prior mesh and clears the slot', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    const state = await r.setModel({
+    const handle = await r.addMesh('obj-1', 'test-asset', {
       type: 'gltf',
       id: 'test-asset',
       url: 'https://cdn.test/asset.glb',
     });
-    const disposeSpy = vi.spyOn(state!, 'dispose');
-    const result = await r.setModel(null);
-    expect(result).toBeNull();
-    expect(r.getMode()).toBe('text');
-    expect(r.getMeshState()).toBeNull();
+    const disposeSpy = vi.spyOn(handle!.state, 'dispose');
+    const removed = await r.removeMesh('obj-1');
+    expect(removed).toBe(true);
+    expect(r.hasAnyMesh()).toBe(false);
+    expect(r.getMesh('obj-1')).toBeNull();
     expect(disposeSpy).toHaveBeenCalledTimes(1);
     r.dispose();
   });
 
-  it('setModel race: only the latest call wins, prior load is disposed', async () => {
+  it('addMesh race: only the latest call wins for the same objectId, prior load is disposed', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    const first = r.setModel({ type: 'gltf', id: 'first', url: 'https://cdn/a.glb' });
-    const second = r.setModel({ type: 'gltf', id: 'second', url: 'https://cdn/b.glb' });
+    const first = r.addMesh('obj-1', 'first', { type: 'gltf', id: 'first', url: 'https://cdn/a.glb' });
+    const second = r.addMesh('obj-1', 'second', { type: 'gltf', id: 'second', url: 'https://cdn/b.glb' });
     const [r1, r2] = await Promise.all([first, second]);
     expect(r1).toBeNull();
-    expect(r2?.id).toBe('second');
-    expect(r.getMeshState()?.id).toBe('second');
+    expect(r2?.state.id).toBe('second');
+    expect(r.getMesh('obj-1')?.state.id).toBe('second');
     r.dispose();
   });
 
   it('dispose during in-flight load swallows the load and disposes resources', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    const inflight = r.setModel({ type: 'gltf', id: 'doomed', url: 'https://cdn/x.glb' });
+    const inflight = r.addMesh('obj-1', 'doomed', { type: 'gltf', id: 'doomed', url: 'https://cdn/x.glb' });
     r.dispose();
     const result = await inflight;
     expect(result).toBeNull();
-    expect(r.getMeshState()).toBeNull();
+    expect(r.getMesh('obj-1')).toBeNull();
   });
 
-  it('setModel after dispose throws', async () => {
+  it('addMesh after dispose is a no-op and resolves to null', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     r.dispose();
-    await expect(
-      r.setModel({ type: 'gltf', id: 'late', url: 'https://cdn/late.glb' }),
-    ).rejects.toThrow(/disposed/);
+    const result = await r.addMesh('obj-1', 'late', {
+      type: 'gltf',
+      id: 'late',
+      url: 'https://cdn/late.glb',
+    });
+    expect(result).toBeNull();
   });
 
-  it('renderFrame in mesh mode does not throw', async () => {
+  it('renderFrame with a loaded mesh does not throw', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({
+    await r.addMesh('obj-1', 'rendered', {
       type: 'gltf',
       id: 'rendered',
       url: 'https://cdn.test/r.glb',
@@ -414,13 +417,15 @@ describe('Hologram3DRenderer mesh mode', () => {
 
 // ── Mesh single-hand pinch-grab API (#26) ────────────────────────────────────
 //
-// Pins the contract exposed by Hologram3DRenderer for media-art mesh mode:
+// Pins the contract exposed by Hologram3DRenderer for media-art single-hand
+// pinch manipulation (0.16.0+ per-object signatures):
 //
-//   - hitTestMesh returns null in text mode, {hit:false|true} in mesh mode.
-//   - grabMesh is a mode gate (false in text, true once setModel resolves).
-//   - translateMeshTo writes charContainer.position using the same
-//     CSS→world projection the text-mode active-drag path uses, so rotation
-//     around the mesh's own center is preserved after translation.
+//   - hitTestMeshForSelection returns the objectId when the ray hits a mesh
+//     descendant and null otherwise.
+//   - grabMesh(objectId) gates on slot existence + loaded state.
+//   - translateMeshTo(objectId, x, y) writes charContainer.position using the
+//     same CSS→world projection the text-mode active-drag path uses, so
+//     rotation around the mesh's own center is preserved after translation.
 //   - releaseMesh clears the drag flag but leaves the final position on the
 //     Three.js group — the mesh stays where the user released it.
 //   - resetTransform is the escape hatch that returns position to origin.
@@ -432,51 +437,51 @@ describe('Hologram3DRenderer mesh mode', () => {
 // matters; the default empty-intersection stub serves the common case.
 
 describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
-  it('hitTestMesh returns null in text mode (no mesh loaded)', async () => {
+  it('hitTestMeshForSelection returns null with no mesh loaded', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
-    expect(r.hitTestMesh(400, 300)).toBeNull();
+    expect(r.hitTestMeshForSelection(400, 300)).toBeNull();
     r.dispose();
   });
 
-  it('hitTestMesh returns {hit:false} when the raycast misses in mesh mode', async () => {
+  it('hitTestMeshForSelection returns null when the raycast misses a loaded mesh', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'miss', url: 'https://cdn/m.glb' });
+    await r.addMesh('obj-1', 'miss', { type: 'gltf', id: 'miss', url: 'https://cdn/m.glb' });
     // Default StubRaycaster.intersectObjects returns [] → miss.
-    expect(r.hitTestMesh(400, 300)).toEqual({ hit: false });
+    expect(r.hitTestMeshForSelection(400, 300)).toBeNull();
     r.dispose();
   });
 
-  it('hitTestMesh returns {hit:true} when the raycast intersects the mesh group', async () => {
+  it('hitTestMeshForSelection returns the objectId when the raycast intersects', async () => {
     const orig = stubs.StubRaycaster.prototype.intersectObjects;
     stubs.StubRaycaster.prototype.intersectObjects = function () {
       return [{ object: {}, distance: 1 }];
     };
     try {
       const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-      await r.setModel({ type: 'gltf', id: 'hit', url: 'https://cdn/m.glb' });
-      expect(r.hitTestMesh(400, 300)).toEqual({ hit: true });
+      await r.addMesh('obj-1', 'hit', { type: 'gltf', id: 'hit', url: 'https://cdn/m.glb' });
+      expect(r.hitTestMeshForSelection(400, 300)).toBe('obj-1');
       r.dispose();
     } finally {
       stubs.StubRaycaster.prototype.intersectObjects = orig;
     }
   });
 
-  it('grabMesh returns false in text mode and true once mesh is loaded', async () => {
+  it('grabMesh returns false when the slot is absent and true once loaded', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
-    expect(r.grabMesh()).toBe(false);
-    await r.setModel({ type: 'gltf', id: 'grab', url: 'https://cdn/m.glb' });
-    expect(r.grabMesh()).toBe(true);
+    expect(r.grabMesh('obj-1')).toBe(false);
+    await r.addMesh('obj-1', 'grab', { type: 'gltf', id: 'grab', url: 'https://cdn/m.glb' });
+    expect(r.grabMesh('obj-1')).toBe(true);
     r.dispose();
   });
 
-  it('translateMeshTo moves charContainer.position in mesh mode', async () => {
+  it('translateMeshTo moves charContainer.position for a loaded mesh', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'translate', url: 'https://cdn/m.glb' });
-    r.grabMesh();
+    await r.addMesh('obj-1', 'translate', { type: 'gltf', id: 'translate', url: 'https://cdn/m.glb' });
+    r.grabMesh('obj-1');
     // Upper-right of the 800×600 mock canvas — positive NDC X, positive NDC Y.
-    r.translateMeshTo(700, 100);
+    r.translateMeshTo('obj-1', 700, 100);
     const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
     expect(container.position.x).toBeGreaterThan(0);
     expect(container.position.y).toBeGreaterThan(0);
@@ -484,12 +489,12 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
     r.dispose();
   });
 
-  it('translateMeshTo is a no-op in text mode', async () => {
+  it('translateMeshTo is a no-op when the slot is absent', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
     const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } | null }).charContainer;
     const before = { x: container?.position.x ?? 0, y: container?.position.y ?? 0 };
-    r.translateMeshTo(500, 200);
+    r.translateMeshTo('obj-1', 500, 200);
     expect(container?.position.x).toBe(before.x);
     expect(container?.position.y).toBe(before.y);
     r.dispose();
@@ -497,13 +502,13 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
 
   it('grab → translate → release keeps the final position on the group', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'seq', url: 'https://cdn/m.glb' });
-    expect(r.grabMesh()).toBe(true);
-    r.translateMeshTo(600, 200);
+    await r.addMesh('obj-1', 'seq', { type: 'gltf', id: 'seq', url: 'https://cdn/m.glb' });
+    expect(r.grabMesh('obj-1')).toBe(true);
+    r.translateMeshTo('obj-1', 600, 200);
     const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
     const committed = { x: container.position.x, y: container.position.y };
     expect(committed.x).not.toBe(0);
-    r.releaseMesh();
+    r.releaseMesh('obj-1');
     // Position is persisted by the Three.js Group — release only clears the
     // internal drag flag, it does not rewind translation.
     expect(container.position.x).toBe(committed.x);
@@ -513,9 +518,9 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
 
   it('resetTransform clears mesh drag state and returns container to origin', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'reset', url: 'https://cdn/m.glb' });
-    r.grabMesh();
-    r.translateMeshTo(700, 100);
+    await r.addMesh('obj-1', 'reset', { type: 'gltf', id: 'reset', url: 'https://cdn/m.glb' });
+    r.grabMesh('obj-1');
+    r.translateMeshTo('obj-1', 700, 100);
     r.resetTransform();
     const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
     expect(container.position.x).toBe(0);
@@ -526,90 +531,91 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
 
   it('renderFrame after grab + translate still does not throw (rotation pipeline intact)', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'no-regress', url: 'https://cdn/m.glb' });
+    await r.addMesh('obj-1', 'no-regress', { type: 'gltf', id: 'no-regress', url: 'https://cdn/m.glb' });
     r.setTransition(1);
-    r.grabMesh();
-    r.translateMeshTo(500, 300);
+    r.grabMesh('obj-1');
+    r.translateMeshTo('obj-1', 500, 300);
     r.setRotation(0.3, -0.2, 0.1);
     r.setZoom(1.5);
     expect(() => r.renderFrame()).not.toThrow();
-    r.releaseMesh();
+    r.releaseMesh('obj-1');
     expect(() => r.renderFrame()).not.toThrow();
     r.dispose();
   });
 });
 
-// ── Mesh-animation pause API (0.15.0) ───────────────────────────────────────
+// ── Mesh-animation pause API (0.16.0 per-object) ─────────────────────────────
 //
 // Pins the contract added for the 2026-04-21 Studio ADR that removed
-// drawing-mode auto-animation and froze media-art by default:
+// drawing-mode auto-animation and froze media-art by default; reparameterised
+// in 0.16.0 (Task 1.7) so every slot has its own pause state:
 //
-//   - setModel() leaves a freshly loaded mesh paused (isMeshAnimationPaused()
+//   - addMesh() leaves a freshly loaded mesh paused (isMeshAnimationPaused()
 //     returns true) — no auto-play, matching the drawing-mode policy.
-//   - toggleMeshAnimation() flips the flag and returns the new paused state;
-//     a pair of toggles returns to the initial paused state (idempotent).
-//   - In text mode (no mesh loaded) both getters return true and toggling is
-//     a no-op — defensive against hosts that call the API pre-setModel.
+//   - toggleMeshAnimation(objectId) flips the flag and returns the new paused
+//     state; a pair of toggles returns to the initial paused state.
+//   - With no loaded slot both getters are defensive: isMeshAnimationPaused
+//     returns true, toggleMeshAnimation returns null.
 //   - renderFrame while paused does not throw (clock drains are safe even
 //     when no animation is active).
 
 describe('Hologram3DRenderer mesh-animation pause', () => {
-  it('isMeshAnimationPaused returns true in text mode (no mesh loaded)', async () => {
+  it('isMeshAnimationPaused returns true when no mesh is loaded', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     r.dispose();
   });
 
   it('freshly loaded mesh is paused (no auto-play)', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'fresh', url: 'https://cdn/m.glb' });
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    await r.addMesh('obj-1', 'fresh', { type: 'gltf', id: 'fresh', url: 'https://cdn/m.glb' });
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     r.dispose();
   });
 
   it('toggleMeshAnimation flips paused → playing → paused', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'toggle', url: 'https://cdn/m.glb' });
+    await r.addMesh('obj-1', 'toggle', { type: 'gltf', id: 'toggle', url: 'https://cdn/m.glb' });
     // Starts paused.
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     // First toggle → playing (returns false).
-    expect(r.toggleMeshAnimation()).toBe(false);
-    expect(r.isMeshAnimationPaused()).toBe(false);
+    expect(r.toggleMeshAnimation('obj-1')).toBe(false);
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(false);
     // Second toggle → paused again (returns true).
-    expect(r.toggleMeshAnimation()).toBe(true);
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    expect(r.toggleMeshAnimation('obj-1')).toBe(true);
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     r.dispose();
   });
 
-  it('toggleMeshAnimation is a no-op in text mode (returns true, state unchanged)', async () => {
+  it('toggleMeshAnimation returns null when the slot is absent', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
-    expect(r.toggleMeshAnimation()).toBe(true);
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    expect(r.toggleMeshAnimation('obj-1')).toBeNull();
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     r.dispose();
   });
 
-  it('setModel re-pauses even when called while currently playing', async () => {
+  it('re-adding the same objectId re-pauses even when the prior slot was playing', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'first', url: 'https://cdn/m1.glb' });
-    r.toggleMeshAnimation(); // → playing
-    expect(r.isMeshAnimationPaused()).toBe(false);
-    // Loading a second model must return to the frozen default so the user
-    // has to opt-in to animation on every new media-art selection.
-    await r.setModel({ type: 'gltf', id: 'second', url: 'https://cdn/m2.glb' });
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    await r.addMesh('obj-1', 'first', { type: 'gltf', id: 'first', url: 'https://cdn/m1.glb' });
+    r.toggleMeshAnimation('obj-1'); // → playing
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(false);
+    // Replacing the mesh under the same objectId must return to the frozen
+    // default so the user has to opt-in to animation on every new selection.
+    await r.addMesh('obj-1', 'second', { type: 'gltf', id: 'second', url: 'https://cdn/m2.glb' });
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     r.dispose();
   });
 
   it('renderFrame does not throw while paused', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
-    await r.setModel({ type: 'gltf', id: 'render-paused', url: 'https://cdn/m.glb' });
+    await r.addMesh('obj-1', 'render-paused', { type: 'gltf', id: 'render-paused', url: 'https://cdn/m.glb' });
     r.setTransition(1);
-    expect(r.isMeshAnimationPaused()).toBe(true);
+    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
     expect(() => r.renderFrame()).not.toThrow();
     // After resume renderFrame must also remain safe.
-    r.toggleMeshAnimation();
+    r.toggleMeshAnimation('obj-1');
     expect(() => r.renderFrame()).not.toThrow();
     r.dispose();
   });
