@@ -824,11 +824,36 @@ export class Glymo {
     this.meshHitTestFn = fn;
   }
 
-  /** Hit-test a point and toggle selection on the object at that position */
+  /**
+   * Hit-test a point and select the object at that position. Mesh-first
+   * dispatch: if a host registered `setMeshHitTestFn`, a click on a
+   * rendered mesh routes to that object before the stroke hit-test runs.
+   * When no mesh is hit (or no mesh tester is registered) the stroke
+   * fallback restores the previous drawing-mode selection behaviour.
+   *
+   * Single-select: selecting a new object clears the previous selection.
+   * The old toggle semantics (click twice = deselect) are retired as of
+   * 0.16.0 because media-art workflows always target exactly one object.
+   */
   selectObjectAtPoint(x: number, y: number): GlymoObject | undefined {
     this.assertNotDestroyed();
-    // Task 2.2 will replace this with mesh-first hit-testing via meshHitTestFn.
-    void this.meshHitTestFn;
+
+    // 1) Mesh-first (media-art): route clicks on a rendered mesh to the
+    //    underlying GlymoObject so media-art overrides strokes visually AND
+    //    in selection. A stale/unknown id from the host falls through.
+    if (this.meshHitTestFn) {
+      const meshObjectId = this.meshHitTestFn(x, y);
+      if (meshObjectId) {
+        const obj = this.objectStore.getObject(meshObjectId);
+        if (obj) {
+          this.selectionManager.clearSelection();
+          this.selectionManager.select(obj.id);
+          return obj;
+        }
+      }
+    }
+
+    // 2) Stroke fallback (drawing-mode default).
     const strokeId = this.hitTestStroke(x, y);
     if (!strokeId) {
       this.selectionManager.clearSelection();
@@ -839,7 +864,8 @@ export class Glymo {
       this.selectionManager.clearSelection();
       return undefined;
     }
-    this.selectionManager.toggle(obj.id);
+    this.selectionManager.clearSelection();
+    this.selectionManager.select(obj.id);
     return obj;
   }
 
