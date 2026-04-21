@@ -216,9 +216,10 @@ export class Hologram3DRenderer {
   /**
    * Canonical objectId for the legacy single-mesh path. The `setModel` shim
    * funnels every load through this slot so all the legacy readers
-   * (hitTestMesh / grabMesh / toggleMeshAnimation / renderMeshFrame / …)
-   * can resolve a single slot. Task 1.7 deletes the shim together with this
-   * constant.
+   * (hitTestMesh / grabMesh / toggleMeshAnimation / …) can resolve a single
+   * slot. `renderMeshFrame` iterates every entry in `this.meshes`, so it
+   * does not depend on this constant. Task 1.7 deletes the shim together
+   * with this constant.
    */
   private readonly LEGACY_SINGLE_ID = '__legacy_single__';
 
@@ -420,15 +421,15 @@ export class Hologram3DRenderer {
         this.meshes.delete(this.LEGACY_SINGLE_ID);
       }
       this.mode = 'text';
-      // Clocks were renderer-wide under the legacy single-mesh path; with no
-      // mesh present they release here so the next setModel's addMesh call
-      // re-initialises them cleanly.
-      // Task 1.5 TODO: when the frame loop starts iterating every mesh slot
-      // (not just LEGACY_SINGLE_ID), gate this null-out on
-      // `this.meshes.size === 0` so concurrent meshes added via addMesh()
-      // against non-legacy objectIds keep their animation clocks.
-      this.mixerClock = null;
-      this.meshFrameClock = null;
+      // Clocks are renderer-wide — one tick drives every slot in lock-step —
+      // so only release them when the map is actually empty. If a caller has
+      // already added a non-legacy mesh via addMesh() before calling
+      // setModel(null) to clear the legacy slot, the surviving mesh keeps
+      // its animation clocks and continues to tick through renderMeshFrame.
+      if (this.meshes.size === 0) {
+        this.mixerClock = null;
+        this.meshFrameClock = null;
+      }
       return null;
     }
 
@@ -949,12 +950,16 @@ export class Hologram3DRenderer {
     const elapsed = (now - this.startTime) * 0.001;
     const transition = this.transition;
 
-    // ── Mesh mode (v0.7.0) — render single GLB ────────────────────────────
-    // Branches BEFORE the per-char loop so text-mode resources are not
-    // touched while mesh mode is active. Container rotation / zoom / pivot
-    // indicator at the end of this method run for both modes.
-    if (this.mode === 'mesh') {
-      this.renderMeshFrame(elapsed, transition);
+    // ── Mesh path — iterate every slot in `this.meshes` ───────────────────
+    // Presence of any mesh slot takes over the frame: text-mode char
+    // resources are not touched while meshes are in play. Coexistence with
+    // the text-mode char lift below is a three.js-level concern (e.g. a
+    // recognition-pending drawing plus a mediaArt-applied object share the
+    // same scene graph); for now the mesh path is exclusive and the char
+    // loop only runs when no slot is loaded. Container rotation / zoom /
+    // pivot indicator at the end of this branch runs for both paths.
+    if (this.meshes.size > 0) {
+      this.renderMeshFrame(elapsed);
       this.applyContainerRotationAndZoom(elapsed, transition);
       this.postProcessing!.render();
       return;
@@ -1094,65 +1099,104 @@ export class Hologram3DRenderer {
   }
 
   /**
-   * Mesh-mode per-frame update — drives the legacy single-mesh slot. Task 1.5
-   * rewrites this to iterate every slot in `this.meshes`; for Task 1.3 the
-   * behaviour is still "one mesh at a time" via `LEGACY_SINGLE_ID`.
+   * Mesh-mode per-frame update — iterates every loaded slot in `this.meshes`.
+   *
+   * Clocks are renderer-wide (see the init comment at `addMesh` commit): one
+   * `getDelta()` tick per clock per frame drives every slot in lock-step.
+   * `Clock.getDelta()` is destructive, so calling it inside the per-slot loop
+   * would starve every slot after the first of its animation delta — the
+   * canonical pattern is to compute `mixerDt` / `frameDt` ONCE at the top and
+   * pass them to every unpaused consumer below.
+   *
+   * Paused-drain semantics generalise from the single-mesh predecessor: if
+   * EVERY loaded slot is paused we still drain the clocks so a subsequent
+   * resume does not fast-forward by the entire paused interval. If ANY slot
+   * is unpaused we take the single delta here and apply it only to unpaused
+   * slots — paused slots skip mixer/update but the clocks have already been
+   * consumed by the unpaused branch, so no additional drain is needed.
+   *
+   * `uTransition` stays at 1 (fully visible) for Phase 1 — transition easing
+   * is now the @glymo/ui `runMediaArtTransition` concern, driven at the host
+   * level rather than from the renderer.
    */
-  private renderMeshFrame(elapsed: number, transition: number): void {
-    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
-    if (!slot || !slot.loaded || !slot.state || !THREE) return;
-    const group = slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>;
+  private renderMeshFrame(elapsed: number): void {
+    if (!THREE) return;
 
-    // Drive the media-art shader uniforms.
-    if (slot.uTime) slot.uTime.value = elapsed;
-    if (slot.uTransition) slot.uTransition.value = transition;
+    // Collect only committed slots — pending (still-loading) slots are not
+    // yet renderable and `slot.state` / uniforms may be null on them.
+    const loadedSlots: InternalMeshSlot[] = [];
+    for (const slot of this.meshes.values()) {
+      if (slot.loaded && slot.state) loadedSlots.push(slot);
+    }
+    if (loadedSlots.length === 0) return;
 
-    // Animation gate: when paused (the default post-setModel), drain the
-    // clocks' pending deltas so resume does not fast-forward by the entire
-    // paused duration, but skip the mixer + update hook calls so the mesh
-    // renders frozen. `uTime` still advances above because the shader may
-    // rely on elapsed time for static effects like fresnel and the entry
-    // `uTransition` has its own driver.
-    if (slot.animationPaused) {
+    // One drain decision for the whole frame: if every loaded slot is paused
+    // we discard the clocks' pending deltas and skip mixer/update calls
+    // entirely. Otherwise we take the deltas here and fan them out to every
+    // unpaused slot below. The clocks are created lazily at commit time so
+    // either `getDelta()` call may no-op when this renderer has not yet
+    // needed a mixer/update tick.
+    const allPaused = loadedSlots.every((s) => s.animationPaused);
+    let mixerDt = 0;
+    let frameDt = 0;
+    if (allPaused) {
       this.mixerClock?.getDelta();
       this.meshFrameClock?.getDelta();
     } else {
-      // Tick the animation mixer if this GLB shipped clips.
-      if (slot.state.mixer && this.mixerClock) {
-        const dt = this.mixerClock.getDelta();
-        (slot.state.mixer as { update: (dt: number) => void }).update(dt);
-      }
-
-      // Source-driven update hook (e.g. procedural planet axial spin). Runs
-      // AFTER mixer + uniform writes so the source can read coherent state.
-      if (slot.update && this.meshFrameClock) {
-        const dt = this.meshFrameClock.getDelta();
-        try {
-          slot.update(elapsed, dt);
-        } catch (err) {
-          console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
-        }
-      }
+      if (this.mixerClock) mixerDt = this.mixerClock.getDelta();
+      if (this.meshFrameClock) frameDt = this.meshFrameClock.getDelta();
     }
 
-    // Normalize scale so the largest bbox dimension maps to ~2 world units.
-    // Then `transition` fades the scale from 0 → 1 for entry. The picker /
-    // orchestrator (P4 MediaArtTransition) drives the eased transition curve.
-    const bb = slot.state.bbox;
-    const maxDim = Math.max(
-      bb.max.x - bb.min.x,
-      bb.max.y - bb.min.y,
-      bb.max.z - bb.min.z,
-    );
-    const normalize = maxDim > 0 ? 2.0 / maxDim : 1.0;
-    const baseScale = normalize * transition;
-    group.scale.set(baseScale, baseScale, baseScale);
+    for (const slot of loadedSlots) {
+      const state = slot.state!;
+      const group = state.group as InstanceType<typeof import('three/webgpu').Object3D>;
 
-    // Center the mesh on its bbox so rotation pivots through the visual middle.
-    const cx = (bb.max.x + bb.min.x) * 0.5;
-    const cy = (bb.max.y + bb.min.y) * 0.5;
-    const cz = (bb.max.z + bb.min.z) * 0.5;
-    group.position.set(-cx * baseScale, -cy * baseScale, -cz * baseScale);
+      // Drive the media-art shader uniforms. uTime advances even for paused
+      // slots because the shader can read elapsed time for static effects
+      // like fresnel/scanline. uTransition is pinned to 1 — host-side
+      // entry/exit easing runs through @glymo/ui's runMediaArtTransition.
+      if (slot.uTime) slot.uTime.value = elapsed;
+      if (slot.uTransition) slot.uTransition.value = 1;
+
+      if (!slot.animationPaused) {
+        // Tick the animation mixer if this GLB shipped clips.
+        if (state.mixer && this.mixerClock) {
+          (state.mixer as { update: (dt: number) => void }).update(mixerDt);
+        }
+
+        // Source-driven update hook (e.g. procedural planet axial spin).
+        // Runs AFTER mixer + uniform writes so the source can read coherent
+        // state. Errors are isolated so one slot's faulty hook cannot kill
+        // the whole frame loop.
+        if (slot.update && this.meshFrameClock) {
+          try {
+            slot.update(elapsed, frameDt);
+          } catch (err) {
+            console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
+          }
+        }
+      }
+
+      // Per-slot bbox normalise + center. Each mesh owns its own bbox so
+      // this runs inside the loop even though the clocks are shared. Scale
+      // follows `this.transition` (the renderer-wide entry/exit driver set
+      // via setTransition) until task 3.x migrates entry/exit to the
+      // per-object media-art transition API.
+      const bb = state.bbox;
+      const maxDim = Math.max(
+        bb.max.x - bb.min.x,
+        bb.max.y - bb.min.y,
+        bb.max.z - bb.min.z,
+      );
+      const normalize = maxDim > 0 ? 2.0 / maxDim : 1.0;
+      const baseScale = normalize * this.transition;
+      group.scale.set(baseScale, baseScale, baseScale);
+
+      const cx = (bb.max.x + bb.min.x) * 0.5;
+      const cy = (bb.max.y + bb.min.y) * 0.5;
+      const cz = (bb.max.z + bb.min.z) * 0.5;
+      group.position.set(-cx * baseScale, -cy * baseScale, -cz * baseScale);
+    }
   }
 
   /** Shared camera + container rotation + pivot indicator (text and mesh modes). */
