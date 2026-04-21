@@ -146,10 +146,16 @@ export class CascadingRecognizer {
         const lastMs = this.grouper.getActiveGroupLastStrokeMs();
         const gap = performance.now() - lastMs;
         const params = LANG_PARAMS[this.language] ?? DEFAULT_PARAMS;
-        // Recognized group: finalize at reduced delay.
-        // Korean needs more time for 받침 (final consonant): 70% of delay.
-        // English: 50% of delay.
-        const earlyFactor = this.language === 'ko' ? 0.7 : 0.5;
+        // Recognized group: finalize at reduced delay (70% of finalizeDelay).
+        // Air-writing hand movement naturally takes 800-1200ms between strokes
+        // regardless of script, so a language-split factor (previously 0.5 for
+        // English, 0.7 for Korean) caused every English stroke to finalize
+        // individually — the 600ms threshold fell below the natural hand-move
+        // pause for multi-stroke letters (A/H/T/K/X/Y). Unified to 0.7 so
+        // multi-stroke letters group correctly; the language-specific
+        // stableCount / minStrokes thresholds below still preserve the
+        // syllable-vs-letter complexity difference.
+        const earlyFactor = 0.7;
         if (gap >= params.finalizeDelay * earlyFactor) {
           this.grouper.finalizeGroupById(activeId);
           return;

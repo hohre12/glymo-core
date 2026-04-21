@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.1] - 2026-04-21
+
+### Fixed — English text-mode spatial grouping regression
+
+The recognition-aware early-finalize in `CascadingRecognizer.notifyStrokeStart`
+used a per-language factor (`0.5` for English, `0.7` for Korean) on top of
+`LANG_PARAMS.finalizeDelay`, giving English a 600 ms inter-stroke cutoff.
+Air-writing hand movement naturally takes 800-1200 ms between strokes
+regardless of script, so every English stroke was finalizing individually —
+multi-stroke letters (A / H / T / K / X / Y) never grouped.
+
+- **`src/text/CascadingRecognizer.ts`** — unified `earlyFactor` to `0.7`
+  for all languages, raising the English threshold from 600 ms to 840 ms.
+  The language-specific `stableCount` / `minStrokes` split is preserved so
+  the Korean syllable-vs-English letter complexity difference still drives
+  different confidence-based early-commit behaviour.
+
 ## [0.15.0] - 2026-04-21
 
 ### Added — Media-art mesh animation pause API
