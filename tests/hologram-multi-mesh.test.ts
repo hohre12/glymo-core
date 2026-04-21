@@ -376,8 +376,8 @@ describe('Hologram3DRenderer multi-mesh', () => {
       expect(hitId).toBe('obj-1');
     } finally {
       stubs.StubRaycaster.prototype.intersectObjects = orig;
+      renderer.dispose();
     }
-    renderer.dispose();
   });
 
   it('hitTestMeshForSelection returns null when no mesh is hit', async () => {

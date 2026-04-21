@@ -782,8 +782,8 @@ export class Hologram3DRenderer {
     if (!ndc) return { hit: false };
     const raycaster = this.getRaycaster();
     if (!raycaster || !THREE) return { hit: false };
-    const group = this.sourceGroupFor(slot);
-    if (!group) return { hit: false };
+    // sourceGroupFor is null only when !slot.loaded || !slot.state — both rejected above.
+    const group = this.sourceGroupFor(slot)!;
 
     raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), this.camera);
     const intersects = raycaster.intersectObjects([group], true);
