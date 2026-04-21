@@ -328,3 +328,17 @@ export interface MeshSource {
     ctx?: MeshSourceLoadContext,
   ): Promise<MediaArtMeshState>;
 }
+
+/**
+ * Per-object mesh handle returned by Hologram3DRenderer.addMesh.
+ * Opaque to callers — they only need the `objectId` to key subsequent
+ * operations (removeMesh, getMesh). The internal fields exist so the
+ * renderer can dispose / raycast / update each mesh without re-looking-up.
+ */
+export interface MeshHandle {
+  readonly objectId: string;
+  readonly modelId: string;
+  readonly descriptor: MeshSourceDescriptor;
+  /** Opaque per-mesh render state. Do not access from consumers. */
+  readonly state: MediaArtMeshState;
+}
