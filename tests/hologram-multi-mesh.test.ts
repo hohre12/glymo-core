@@ -354,4 +354,38 @@ describe('Hologram3DRenderer multi-mesh', () => {
     expect(renderer.getAllMeshIds()).toEqual(['obj-2']);
     renderer.dispose();
   });
+
+  // ── hitTestMeshForSelection (Task 1.6) ─────────────────────────────────────
+  //
+  // Raycast outcome is driven by the stubbed StubRaycaster. The default
+  // `intersectObjects` returns `[]` (miss) — we swap its prototype in the
+  // "hit" test to force a hit, mirroring the idiom already used by
+  // hologram-mesh-mode.test.ts for the legacy `hitTestMesh` path. The
+  // actual CSS coords passed in do not matter because the stub does not
+  // interpret them.
+
+  it('hitTestMeshForSelection returns objectId when a mesh is hit', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    const orig = stubs.StubRaycaster.prototype.intersectObjects;
+    stubs.StubRaycaster.prototype.intersectObjects = function () {
+      return [{ object: {}, distance: 1 }];
+    };
+    try {
+      // Arbitrary CSS coord (canvas center) — raycast outcome is stubbed.
+      const hitId = renderer.hitTestMeshForSelection(400, 300);
+      expect(hitId).toBe('obj-1');
+    } finally {
+      stubs.StubRaycaster.prototype.intersectObjects = orig;
+    }
+    renderer.dispose();
+  });
+
+  it('hitTestMeshForSelection returns null when no mesh is hit', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    // Raycast stubbed to miss (default [] return) — stands in for the
+    // no-intersection case.
+    const hitId = renderer.hitTestMeshForSelection(0, 0);
+    expect(hitId).toBeNull();
+    renderer.dispose();
+  });
 });

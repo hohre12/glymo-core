@@ -722,6 +722,43 @@ export class Hologram3DRenderer {
   }
 
   /**
+   * Convert a CSS-space point to NDC coordinates in [-1, 1] using the current
+   * canvas dimensions. Returns `null` when the canvas has zero extent (e.g.
+   * not attached to the DOM yet). Shared by `hitTestMesh` and
+   * `hitTestMeshForSelection` so both hit-test paths use identical math.
+   */
+  private cssToNdc(cssX: number, cssY: number): { x: number; y: number } | null {
+    if (!this.canvas) return null;
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    if (w <= 0 || h <= 0) return null;
+    return { x: (cssX / w) * 2 - 1, y: -(cssY / h) * 2 + 1 };
+  }
+
+  /**
+   * Fresh Raycaster instance for a single hit-test pass. Returns `null` when
+   * Three.js has not finished dynamic import yet. Shared by `hitTestMesh`
+   * and `hitTestMeshForSelection` so both paths allocate a raycaster the
+   * same way.
+   */
+  private getRaycaster(): InstanceType<typeof import('three/webgpu').Raycaster> | null {
+    if (!THREE) return null;
+    return new THREE.Raycaster();
+  }
+
+  /**
+   * Resolve the Object3D group the raycaster should traverse for a given
+   * slot, or `null` if the slot has not finished loading. Shared by
+   * `hitTestMesh` and `hitTestMeshForSelection`.
+   */
+  private sourceGroupFor(slot: InternalMeshSlot):
+    | InstanceType<typeof import('three/webgpu').Object3D>
+    | null {
+    if (!slot.loaded || !slot.state) return null;
+    return slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>;
+  }
+
+  /**
    * Hit-test the active mesh via 3D raycasting from a CSS coordinate.
    *
    * Returns `null` when there is no mesh to test (text mode, or mesh mode
@@ -731,27 +768,58 @@ export class Hologram3DRenderer {
    * mesh is translated as a whole (unlike per-char hit testing which selects
    * one of many targets).
    *
-   * Tests only the legacy single-mesh slot. Task 1.6 adds the multi-mesh
-   * selection variant `hitTestMeshForSelection`.
+   * Tests only the legacy single-mesh slot. See `hitTestMeshForSelection`
+   * for the multi-mesh variant that iterates all slots and returns the
+   * nearest objectId.
    */
   hitTestMesh(x: number, y: number): { hit: boolean } | null {
     if (this.mode !== 'mesh') return null;
     const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
     if (!slot || !slot.loaded || !slot.state) return null;
-    if (!THREE || !this.camera || !this.canvas) return { hit: false };
+    if (!this.camera) return { hit: false };
 
-    const w = this.canvas.clientWidth;
-    const h = this.canvas.clientHeight;
-    if (w <= 0 || h <= 0) return { hit: false };
+    const ndc = this.cssToNdc(x, y);
+    if (!ndc) return { hit: false };
+    const raycaster = this.getRaycaster();
+    if (!raycaster || !THREE) return { hit: false };
+    const group = this.sourceGroupFor(slot);
+    if (!group) return { hit: false };
 
-    const ndcX = (x / w) * 2 - 1;
-    const ndcY = -(y / h) * 2 + 1;
-
-    const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
-    const group = slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>;
+    raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), this.camera);
     const intersects = raycaster.intersectObjects([group], true);
     return { hit: intersects.length > 0 };
+  }
+
+  /**
+   * Pick the top-most mesh under a CSS-space point across ALL loaded slots.
+   * Returns the `objectId` of the nearest intersected mesh or `null` when
+   * the ray misses every slot. Used by `Glymo.selectObjectAtPoint` to route
+   * clicks on a media-art mesh to the underlying GlymoObject.
+   *
+   * Unlike `hitTestMesh`, this variant does not gate on `this.mode` — the
+   * single-mesh `mode` flag is a legacy shim (Task 1.7 removes it) and
+   * multi-mesh consumers need per-object selection regardless of the flag.
+   */
+  hitTestMeshForSelection(cssX: number, cssY: number): string | null {
+    if (!this.camera) return null;
+    const ndc = this.cssToNdc(cssX, cssY);
+    if (!ndc) return null;
+    const raycaster = this.getRaycaster();
+    if (!raycaster || !THREE) return null;
+    raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), this.camera);
+
+    let nearest: { objectId: string; distance: number } | null = null;
+    for (const slot of this.meshes.values()) {
+      const group = this.sourceGroupFor(slot);
+      if (!group) continue;
+      const intersects = raycaster.intersectObjects([group], true);
+      if (intersects.length === 0) continue;
+      const distance = (intersects[0] as { distance: number } | undefined)?.distance ?? Infinity;
+      if (!nearest || distance < nearest.distance) {
+        nearest = { objectId: slot.objectId, distance };
+      }
+    }
+    return nearest?.objectId ?? null;
   }
 
   /**
