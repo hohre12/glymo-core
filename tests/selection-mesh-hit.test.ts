@@ -111,14 +111,22 @@ describe('Glymo.selectObjectAtPoint with mesh hit-tester', () => {
     expect(result?.id).toBe(obj.id);
   });
 
-  it('selects the mesh-hit object even if the mesh id does not exist in the object store', () => {
+  it('warns and falls through when meshHitTestFn returns a stale objectId', () => {
     // Defensive: if the host passes a stale objectId (already deleted), the
     // method must NOT throw AND must NOT select anything. It should fall
     // through to the stroke path — which has no strokes here, so undefined.
+    // A console.warn must fire so the host-side bug surfaces diagnostically,
+    // consistent with selectObject's warn-on-unknown-id behaviour.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     g.setMeshHitTestFn(() => 'stale-object-id');
     const result = g.selectObjectAtPoint(100, 100);
     expect(result).toBeUndefined();
     expect(g.getSelectedObjectIds()).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const warnArg = String(warnSpy.mock.calls[0]?.[0]);
+    expect(warnArg).toContain('selectObjectAtPoint');
+    expect(warnArg).toContain('stale-object-id');
+    warnSpy.mockRestore();
   });
 
   it('single-select: selecting a different object clears the previous selection', () => {

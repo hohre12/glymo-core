@@ -850,6 +850,12 @@ export class Glymo {
           this.selectionManager.select(obj.id);
           return obj;
         }
+        // Host returned a stale id — warn and fall through to the stroke path.
+        // Consistent with selectObject's warn-on-unknown-id behaviour so both
+        // entry points surface the same diagnostic signal.
+        console.warn(
+          `[Glymo] selectObjectAtPoint: mesh hit-tester returned unknown objectId "${meshObjectId}" — falling through to stroke hit-test`,
+        );
       }
     }
 
