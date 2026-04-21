@@ -96,6 +96,9 @@ export class Glymo {
   // Preset text overlay timer — bypasses the morph pipeline entirely
   private overlayTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Set via setMeshHitTester — null when no host renderer is registered.
+  private meshHitTester: ((x: number, y: number) => string | null) | null = null;
+
   // Selection & Correction
   private readonly selectionManager: SelectionManager;
   private readonly strokeCorrector = new StrokeCorrector();
@@ -809,9 +812,23 @@ export class Glymo {
 
   // ── Selection ─────────────────────────────────────
 
+  /**
+   * Host registers a mesh hit-test function so selectObjectAtPoint can
+   * route clicks on a media-art mesh to the underlying GlymoObject BEFORE
+   * falling back to the stroke hit-test. Non-core renderers (Hologram3D
+   * lives in @glymo/core but is instantiated by the UI layer with its own
+   * canvas) plug in via this seam so the core stays renderer-agnostic.
+   * Pass null to unregister.
+   */
+  setMeshHitTester(fn: ((x: number, y: number) => string | null) | null): void {
+    this.meshHitTester = fn;
+  }
+
   /** Hit-test a point and toggle selection on the object at that position */
   selectObjectAtPoint(x: number, y: number): GlymoObject | undefined {
     this.assertNotDestroyed();
+    // Task 2.2 will replace this with mesh-first hit-testing via meshHitTester.
+    void this.meshHitTester;
     const strokeId = this.hitTestStroke(x, y);
     if (!strokeId) {
       this.selectionManager.clearSelection();
