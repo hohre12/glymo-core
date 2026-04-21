@@ -579,13 +579,13 @@ export class Hologram3DRenderer {
 
   /**
    * Whether the mesh registered under `objectId` is currently paused. Returns
-   * `true` when the slot doesn't exist or hasn't finished loading — defensive
-   * for hosts that poll the API before `addMesh` resolves, and a sane default
-   * for "no mesh, nothing to play".
+   * `null` when the slot doesn't exist or hasn't finished loading — symmetric
+   * with `toggleMeshAnimation` so a UI layer can distinguish "no mesh yet"
+   * from "mesh exists and is paused".
    */
-  isMeshAnimationPaused(objectId: string): boolean {
+  isMeshAnimationPaused(objectId: string): boolean | null {
     const slot = this.meshes.get(objectId);
-    if (!slot || !slot.loaded) return true;
+    if (!slot || !slot.loaded) return null;
     return slot.animationPaused;
   }
 
@@ -724,16 +724,18 @@ export class Hologram3DRenderer {
   }
 
   /**
-   * End the pinch-grab gesture. The final container position persists on
-   * the Three.js group so the mesh stays where the user released it;
+   * Release the renderer-wide mesh-drag flag set by `grabMesh`. Idempotent —
+   * calling while no drag is active is a no-op.
+   *
+   * The mesh's current world position is preserved on release. Subsequent
+   * `grabMesh` calls pick it up from wherever the previous drag left it;
    * `resetTransform()` is the escape hatch that returns it to origin.
    *
-   * `objectId` is accepted for symmetry with `grabMesh`/`translateMeshTo`
-   * but is advisory — drag state is renderer-wide (a single boolean), so
-   * passing an objectId does not change behaviour. Kept in the signature so
-   * consumers can wire `releaseMesh(activeId)` without special-casing.
+   * Takes no argument by design — drag state is renderer-wide (single
+   * boolean), so there is nothing to scope by objectId. Callers that track
+   * the active grab id should simply drop it on release.
    */
-  releaseMesh(_objectId?: string): void {
+  releaseMesh(): void {
     this.activeMeshDrag = false;
   }
 

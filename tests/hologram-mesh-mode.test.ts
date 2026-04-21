@@ -508,7 +508,7 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
     const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
     const committed = { x: container.position.x, y: container.position.y };
     expect(committed.x).not.toBe(0);
-    r.releaseMesh('obj-1');
+    r.releaseMesh();
     // Position is persisted by the Three.js Group — release only clears the
     // internal drag flag, it does not rewind translation.
     expect(container.position.x).toBe(committed.x);
@@ -538,7 +538,7 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
     r.setRotation(0.3, -0.2, 0.1);
     r.setZoom(1.5);
     expect(() => r.renderFrame()).not.toThrow();
-    r.releaseMesh('obj-1');
+    r.releaseMesh();
     expect(() => r.renderFrame()).not.toThrow();
     r.dispose();
   });
@@ -554,16 +554,15 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
 //     returns true) — no auto-play, matching the drawing-mode policy.
 //   - toggleMeshAnimation(objectId) flips the flag and returns the new paused
 //     state; a pair of toggles returns to the initial paused state.
-//   - With no loaded slot both getters are defensive: isMeshAnimationPaused
-//     returns true, toggleMeshAnimation returns null.
+//   - With no loaded slot both getters return null — symmetric contract.
 //   - renderFrame while paused does not throw (clock drains are safe even
 //     when no animation is active).
 
 describe('Hologram3DRenderer mesh-animation pause', () => {
-  it('isMeshAnimationPaused returns true when no mesh is loaded', async () => {
+  it('isMeshAnimationPaused returns null when no mesh is loaded', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
-    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
+    expect(r.isMeshAnimationPaused('obj-1')).toBeNull();
     r.dispose();
   });
 
@@ -592,7 +591,7 @@ describe('Hologram3DRenderer mesh-animation pause', () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
     expect(r.toggleMeshAnimation('obj-1')).toBeNull();
-    expect(r.isMeshAnimationPaused('obj-1')).toBe(true);
+    expect(r.isMeshAnimationPaused('obj-1')).toBeNull();
     r.dispose();
   });
 
