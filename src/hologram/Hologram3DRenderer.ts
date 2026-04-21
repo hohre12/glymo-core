@@ -185,8 +185,14 @@ export class Hologram3DRenderer {
   //
   // 'text' (default) renders per-char meshes from the chars[] array.
   // 'mesh' renders one or more GLB/procedural scenes loaded via setModel() /
-  // addMesh(). Mode is still mutually exclusive in Task 1.3 — Task 1.5 is
-  // where the frame loop iterates multiple meshes and the mode flag relaxes.
+  // addMesh().
+  //
+  // `mode` no longer routes the frame loop — `renderFrame` now dispatches
+  // the mesh path via `this.meshes.size > 0` (Task 1.5). The flag is still
+  // consulted by the legacy mesh API (`hitTestMesh`, `grabMesh`,
+  // `toggleMeshAnimation`, `translateMeshTo`) and by `setModel`'s mode
+  // bookkeeping; those call sites retire in Task 1.7 when `setModel` is
+  // removed.
   private mode: 'text' | 'mesh' = 'text';
 
   /**
@@ -590,9 +596,8 @@ export class Hologram3DRenderer {
 
     // Initialize renderer-wide clocks on first need. mixerClock only spins up
     // when a loaded mesh ships animations; meshFrameClock only when some
-    // source surfaces an update() hook. Task 1.5 will broaden the frame loop
-    // to iterate every slot — the clocks stay renderer-wide because one tick
-    // drives all meshes in lock-step.
+    // source surfaces an update() hook. The clocks stay renderer-wide — one
+    // tick drives every slot in `renderMeshFrame` in lock-step (Task 1.5).
     if (THREE) {
       if (state.mixer && !this.mixerClock) this.mixerClock = new THREE.Clock();
       if (winner.update && !this.meshFrameClock) this.meshFrameClock = new THREE.Clock();
@@ -1159,9 +1164,18 @@ export class Hologram3DRenderer {
       if (slot.uTransition) slot.uTransition.value = 1;
 
       if (!slot.animationPaused) {
-        // Tick the animation mixer if this GLB shipped clips.
+        // Tick the animation mixer if this GLB shipped clips. A malformed
+        // GLB (NaN timestamps, broken tracks) can make mixer.update() throw;
+        // isolate per slot so one bad asset cannot kill the whole frame.
         if (state.mixer && this.mixerClock) {
-          (state.mixer as { update: (dt: number) => void }).update(mixerDt);
+          try {
+            (state.mixer as { update: (dt: number) => void }).update(mixerDt);
+          } catch (err) {
+            console.error(
+              `[Hologram3DRenderer] Mesh mixer.update threw (objectId: ${slot.objectId}, modelId: ${slot.modelId}):`,
+              err,
+            );
+          }
         }
 
         // Source-driven update hook (e.g. procedural planet axial spin).
@@ -1172,7 +1186,10 @@ export class Hologram3DRenderer {
           try {
             slot.update(elapsed, frameDt);
           } catch (err) {
-            console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
+            console.error(
+              `[Hologram3DRenderer] Mesh update hook threw (objectId: ${slot.objectId}, modelId: ${slot.modelId}):`,
+              err,
+            );
           }
         }
       }
