@@ -1,6 +1,44 @@
 // ── Animation Types ─────────────────────────────────
 
-export type AnimationType = 'pulse' | 'sparkle' | 'float' | 'bounce' | 'rotate' | 'fly' | 'shake' | 'fadeOut' | 'keyframe';
+/**
+ * All animation types understood by StrokeAnimator.
+ *
+ * Legacy types (in use by shapeAnimations.ts text-mode path):
+ *   pulse, sparkle, float, bounce, rotate, fly, shake, fadeOut, keyframe
+ *
+ * New types added for the Locomotion × Modulation drawing-mode system
+ * (task #112). Locomotion primitives: drift, traverse, oscillate, orbit,
+ * swim, flutter, fall, rise, random. Modulation primitives: shine, bend,
+ * bloom, drip, glow. (pulse, sparkle, rotate, shake are shared between
+ * the old and new systems — no duplication.)
+ */
+export type AnimationType =
+  // ── Legacy (text-mode / shapeAnimations.ts) ──────────────────────────────
+  | 'pulse'
+  | 'sparkle'
+  | 'float'
+  | 'bounce'
+  | 'rotate'
+  | 'fly'
+  | 'shake'
+  | 'fadeOut'
+  | 'keyframe'
+  // ── Locomotion primitives (drawing-mode, task #112) ──────────────────────
+  | 'drift'
+  | 'traverse'
+  | 'oscillate'
+  | 'orbit'
+  | 'swim'
+  | 'flutter'
+  | 'fall'
+  | 'rise'
+  | 'random'
+  // ── Modulation primitives (drawing-mode, task #112) ──────────────────────
+  | 'shine'
+  | 'bend'
+  | 'bloom'
+  | 'drip'
+  | 'glow';
 
 /** A single keyframe in a keyframe-based animation */
 export interface AnimationKeyframe {

@@ -1090,15 +1090,19 @@ export class Hologram3DRenderer {
   private createCharMesh(char: string, _elapsed: number, _transition: number) {
     if (!THREE || !this.loadedFont) return null;
 
+    // Korean / CJK characters: use canvas texture on extruded plane
+    // (helvetiker font has no CJK glyphs). The texture path builds its own
+    // self-contained material internally (with texAlpha opacity masking),
+    // so we skip the Latin-path `createHologramMaterial(true/false)`
+    // allocation entirely — otherwise every CJK char would leak two
+    // unused NodeMaterial instances (one front, one side).
+    if (needsTextureFallback(char)) {
+      return this.createTextureCharMesh(char);
+    }
+
     const front = this.createHologramMaterial(true);
     const side = this.createHologramMaterial(false);
     if (!front || !side) return null;
-
-    // Korean / CJK characters: use canvas texture on extruded plane
-    // (helvetiker font has no CJK glyphs)
-    if (needsTextureFallback(char)) {
-      return this.createTextureCharMesh(char, front, side);
-    }
 
     const geometry = new TextGeometry!(char, {
       font: this.loadedFont,
@@ -1135,11 +1139,7 @@ export class Hologram3DRenderer {
   }
 
   /** Fallback: render CJK character to a canvas texture on a plane with TSL alpha */
-  private createTextureCharMesh(
-    char: string,
-    front: { material: any; uTime: any; uTransition: any },
-    side: { material: any; uTime: any; uTransition: any },
-  ) {
+  private createTextureCharMesh(char: string) {
     if (!THREE || !tsl) return null;
 
     // Render character to a 2D canvas (white on transparent)
@@ -1191,9 +1191,10 @@ export class Hologram3DRenderer {
     const frontMat = new THREE.MeshStandardNodeMaterial();
     frontMat.transparent = true;
     frontMat.depthWrite = false;
-    // DoubleSide stays here because the CJK plane is single-sided geometry
-    // (createPlaneGeometry has no back face); without DoubleSide the back
-    // of the plane is invisible and the user sees through the glyph.
+    // DoubleSide stays here because each layer in the volumetric stack is
+    // single-sided geometry; without DoubleSide the back of every layer is
+    // invisible and the glyph disappears when the controller rotates the
+    // group past 90°.
     frontMat.side = THREE.DoubleSide;
     (frontMat as unknown as { roughnessNode: unknown }).roughnessNode = float(0.85);
     (frontMat as unknown as { metalnessNode: unknown }).metalnessNode = float(0.0);
@@ -1210,23 +1211,39 @@ export class Hologram3DRenderer {
     // Edge-only emissive — same canonical pattern as createHologramMaterial.
     frontMat.emissiveNode = tslColor(holoColor).mul(fresnel().mul(1.2));
 
-    // Single plane with DoubleSide — the texture alpha masks the character shape.
-    // No side/back geometry needed; DoubleSide renders both faces, and slight
-    // depth perception comes from the 3D rotation applied by the controller.
+    // Volumetric plane stack — same character texture rendered on N parallel
+    // planes spaced across `depth`, so the glyph reads as a true 3D solid
+    // (not a flat sheet) under the controller's rotation. Mirrors the depth
+    // of the Latin TextGeometry path (depth: 0.35) so CJK and Latin glyphs
+    // share visual weight in mixed-script phrases. depthWrite is already
+    // false on frontMat, which keeps the layered alpha blending stable; one
+    // shared material means a single shader compile across all layers.
+    const depth = 0.35;
+    const layerCount = 6;
     const planeGeo = new THREE.PlaneGeometry(1.2, 1.2);
-    const frontMesh = new THREE.Mesh(planeGeo, frontMat);
-
     const group = new THREE.Group();
-    group.add(frontMesh);
+    for (let i = 0; i < layerCount; i++) {
+      const z = -depth / 2 + (i / (layerCount - 1)) * depth;
+      const layer = new THREE.Mesh(planeGeo, frontMat);
+      layer.position.z = z;
+      group.add(layer);
+    }
 
+    // All 6 layers share the single `frontMat` we just built, so the
+    // returned `frontMat` MUST be that same local reference — otherwise
+    // the `charMeshes` Map would store a stale pointer to a Latin-path
+    // material that isn't actually attached to any mesh, breaking any
+    // consumer that reads `entry.frontMat` for uniform updates or
+    // disposal. The volumetric stack has no separate side material, so
+    // `sideMat` + `sideUTime` + `sideUTransition` mirror the front refs.
     return {
       group,
-      frontMat: front.material,
-      sideMat: side.material,
+      frontMat,
+      sideMat: frontMat,
       uTime,
       uTransition,
-      sideUTime: side.uTime,
-      sideUTransition: side.uTransition,
+      sideUTime: uTime,
+      sideUTransition: uTransition,
     };
   }
 }

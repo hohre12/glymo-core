@@ -7,14 +7,38 @@ import type { AnimationKeyframe, AnimationParams, AnimationTransform, StrokeAnim
 
 // Default amplitude values per animation type
 const DEFAULT_AMPLITUDE: Record<string, number> = {
+  // ── Legacy types ────────────────────────────────────────────────────────
   pulse: 0.15,      // scale factor
-  sparkle: 0.1,     // scale spike intensity
   float: 20,        // pixels
   bounce: 30,       // pixels
   fly: 200,         // pixels
   shake: 10,        // pixels
-  fadeOut: 0,        // not used
+  fadeOut: 0,       // not used
   rotate: 0,        // not used
+  // ── Locomotion primitives (drawing-mode, task #112) ──────────────────────
+  drift: 0.02,      // NDC fraction per second
+  traverse: 0.5,    // fraction of canvas width per cycle
+  oscillate: 20,    // pixels peak displacement
+  orbit: 30,        // pixels orbit radius
+  swim: 18,         // pixels lateral sinusoid amplitude
+  flutter: 14,      // pixels irregular sinusoid amplitude
+  fall: 0.3,        // fraction of canvas height per cycle
+  rise: 0.3,        // fraction of canvas height per cycle
+  random: 15,       // pixels Brownian step
+  // ── Modulation primitives (drawing-mode, task #112) ──────────────────────
+  // shine/glow/sparkle drive glowIntensity as their primary signal, but they
+  // also now modulate scale + opacity so that `static + modulation` profiles
+  // (e.g. house, civic buildings) read as visible breathing motion instead of
+  // looking frozen. Amplitudes below are the scale amplitude the switch-cases
+  // treat as "default" when params.amplitude is not provided; the glowIntensity
+  // amplitude is hard-coded inside each case because it is tuned to the
+  // renderer's shadowBlur + globalAlpha curve.
+  sparkle: 0.03,    // scale breathing amplitude (±3%) — particle twinkle (primary signal is ParticleSystem emission)
+  shine: 0.03,      // scale breathing amplitude (±3%) — gentle luminance pulse
+  bend: 6,          // pixels lateral bend displacement
+  bloom: 0.12,      // scale expansion factor
+  drip: 0,          // renderer-side effect; no core translation
+  glow: 0.04,       // scale breathing amplitude (±4%) — edge-emissive breathing
 };
 
 const DEFAULT_SPEED = 90; // degrees per second for rotate
@@ -224,10 +248,17 @@ export class StrokeAnimator {
         identity.opacity = 0.8 + 0.2 * Math.sin(t * TWO_PI);
         break;
 
-      case 'sparkle':
-        // Gentle glow breathing — the real sparkle comes from ParticleSystem
-        identity.glowIntensity = 1 + 0.4 * Math.sin(t * TWO_PI);
+      case 'sparkle': {
+        // Gentle breathing + glow twinkle. The primary visual is the
+        // ParticleSystem emission (sparkle particles), but the stroke itself
+        // also breathes subtly (±3% scale + ±10% opacity) so that even if
+        // particles are culled / disabled the stroke never looks frozen.
+        const phase = Math.sin(t * TWO_PI);
+        identity.scale = 1 + 0.03 * phase;
+        identity.opacity = 0.9 + 0.1 * phase;
+        identity.glowIntensity = 1 + 0.4 * phase;
         break;
+      }
 
       case 'float':
         // Gentle upward bobbing using sin wave
@@ -282,6 +313,186 @@ export class StrokeAnimator {
         identity.rotation = kf.rotation ?? 0;
         identity.opacity = kf.opacity ?? 1;
         identity.glowIntensity = kf.glow ?? 1;
+        break;
+      }
+
+      // ── Locomotion primitives (drawing-mode, task #112) ─────────────────
+
+      case 'drift': {
+        // Slow directional translation. Direction encoded in params.direction
+        // (horizontal = X axis, vertical = Y axis). Uses elapsed time so
+        // displacement accumulates — non-looping callers should control
+        // duration to reset via repeat.
+        const driftAmp = amplitude;
+        const dir = params.direction ?? 'horizontal';
+        const cyclePos = Math.sin(t * TWO_PI);
+        if (dir === 'horizontal') {
+          identity.translateX = driftAmp * cyclePos;
+        } else {
+          identity.translateY = driftAmp * cyclePos;
+        }
+        break;
+      }
+
+      case 'traverse': {
+        // One-shot end-to-end travel across the canvas. Uses linear progress.
+        // amplitude = travel distance in pixels. Fades in first 10%, out last 20%.
+        const dir = params.direction ?? 'horizontal';
+        const travelAmp = amplitude;
+        const progress = t; // linear 0→1
+        if (dir === 'horizontal') {
+          identity.translateX = -travelAmp * 0.5 + travelAmp * progress;
+        } else {
+          identity.translateY = -travelAmp * 0.5 + travelAmp * progress;
+        }
+        if (t < 0.1) {
+          identity.opacity = t / 0.1;
+        } else if (t > 0.8) {
+          identity.opacity = 1 - (t - 0.8) / 0.2;
+        }
+        break;
+      }
+
+      case 'oscillate': {
+        // Back-and-forth pendulum swing around the origin. Symmetric sine.
+        const dir = params.direction ?? 'horizontal';
+        const oscAmp = amplitude;
+        const oscVal = oscAmp * Math.sin(t * TWO_PI);
+        if (dir === 'horizontal') {
+          identity.translateX = oscVal;
+        } else {
+          identity.translateY = oscVal;
+        }
+        break;
+      }
+
+      case 'orbit': {
+        // Circular path around the origin. t maps 0→1 to full revolution.
+        const orbitR = amplitude;
+        identity.translateX = orbitR * Math.cos(t * TWO_PI);
+        identity.translateY = orbitR * Math.sin(t * TWO_PI);
+        break;
+      }
+
+      case 'swim': {
+        // Horizontal advance with lateral sinusoidal undulation (fish motion).
+        // X = forward progress, Y = sinusoid side-to-side.
+        const swimAmp = amplitude;
+        const swimX = swimAmp * t; // forward drift
+        const swimY = swimAmp * 0.4 * Math.sin(t * TWO_PI * 2);
+        identity.translateX = swimX;
+        identity.translateY = swimY;
+        break;
+      }
+
+      case 'flutter': {
+        // Irregular-feeling sinusoid: combines two sine waves at coprime
+        // frequencies to produce the unpredictable quality of insect flight.
+        const flutterAmp = amplitude;
+        identity.translateX = flutterAmp * 0.6 * Math.sin(t * TWO_PI * 1.7);
+        identity.translateY = flutterAmp * Math.sin(t * TWO_PI) + flutterAmp * 0.3 * Math.sin(t * TWO_PI * 2.3);
+        break;
+      }
+
+      case 'fall': {
+        // Gravity-aligned descent with slight horizontal sway (leaf / raindrop).
+        const fallAmp = amplitude;
+        identity.translateY = fallAmp * t;
+        identity.translateX = fallAmp * 0.15 * Math.sin(t * TWO_PI * 2.5);
+        if (t > 0.85) {
+          identity.opacity = 1 - (t - 0.85) / 0.15;
+        }
+        break;
+      }
+
+      case 'rise': {
+        // Anti-gravity ascent with gentle sway (balloon / smoke / bubble).
+        const riseAmp = amplitude;
+        identity.translateY = -riseAmp * t;
+        identity.translateX = riseAmp * 0.12 * Math.sin(t * TWO_PI * 1.8);
+        if (t > 0.85) {
+          identity.opacity = 1 - (t - 0.85) / 0.15;
+        }
+        break;
+      }
+
+      case 'random': {
+        // Brownian walk: deterministic per-frame noise derived from elapsed ms
+        // so it is reproducible for a given startTime (no real RNG per frame).
+        // Uses a pair of Lissajous-like functions at irrational-ratio frequencies
+        // to approximate Brownian character without actual randomness.
+        const randAmp = amplitude;
+        const phi1 = elapsed * 0.003;
+        const phi2 = elapsed * 0.00517;
+        identity.translateX = randAmp * Math.sin(phi1) * Math.cos(phi2 * 1.3);
+        identity.translateY = randAmp * Math.cos(phi1 * 0.7) * Math.sin(phi2);
+        break;
+      }
+
+      // ── Modulation primitives (drawing-mode, task #112) ──────────────────
+
+      case 'shine': {
+        // Luminance pulsing — the stroke brightens and dims rhythmically.
+        // Drives glowIntensity (shadowBlur + outer-pass alpha) as the primary
+        // signal, and modulates scale + opacity subtly so the stroke reads as
+        // "breathing" even when strokes have no glow style configured or when
+        // the effect preset uses a flat shadow. amplitude (DEFAULT 0.03) is
+        // the scale breathing band; glowIntensity amp is fixed at 1.2.
+        const phase = Math.sin(t * TWO_PI);
+        const shineGlowAmp = 1.2;
+        identity.glowIntensity = 1 + shineGlowAmp * (0.5 + 0.5 * phase);
+        identity.scale = 1 + amplitude * phase;
+        identity.opacity = 0.9 + 0.1 * phase;
+        break;
+      }
+
+      case 'bend': {
+        // Lateral flex deformation — simulates a branch swaying in wind.
+        // Expressed as a translateX oscillation; the renderer may apply
+        // additional shear if it supports per-stroke warp.
+        const bendAmp = amplitude;
+        identity.translateX = bendAmp * Math.sin(t * TWO_PI);
+        identity.translateY = bendAmp * 0.2 * Math.sin(t * TWO_PI * 2);
+        break;
+      }
+
+      case 'bloom': {
+        // Radial expansion — scale pulses outward then returns.
+        // Models a flower opening or an explosion.
+        const bloomAmp = amplitude;
+        const bloomPeak = Math.sin(t * Math.PI); // 0→1→0 single arch
+        identity.scale = 1 + bloomAmp * bloomPeak;
+        identity.opacity = 1 - 0.3 * (1 - bloomPeak); // slightly fades at extremes
+        break;
+      }
+
+      case 'drip': {
+        // Liquid drip: a subtle downward displacement pulse.
+        // Renderer-side particle emission (droplets) is signalled via
+        // glowIntensity > 1.5 as a cheap sideband; the main transform is
+        // a small periodic Y nudge to convey the "about to drip" tension.
+        identity.translateY = amplitude * 0.5 * Math.abs(Math.sin(t * TWO_PI));
+        // Signal renderer to emit a drip particle near the peak
+        if (t > 0.45 && t < 0.55) {
+          identity.glowIntensity = 2.0; // drip emission signal
+        }
+        break;
+      }
+
+      case 'glow': {
+        // Edge-emissive "breathing neon" pulse. Historically this primitive
+        // only modulated glowIntensity, which drives shadowBlur + the outer
+        // glow-pass alpha — a channel the renderer's main stroke pass ignores
+        // entirely. On effect presets with a minimal glow style, the stroke
+        // therefore looked frozen. We now also modulate scale (±amplitude,
+        // default ±4%) and opacity (0.85 → 1.0) so the stroke itself breathes
+        // with the glow. amplitude is the scale breathing band; the glow
+        // intensity swing is fixed at ±0.5 around 1.3 to match the historical
+        // look.
+        const phase = Math.sin(t * TWO_PI);
+        identity.glowIntensity = 1.3 + 0.5 * phase;
+        identity.scale = 1 + amplitude * phase;
+        identity.opacity = 0.85 + 0.15 * (0.5 + 0.5 * phase);
         break;
       }
     }

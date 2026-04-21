@@ -5,6 +5,141 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.2] - 2026-04-21
+
+### Fixed
+- **Hologram3DRenderer — CJK glyph volumetric stack.** `createTextureCharMesh`
+  (the CJK fallback path used when Latin `TextGeometry` is unavailable)
+  previously built a single `PlaneGeometry` with `DoubleSide`, which read
+  as a flat sheet that "popped" visibly whenever the hologram controller
+  rotated the group past 90°. It now builds a 6-layer parallel stack
+  spanning `depth: 0.35`, matching the Latin `TextGeometry depth: 0.35`
+  so mixed-script phrases (e.g. 한국어 + Latin) have comparable visual
+  weight in the scene. All layers share a single `MeshStandardNodeMaterial`
+  (one shader compile, identical edge-emissive fresnel), and `depthWrite`
+  stays `false` so the layered alpha blending remains stable under
+  rotation. No API change.
+
+## [0.11.1] - 2026-04-21
+
+### Fixed
+- **Modulation primitives now produce visible stroke motion.** Before this
+  release, the `'glow'`, `'shine'`, and `'sparkle'` modulation primitives in
+  `StrokeAnimator` only drove `glowIntensity`, which the renderer applies
+  exclusively to the outer glow pass (`shadowBlur` + `globalAlpha` of the
+  cached glow stroke). On effect presets with a minimal glow style — or when
+  the glow pass is culled — the main stroke pass rendered flat and the
+  stroke looked frozen. This was the root cause of the "classifier
+  recognises `house` at 98 % but the stroke does not animate" class of bug
+  reported on 2026-04-21: house's animation profile is `{ locomotion:
+  'static', modulation: 'glow' }`, which delegated everything to the glow
+  channel.
+  
+  The three modulation cases now additionally modulate `scale` and
+  `opacity` alongside `glowIntensity` — the renderer applies all three to
+  the main stroke pass (`ctx.scale()` + `ctx.globalAlpha`), so the stroke
+  itself breathes with the glow. Amplitudes are locked by
+  `tests/StrokeAnimator.test.ts`:
+    - `'glow'` — scale ±4 %, opacity 0.85 → 1.0, glowIntensity 0.8 → 1.8.
+    - `'shine'` — scale ±3 %, opacity 0.8 → 1.0, glowIntensity 1.0 → 2.2.
+    - `'sparkle'` — scale ±3 %, opacity 0.8 → 1.0, glowIntensity 0.6 → 1.4.
+  `'pulse'` is unchanged (already modulated scale + opacity pre-0.11.1).
+  Colour / hue is intentionally untouched — colour is owned by the effect
+  preset.
+- `DEFAULT_AMPLITUDE` entries for `shine` / `glow` updated from `0` to the
+  scale amplitude each case reads when `params.amplitude` is not provided
+  (`0.03` and `0.04` respectively). Callers that pass an explicit
+  `amplitude` override the default as before.
+
+## [0.11.0] - 2026-04-21
+
+### Changed
+- **Breaking — drawing-only classifier pipeline.** The `@glymo/core/classifier`
+  Web Worker now loads ONLY the `drawing-classifier` ONNX model and runs a
+  single head per `classify()` call. The 3-way TYPE router
+  (`type-classifier`) and the `text-classifier` / `symbol-classifier`
+  specialist heads were removed. Drawing mode always produces drawings, so
+  the router was structurally unnecessary; in production it routinely
+  mis-routed clean drawings (e.g. heart) into the text head at high
+  confidence ("0" at 100%), which `useDrawingClassifier` then silently
+  dropped via its `category === 'drawing'` filter, producing the
+  "I draw but nothing happens" class of bug. Text mode has its own
+  Gemini-backed recognition path and never used this worker.
+- **Breaking — `ClassifyResponse` shape.** The response is now
+  `{ predictions: Prediction[] }`. The `typeProbs`, `detectedType`, and
+  `heads` fields were removed. `Prediction.category` is now the single
+  literal `'drawing'`.
+- **Breaking — `TypeProbs`, `TypeHeadSnapshot`, `HeadSnapshot` type
+  exports removed** from `@glymo/core/classifier`. No consumer code in
+  the monorepo read these fields (grep across .ts/.tsx found only doc
+  references); callers that stored the multi-head snapshot should
+  migrate to logging `predictions[0]` directly.
+
+### Fixed
+- Worker init cost drops from 4-model download (~30 MB) to 1-model
+  (~8 MB). Per-`classify()` latency drops from ~150 ms (router + 3
+  heads, for-await serialised) to ~50 ms (one head).
+
+## [0.10.1] - 2026-04-21
+
+### Fixed
+- `./classifier/classifier.worker.js` subpath export now resolves to
+  the ESM worker bundle (`dist/classifier/classifier.worker.mjs`) via a
+  single-string mapping, replacing the `import` / `require` / `default`
+  conditional export from 0.10.0. The previous conditional shape let
+  webpack's worker URL resolver fall through to the CJS `default` target
+  in Next.js `--webpack` consumers, producing
+  `Uncaught ReferenceError: require is not defined` inside a
+  `type: 'module'` Web Worker at runtime. The CJS worker bundle is a
+  dead path in browser contexts (a module worker cannot execute CommonJS
+  `require()`), so the export is now ESM-only. Node-side CJS consumers
+  of the worker file never existed and are not a supported use case.
+
+## [0.10.0] - 2026-04-20
+
+### Added
+- `./classifier` subpath export — the on-device drawing classifier
+  (Phase 1.8 v003-B3.5, 347 categories) is now part of the public
+  `@glymo/core` surface. Re-exports `ClassifierClient`,
+  `DRAWING_CATEGORIES`, `TEXT_CATEGORIES`, `SYMBOL_CATEGORIES`,
+  `TYPE_CATEGORIES`, the matching literal-union types, plus
+  `strokesToImage`, `loadModel`, `fetchManifest`, `openModelDB`,
+  `translateLabel`, `LABEL_TRANSLATIONS`, `ALL_CLASSIFIER_LABELS`,
+  `DEFAULT_CLASSIFIER_LOCALE`, and `TypeStabilizer`. Migrated from
+  `glymo-landing/lib/classifier/` so that `glymo-app`, `glymo-landing`,
+  and any future consumer can share a single ONNX classifier
+  implementation.
+- `./classifier/classifier.worker.js` worker subpath export — the
+  Web Worker that owns ONNX Runtime sessions for `type`, `drawing`,
+  `text`, and `symbol` heads. Consumers construct it with the canonical
+  `new Worker(new URL('@glymo/core/classifier/classifier.worker.js',
+  import.meta.url), { type: 'module' })` idiom; webpack / Next.js
+  Turbopack / Vite all resolve that pattern into a hashed asset URL at
+  build time.
+- `peerDependencies.onnxruntime-web ^1.24.0` — declared optional
+  (`peerDependenciesMeta.onnxruntime-web.optional = true`). Required
+  only when consumers import the new `./classifier` subpath.
+
+### Changed
+- Build pipeline is now multi-pass under a single Vite config. Pass 1
+  (`BUILD_TARGET=library`) emits the historical `dist/glymo.{mjs,js}`
+  root bundle plus `dist/classifier/classifier.{mjs,js}` for the new
+  classifier subpath. Pass 2 (`BUILD_TARGET=worker`) emits a
+  self-contained `dist/classifier/classifier.worker.{mjs,js}` bundle.
+  `npm run build` runs both passes in sequence; consumers see no
+  workflow change.
+
+### Fixed
+- Worker bundle no longer references parent-directory chunks. Rollup's
+  default chunk-hoisting splits shared imports (e.g. `model-cache`)
+  into a sibling `../model-cache-*.js` chunk that lives outside the
+  published worker file. Bundlers like webpack / Next.js do not
+  recursively follow worker imports through `node_modules`, so any
+  hoisted chunk would 404 at runtime. The worker pass is now configured
+  with `output.codeSplitting: false` and `external: ['onnxruntime-web']`,
+  guaranteeing the published worker file is self-contained except for
+  the externalised ONNX Runtime peer.
+
 ## [0.5.0] - 2026-04-19
 
 ### Added
