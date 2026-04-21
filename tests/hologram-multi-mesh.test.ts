@@ -310,7 +310,6 @@ describe('Hologram3DRenderer multi-mesh', () => {
   });
 
   it('returns null for unknown objectId', () => {
-    // @ts-expect-error — getMesh lands in Task 1.3; this directive self-removes once implemented.
     expect(renderer.getMesh('unknown')).toBeNull();
     renderer.dispose();
   });
@@ -321,12 +320,9 @@ describe('Hologram3DRenderer multi-mesh', () => {
       id: 'earth',
       url: 'https://cdn.test/earth.glb',
     };
-    // @ts-expect-error — addMesh lands in Task 1.3; this directive self-removes once implemented.
     const handle = await renderer.addMesh('obj-1', 'earth', descriptor);
     expect(handle).not.toBeNull();
-    // @ts-expect-error — getMesh lands in Task 1.3; this directive self-removes once implemented.
     expect(renderer.getMesh('obj-1')).toBe(handle);
-    // @ts-expect-error — getAllMeshIds lands in Task 1.3; this directive self-removes once implemented.
     expect(renderer.getAllMeshIds()).toEqual(['obj-1']);
     renderer.dispose();
   });

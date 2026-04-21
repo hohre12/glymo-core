@@ -14,11 +14,63 @@ import type {
   Hologram3DRendererOptions,
   HitTestResult,
   MediaArtMeshState,
+  MeshHandle,
   MeshSource,
   MeshSourceDescriptor,
   MeshSourceLoadContext,
 } from './types.js';
 import { createMeshSource } from './sources/createMeshSource.js';
+
+// ── Internal per-objectId mesh slot ───────────────────────────────────────────
+//
+// One entry in `Hologram3DRenderer.meshes` per loaded/loading mesh. Added in
+// Task 1.3 of the multi-mesh refactor (docs/plans/media-art-multi-mesh.md); the
+// prior single-mesh state was nine renderer-wide fields, now one slot per
+// objectId here.
+//
+// `loadToken` is the race-detection token for the SAME slot — a second
+// addMesh(objectId, ...) call overwrites the slot's token so any still-in-flight
+// first load recognises itself as superseded on return and disposes instead of
+// attaching.
+//
+// `handle` caches the MeshHandle object so `getMesh(objectId)` returns a stable
+// reference that can be identity-compared against the handle returned by
+// `addMesh` (tests rely on `.toBe(handle)`).
+//
+// `loaded` is true once the source.load() has resolved and the slot has been
+// committed (uniforms wired, group attached). Until then `getMesh` returns null
+// — a pending slot is internal state, not a visible mesh.
+//
+// `animationPaused` is per-slot so each mesh can pause independently (Studio
+// convention: every freshly-loaded mesh is frozen until the user's air-magic
+// pinch resumes it). The legacy isMeshAnimationPaused / toggleMeshAnimation API
+// reads/writes only the legacy-single-id slot for backward compatibility.
+interface InternalMeshSlot {
+  objectId: string;
+  modelId: string;
+  descriptor: MeshSourceDescriptor;
+  /** Resolved state; meaningful only when `loaded === true`. */
+  state: MediaArtMeshState | null;
+  /** Uniform driven per frame with elapsed seconds. Null until load commits. */
+  uTime: { value: number } | null;
+  /** Uniform driven per frame with transition. Null until load commits. */
+  uTransition: { value: number } | null;
+  /** Per-frame update hook surfaced by the source (e.g. axial spin). */
+  update: ((elapsed: number, dt: number) => void) | null;
+  /** Cleanup returned by state.attachToScene (restores scene.environment etc.). */
+  attachCleanup: (() => void) | null;
+  /** Paused flag — true freezes mixer + update hook. */
+  animationPaused: boolean;
+  /** Token for race detection on repeated addMesh(objectId, ...) calls. */
+  loadToken: number;
+  /** False while loading; true once the slot is committed and renderable. */
+  loaded: boolean;
+  /**
+   * Stable handle — returned by both addMesh and getMesh so callers can
+   * identity-compare. Null while loading; populated atomically at commit.
+   */
+  handle: MeshHandle | null;
+}
 
 // ── Lazy Three.js WebGPU imports ──────────────────────────────────────────────
 // Dynamically imported to keep initial bundle small and avoid SSR issues.
@@ -129,61 +181,60 @@ export class Hologram3DRenderer {
   private handActive = false;
   private enabled = true;
 
-  // ── Mesh mode (v0.7.0) ──
+  // ── Mesh mode (v0.7.0, refactored Task 1.3 of multi-mesh plan) ──
+  //
   // 'text' (default) renders per-char meshes from the chars[] array.
-  // 'mesh' renders a single GLB scene loaded via setModel(). Mode is
-  // exclusive — switching disposes the prior mode's resources.
+  // 'mesh' renders one or more GLB/procedural scenes loaded via setModel() /
+  // addMesh(). Mode is still mutually exclusive in Task 1.3 — Task 1.5 is
+  // where the frame loop iterates multiple meshes and the mode flag relaxes.
   private mode: 'text' | 'mesh' = 'text';
-  private meshState: MediaArtMeshState | null = null;
+
   /**
-   * Token for the most recent setModel() call. setModel awaits an async
-   * load; if the user picks a different model mid-load (or calls
-   * setModel(null), or the renderer is disposed) the in-flight load must
-   * not "win" by attaching its result. We compare loadToken before commit.
+   * Map of loaded/loading meshes keyed by caller-assigned `objectId`.
+   *
+   * Replaces the nine single-mesh fields that lived here before Task 1.3
+   * (meshState, loadToken, meshUTime, meshUTransition, meshUpdate,
+   * meshAttachCleanup, mixerClock, meshFrameClock, meshAnimationPaused).
+   *
+   * The legacy `setModel(descriptor | null)` API is preserved as a shim that
+   * routes through `addMesh(LEGACY_SINGLE_ID, ...)` / `disposeMeshSlot` for
+   * the single-mesh objectId. Every current consumer of the legacy mesh API
+   * (hitTestMesh, grabMesh, toggleMeshAnimation, getMeshState, …) reads the
+   * slot under `LEGACY_SINGLE_ID` — Task 1.7 removes that shim once the app
+   * and UI have migrated to the per-object API.
    */
-  private loadToken = 0;
-  /** Per-frame uniform driver for the currently loaded mesh's media-art shader. */
-  private meshUTime: { value: number } | null = null;
-  private meshUTransition: { value: number } | null = null;
+  private meshes = new Map<string, InternalMeshSlot>();
+
   /**
-   * Optional per-frame update hook surfaced by the mesh source (e.g. procedural
-   * planet axial spin). Called inside renderMeshFrame after uniform writes;
-   * source-owned animation lives here so the renderer's loop stays one-line.
+   * Monotonic counter feeding each slot's `loadToken`. Shared across all
+   * objectIds so even a later addMesh for a DIFFERENT objectId bumps the
+   * counter — simpler than a per-objectId counter and still correct for the
+   * same-objectId race case (the only case that matters).
    */
-  private meshUpdate: ((elapsed: number, dt: number) => void) | null = null;
+  private nextLoadToken = 0;
+
   /**
-   * Cleanup function returned by the source's attachToScene hook (e.g. restore
-   * scene.environment after an HDR-driven source detaches). Invoked from
-   * disposeMeshState before the source's own dispose() so scene-level state is
-   * always restored even if dispose() throws.
+   * Canonical objectId for the legacy single-mesh path. The `setModel` shim
+   * funnels every load through this slot so all the legacy readers
+   * (hitTestMesh / grabMesh / toggleMeshAnimation / renderMeshFrame / …)
+   * can resolve a single slot. Task 1.7 deletes the shim together with this
+   * constant.
    */
-  private meshAttachCleanup: (() => void) | null = null;
-  /** Animation mixer clock — separate from startTime so mixer pauses on dispose. */
+  private readonly LEGACY_SINGLE_ID = '__legacy_single__';
+
+  /**
+   * Animation mixer clock — separate from startTime so mixer pauses on dispose.
+   * Renderer-wide (per the multi-mesh plan: one clock drives all meshes); the
+   * frame-loop tick is gated per-slot by `animationPaused`.
+   */
   private mixerClock: InstanceType<typeof import('three/webgpu').Clock> | null = null;
+
   /**
-   * Frame-delta clock for the mesh source's update hook. Independent from
+   * Frame-delta clock for the mesh sources' update hooks. Independent from
    * mixerClock so the two advance in step but neither resets the other on
-   * read (Clock.getDelta is destructive).
+   * read (Clock.getDelta is destructive). Renderer-wide like mixerClock.
    */
   private meshFrameClock: InstanceType<typeof import('three/webgpu').Clock> | null = null;
-  /**
-   * Paused flag for mesh-mode animation. When `true` (default), neither the
-   * glTF AnimationMixer (`mixer.update`) nor the source-driven update hook
-   * (`meshUpdate`, e.g. procedural-planet axial spin) advance per frame —
-   * the mesh renders as a still image. Every `setModel` call resets this to
-   * `true` so a freshly loaded mesh is always frozen; the consumer must
-   * explicitly call `toggleMeshAnimation()` to resume playback.
-   *
-   * This is the Studio "user-authored scene" convention (2026-04-21): the
-   * media-art picker places a mesh at rest, and only the user's `magic`
-   * air-tool pinch kicks it into motion. See
-   * `glymo-ui/src/canvas/hooks/useGestureDispatcher.ts` for the dispatch site.
-   *
-   * Clocks continue to tick while paused so `getDelta()` does not accumulate
-   * unrelated frame time — we discard the delta before handing it to the
-   * animation driver.
-   */
-  private meshAnimationPaused = true;
   // Note: color and font were removed — the renderer uses hardcoded hologram
   // color (0x00bbff) and loads its own 3D font file. If per-instance color/font
   // customization is needed later, add setter methods instead of constructor args.
@@ -352,42 +403,131 @@ export class Hologram3DRenderer {
     descriptor: MeshSourceDescriptor | null,
     ctx?: MeshSourceLoadContext,
   ): Promise<MediaArtMeshState | null> {
+    // Backward-compat shim over the new multi-mesh API. Funnels every load
+    // through `addMesh(LEGACY_SINGLE_ID, …)` so all the legacy mesh readers
+    // (hitTestMesh, grabMesh, toggleMeshAnimation, getMeshState, …) continue
+    // to resolve a single slot. Task 1.7 of docs/plans/media-art-multi-mesh.md
+    // deletes this shim once every caller has migrated to addMesh/removeMesh.
     if (this.destroyed) {
       throw new Error('[Hologram3DRenderer] setModel called on disposed renderer');
     }
 
-    const myToken = ++this.loadToken;
-
     // ── Switch to text mode ────────────────────────────────────────────────
     if (descriptor === null) {
-      this.disposeMeshState();
+      const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+      if (slot) {
+        this.disposeMeshSlot(slot);
+        this.meshes.delete(this.LEGACY_SINGLE_ID);
+      }
       this.mode = 'text';
+      // Clocks were renderer-wide under the legacy single-mesh path; with no
+      // mesh present they release here so the next setModel's addMesh call
+      // re-initialises them cleanly.
+      this.mixerClock = null;
+      this.meshFrameClock = null;
       return null;
     }
 
+    // ── Load via addMesh and flip mode on success ──────────────────────────
+    const handle = await this.addMesh(
+      this.LEGACY_SINGLE_ID,
+      descriptor.id,
+      descriptor,
+      ctx,
+    );
+    if (!handle) return null;
+    this.mode = 'mesh';
+    return handle.state;
+  }
+
+  /**
+   * Load a mesh and register it under `objectId`. Resolves with the
+   * `MeshHandle`, or `null` when the renderer is destroyed or the load is
+   * superseded by a newer `addMesh(objectId, ...)` call for the SAME id
+   * (late replacement race — we keep the winner).
+   *
+   * Errors from the underlying MeshSource (network, parse, validation)
+   * propagate to the caller as a typed `GlymoError` unless the load was
+   * superseded — superseded failures are swallowed because the winner owns
+   * the slot.
+   *
+   * `ctx` is optional; progress / cache-hit callbacks are wrapped so
+   * signals that fire AFTER the load is superseded are suppressed.
+   */
+  async addMesh(
+    objectId: string,
+    modelId: string,
+    descriptor: MeshSourceDescriptor,
+    ctx?: MeshSourceLoadContext,
+  ): Promise<MeshHandle | null> {
+    if (this.destroyed) return null;
+    const token = ++this.nextLoadToken;
+
+    // Tear down any existing slot for this objectId so a replacement
+    // (e.g. user picked a different asset for the same object) releases GPU
+    // resources before the new one attaches.
+    const existing = this.meshes.get(objectId);
+    if (existing) {
+      this.disposeMeshSlot(existing);
+      this.meshes.delete(objectId);
+    }
+
+    // Prime the slot BEFORE the async load so a later addMesh for the same
+    // id can race-detect us (its ++this.nextLoadToken will overwrite the
+    // slot's loadToken, so when our await resumes we'll see we lost).
+    const slot: InternalMeshSlot = {
+      objectId,
+      modelId,
+      descriptor,
+      state: null,
+      uTime: null,
+      uTransition: null,
+      update: null,
+      attachCleanup: null,
+      animationPaused: true,
+      loadToken: token,
+      loaded: false,
+      handle: null,
+    };
+    this.meshes.set(objectId, slot);
+
     // ── Wait for renderer init (Three.js modules + WebGPU) ────────────────
     const ready = await this.ready;
-    if (!ready || this.destroyed || myToken !== this.loadToken) return null;
+    // After the await another call may have superseded us or disposed the
+    // renderer — check both before continuing.
+    if (!ready || this.destroyed) {
+      const current = this.meshes.get(objectId);
+      if (current && current.loadToken === token) this.meshes.delete(objectId);
+      return null;
+    }
+    {
+      const current = this.meshes.get(objectId);
+      if (!current || current.loadToken !== token) return null;
+    }
     if (!THREE || !tsl) return null;
 
     // ── Construct + load the mesh source ──────────────────────────────────
     const source = this.createMeshSource(descriptor);
     let state: MediaArtMeshState;
     try {
-      // Wrap the consumer's onProgress AND onCacheHit so callbacks firing
-      // after this load is superseded do not leak stale signals into the
-      // consumer's UI. The wrappers are only attached when the consumer
-      // supplied the corresponding hook — sources that never receive
-      // onProgress / onCacheHit skip the per-event work entirely.
+      // Wrap onProgress + onCacheHit so callbacks firing after this load is
+      // superseded (or the renderer disposed) do not leak stale signals into
+      // the consumer's UI. Only attach wrappers when the consumer supplied
+      // the corresponding hook.
+      const isStillCurrent = (): boolean => {
+        if (this.destroyed) return false;
+        const s = this.meshes.get(objectId);
+        return !!s && s.loadToken === token;
+      };
       const wrappedProgress = ctx?.onProgress
         ? (p: number): void => {
-            if (myToken !== this.loadToken || this.destroyed) return;
+            if (!isStillCurrent()) return;
             ctx.onProgress?.(p);
           }
         : undefined;
       const wrappedCacheHit = ctx?.onCacheHit
         ? (): void => {
-            if (myToken !== this.loadToken || this.destroyed) return;
+            if (!isStillCurrent()) return;
             ctx.onCacheHit?.();
           }
         : undefined;
@@ -400,14 +540,18 @@ export class Hologram3DRenderer {
           : undefined;
       state = await source.load({ THREE, tsl }, sourceCtx);
     } catch (err) {
-      // If we were superseded mid-load, swallow the error — the new load
-      // owns the slot. Otherwise propagate.
-      if (myToken !== this.loadToken || this.destroyed) return null;
+      // If we were superseded mid-load or the renderer was disposed, swallow
+      // the error — the winning load (or dispose) owns the slot. Otherwise
+      // propagate so the caller can surface the failure.
+      const current = this.meshes.get(objectId);
+      if (!current || current.loadToken !== token || this.destroyed) return null;
+      this.meshes.delete(objectId);
       throw err;
     }
 
-    // ── Re-check token: a newer setModel() may have raced ahead ───────────
-    if (myToken !== this.loadToken || this.destroyed) {
+    // ── Re-check token: a newer call may have raced ahead ─────────────────
+    const winner = this.meshes.get(objectId);
+    if (!winner || winner.loadToken !== token || this.destroyed) {
       // Dispose the just-loaded resources we will not be attaching.
       try {
         state.dispose();
@@ -417,46 +561,81 @@ export class Hologram3DRenderer {
       return null;
     }
 
-    // ── Commit: dispose prior mesh, attach new one ────────────────────────
-    this.disposeMeshState();
-    this.meshState = state;
-    this.mode = 'mesh';
+    // ── Commit: wire uniforms, attach to scene graph ──────────────────────
+    winner.state = state;
+    winner.uTime = state.uTime ?? null;
+    winner.uTransition = state.uTransition ?? null;
+    winner.update = state.update ? state.update.bind(state) : null;
 
-    // Mesh sources surface aggregate uniforms via plain enumerable props (see
-    // sources/*.ts); they're our handle to drive the media-art shader
-    // treatment per frame. update() and attachToScene() are likewise opt-in —
-    // sources that don't need them omit the hook.
-    this.meshUTime = state.uTime ?? null;
-    this.meshUTransition = state.uTransition ?? null;
-    this.meshUpdate = state.update ? state.update.bind(state) : null;
-
-    // Attach to scene under charContainer so the existing rotation/zoom
-    // pipeline applies untouched.
+    // Attach the group under charContainer so the existing rotation / zoom /
+    // spread pipeline applies untouched.
     if (this.charContainer) {
-      this.charContainer.add(state.group as InstanceType<typeof import('three/webgpu').Object3D>);
+      this.charContainer.add(
+        state.group as InstanceType<typeof import('three/webgpu').Object3D>,
+      );
     }
 
-    // Scene-level attach (e.g. HDR environment for PBR sources). The hook
-    // returns an optional cleanup that disposeMeshState fires on teardown.
+    // Scene-level attach (e.g. HDR environment for PBR sources). The cleanup
+    // fires on dispose so even a throwing state.dispose() can't strand
+    // scene.environment / fog state.
     if (state.attachToScene && this.scene) {
       const cleanup = state.attachToScene(this.scene);
-      this.meshAttachCleanup = typeof cleanup === 'function' ? cleanup : null;
+      winner.attachCleanup = typeof cleanup === 'function' ? cleanup : null;
     }
 
-    // Initialize clocks. mixerClock only spins up if the source ships an
-    // animation mixer; meshFrameClock is needed whenever the source surfaces
-    // an update() hook so we can hand it a sensible dt.
+    // Initialize renderer-wide clocks on first need. mixerClock only spins up
+    // when a loaded mesh ships animations; meshFrameClock only when some
+    // source surfaces an update() hook. Task 1.5 will broaden the frame loop
+    // to iterate every slot — the clocks stay renderer-wide because one tick
+    // drives all meshes in lock-step.
     if (THREE) {
-      if (state.mixer) this.mixerClock = new THREE.Clock();
-      if (this.meshUpdate) this.meshFrameClock = new THREE.Clock();
+      if (state.mixer && !this.mixerClock) this.mixerClock = new THREE.Clock();
+      if (winner.update && !this.meshFrameClock) this.meshFrameClock = new THREE.Clock();
     }
 
-    // Freshly loaded meshes are always paused. The consumer wakes the
-    // animation via toggleMeshAnimation() in response to an explicit user
-    // action (the air-magic pinch).
-    this.meshAnimationPaused = true;
+    // Freshly loaded meshes are always paused. Consumers wake the animation
+    // via toggleMeshAnimation() in response to an explicit user action (the
+    // air-magic pinch) — matches the 2026-04-21 Studio convention.
+    winner.animationPaused = true;
+    winner.loaded = true;
+    winner.handle = {
+      objectId: winner.objectId,
+      modelId: winner.modelId,
+      descriptor: winner.descriptor,
+      state,
+    };
 
-    return state;
+    return winner.handle;
+  }
+
+  /**
+   * Read-only handle for the mesh registered under `objectId`. Returns
+   * `null` when no mesh is registered, or when the mesh's load is still in
+   * flight. The returned handle is stable across calls — identity-comparable
+   * with the value returned by `addMesh`.
+   */
+  getMesh(objectId: string): MeshHandle | null {
+    const slot = this.meshes.get(objectId);
+    if (!slot || !slot.loaded || !slot.handle) return null;
+    return slot.handle;
+  }
+
+  /**
+   * Enumerate every registered objectId. Includes slots whose load is still
+   * in flight — callers that need "fully loaded only" should filter through
+   * `getMesh(id) !== null`. Readonly so consumers can't mutate internal
+   * state via the returned array.
+   */
+  getAllMeshIds(): readonly string[] {
+    return [...this.meshes.keys()];
+  }
+
+  /**
+   * True when at least one mesh slot (loading or loaded) exists. Used by
+   * hosts as a cheap "any mesh present?" probe without walking the map.
+   */
+  hasAnyMesh(): boolean {
+    return this.meshes.size > 0;
   }
 
   /** Current rendering mode — useful for tools that adapt picker UI. */
@@ -464,18 +643,29 @@ export class Hologram3DRenderer {
     return this.mode;
   }
 
-  /** Read-only handle to the current mesh state. Null in text mode. */
+  /**
+   * Read-only handle to the legacy single-mesh state. Null in text mode or
+   * when the legacy slot has not finished loading. Task 1.7 removes this —
+   * callers should migrate to `getMesh(objectId)`.
+   */
   getMeshState(): MediaArtMeshState | null {
-    return this.meshState;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded) return null;
+    return slot.state;
   }
 
   /**
    * Whether mesh-mode animation is currently paused. Always `true` immediately
    * after a `setModel` call until `toggleMeshAnimation()` resumes it.
    * Returns `true` in text mode (no mesh to animate).
+   *
+   * Reads the legacy single-mesh slot only — Task 3.5 adds per-object
+   * pause APIs for multi-mesh consumers.
    */
   isMeshAnimationPaused(): boolean {
-    return this.meshAnimationPaused;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded) return true;
+    return slot.animationPaused;
   }
 
   /**
@@ -489,11 +679,16 @@ export class Hologram3DRenderer {
    * deltas are always drained per frame while paused (see `renderMeshFrame`)
    * so a resume never fast-forwards — playback always picks up from the
    * paused pose rather than jumping ahead.
+   *
+   * Writes the legacy single-mesh slot only — Task 3.5 adds per-object
+   * toggles for multi-mesh consumers.
    */
   toggleMeshAnimation(): boolean {
-    if (this.mode !== 'mesh' || !this.meshState) return true;
-    this.meshAnimationPaused = !this.meshAnimationPaused;
-    return this.meshAnimationPaused;
+    if (this.mode !== 'mesh') return true;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded) return true;
+    slot.animationPaused = !slot.animationPaused;
+    return slot.animationPaused;
   }
 
   /**
@@ -505,9 +700,14 @@ export class Hologram3DRenderer {
    * when it misses — callers do not receive distance/child-id because the
    * mesh is translated as a whole (unlike per-char hit testing which selects
    * one of many targets).
+   *
+   * Tests only the legacy single-mesh slot. Task 1.6 adds the multi-mesh
+   * selection variant `hitTestMeshForSelection`.
    */
   hitTestMesh(x: number, y: number): { hit: boolean } | null {
-    if (this.mode !== 'mesh' || !this.meshState) return null;
+    if (this.mode !== 'mesh') return null;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded || !slot.state) return null;
     if (!THREE || !this.camera || !this.canvas) return { hit: false };
 
     const w = this.canvas.clientWidth;
@@ -519,7 +719,7 @@ export class Hologram3DRenderer {
 
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
-    const group = this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>;
+    const group = slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>;
     const intersects = raycaster.intersectObjects([group], true);
     return { hit: intersects.length > 0 };
   }
@@ -532,7 +732,9 @@ export class Hologram3DRenderer {
    * visual affordance used by two-hand rotation.
    */
   grabMesh(): boolean {
-    if (this.mode !== 'mesh' || !this.meshState) return false;
+    if (this.mode !== 'mesh') return false;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded) return false;
     this.activeMeshDrag = true;
     return true;
   }
@@ -548,7 +750,9 @@ export class Hologram3DRenderer {
    * initialising (camera/canvas/container all need to be live).
    */
   translateMeshTo(x: number, y: number): void {
-    if (this.mode !== 'mesh' || !this.meshState) return;
+    if (this.mode !== 'mesh') return;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded) return;
     if (!this.camera || !this.canvas || !this.charContainer) return;
 
     const w = this.canvas.clientWidth;
@@ -587,34 +791,44 @@ export class Hologram3DRenderer {
     return createMeshSource(descriptor);
   }
 
-  private disposeMeshState(): void {
-    if (!this.meshState) return;
-    // Scene-level cleanup BEFORE the source's dispose() so even a throwing
-    // dispose can't strand HDR environment / fog state on the scene.
-    if (this.meshAttachCleanup) {
+  /**
+   * Tear down a single mesh slot's GPU / scene-graph resources. Does NOT
+   * remove the slot from `this.meshes` — the caller decides whether to
+   * delete the entry (e.g. addMesh replaces the entry in place, setModel
+   * deletes it outright). Scene-level attach cleanup runs BEFORE the state's
+   * own dispose so even a throwing dispose() can't strand HDR environment /
+   * fog state on the scene.
+   *
+   * Idempotent for an unloaded (pending) slot: attach cleanup is skipped,
+   * the group is not in the scene yet, and state.dispose() is a no-op.
+   */
+  private disposeMeshSlot(slot: InternalMeshSlot): void {
+    if (slot.attachCleanup) {
       try {
-        this.meshAttachCleanup();
+        slot.attachCleanup();
       } catch (err) {
         console.error('[Hologram3DRenderer] Mesh attach cleanup threw:', err);
       }
+      slot.attachCleanup = null;
     }
-    if (this.charContainer) {
+    if (slot.state && this.charContainer) {
       this.charContainer.remove(
-        this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>,
+        slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>,
       );
     }
-    try {
-      this.meshState.dispose();
-    } catch (err) {
-      console.error('[Hologram3DRenderer] Mesh dispose threw:', err);
+    if (slot.state) {
+      try {
+        slot.state.dispose();
+      } catch (err) {
+        console.error('[Hologram3DRenderer] Mesh dispose threw:', err);
+      }
     }
-    this.meshState = null;
-    this.meshUTime = null;
-    this.meshUTransition = null;
-    this.meshUpdate = null;
-    this.meshAttachCleanup = null;
-    this.mixerClock = null;
-    this.meshFrameClock = null;
+    slot.state = null;
+    slot.uTime = null;
+    slot.uTransition = null;
+    slot.update = null;
+    slot.handle = null;
+    slot.loaded = false;
   }
 
   /** Find the nearest char to a CSS point using 3D raycasting, returns {id, dist} or null */
@@ -855,37 +1069,42 @@ export class Hologram3DRenderer {
     this.postProcessing!.render();
   }
 
-  /** Mesh-mode per-frame update — transforms one GLB scene. */
+  /**
+   * Mesh-mode per-frame update — drives the legacy single-mesh slot. Task 1.5
+   * rewrites this to iterate every slot in `this.meshes`; for Task 1.3 the
+   * behaviour is still "one mesh at a time" via `LEGACY_SINGLE_ID`.
+   */
   private renderMeshFrame(elapsed: number, transition: number): void {
-    if (!this.meshState || !THREE) return;
-    const group = this.meshState.group as InstanceType<typeof import('three/webgpu').Object3D>;
+    const slot = this.meshes.get(this.LEGACY_SINGLE_ID);
+    if (!slot || !slot.loaded || !slot.state || !THREE) return;
+    const group = slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>;
 
     // Drive the media-art shader uniforms.
-    if (this.meshUTime) this.meshUTime.value = elapsed;
-    if (this.meshUTransition) this.meshUTransition.value = transition;
+    if (slot.uTime) slot.uTime.value = elapsed;
+    if (slot.uTransition) slot.uTransition.value = transition;
 
     // Animation gate: when paused (the default post-setModel), drain the
     // clocks' pending deltas so resume does not fast-forward by the entire
     // paused duration, but skip the mixer + update hook calls so the mesh
-    // renders frozen. `uTime` still advances (line 814) because the shader
-    // may rely on elapsed time for static effects like fresnel and the
-    // entry `uTransition` has its own driver.
-    if (this.meshAnimationPaused) {
+    // renders frozen. `uTime` still advances above because the shader may
+    // rely on elapsed time for static effects like fresnel and the entry
+    // `uTransition` has its own driver.
+    if (slot.animationPaused) {
       this.mixerClock?.getDelta();
       this.meshFrameClock?.getDelta();
     } else {
       // Tick the animation mixer if this GLB shipped clips.
-      if (this.meshState.mixer && this.mixerClock) {
+      if (slot.state.mixer && this.mixerClock) {
         const dt = this.mixerClock.getDelta();
-        (this.meshState.mixer as { update: (dt: number) => void }).update(dt);
+        (slot.state.mixer as { update: (dt: number) => void }).update(dt);
       }
 
       // Source-driven update hook (e.g. procedural planet axial spin). Runs
       // AFTER mixer + uniform writes so the source can read coherent state.
-      if (this.meshUpdate && this.meshFrameClock) {
+      if (slot.update && this.meshFrameClock) {
         const dt = this.meshFrameClock.getDelta();
         try {
-          this.meshUpdate(elapsed, dt);
+          slot.update(elapsed, dt);
         } catch (err) {
           console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
         }
@@ -895,7 +1114,7 @@ export class Hologram3DRenderer {
     // Normalize scale so the largest bbox dimension maps to ~2 world units.
     // Then `transition` fades the scale from 0 → 1 for entry. The picker /
     // orchestrator (P4 MediaArtTransition) drives the eased transition curve.
-    const bb = this.meshState.bbox;
+    const bb = slot.state.bbox;
     const maxDim = Math.max(
       bb.max.x - bb.min.x,
       bb.max.y - bb.min.y,
@@ -940,12 +1159,18 @@ export class Hologram3DRenderer {
   /** Clean up all GPU/Three.js resources */
   dispose(): void {
     this.destroyed = true;
-    // Bump token so any in-flight setModel() loads recognise themselves as
-    // superseded and dispose their just-loaded resources instead of attaching.
-    this.loadToken++;
+    // Bump the shared load-token counter so every in-flight addMesh load
+    // recognises itself as superseded on return and disposes its just-loaded
+    // resources instead of attaching.
+    this.nextLoadToken++;
     // Dispose mesh-mode resources first so the GLB scene graph is cleaned
     // before the WebGPU device tears down.
-    this.disposeMeshState();
+    for (const slot of this.meshes.values()) {
+      this.disposeMeshSlot(slot);
+    }
+    this.meshes.clear();
+    this.mixerClock = null;
+    this.meshFrameClock = null;
     for (const [, entry] of this.charMeshes) {
       entry.group.traverse(obj => {
         if ((obj as any).geometry) (obj as any).geometry.dispose();
