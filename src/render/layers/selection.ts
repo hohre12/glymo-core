@@ -1,32 +1,51 @@
 import type { ObjectStore } from '../../store/ObjectStore.js';
 
-/** Padding around object bbox for selection highlight */
-const SELECTION_PAD = 8;
-
-/** Corner handle radius */
-const HANDLE_RADIUS = 5;
-
-/** Dash pattern for marching ants */
-const DASH_PATTERN: [number, number] = [8, 4];
-
-/** Dash animation speed (pixels per ms) */
-const DASH_SPEED = 0.05;
-
-/** Total dash cycle length for modulo */
-const DASH_CYCLE = DASH_PATTERN[0] + DASH_PATTERN[1];
+/** Padding around object bbox for the halo, in unscaled px. */
+const HALO_PAD = 10;
 
 /**
- * Layer 15 — Selection Highlights
+ * Breathing angular rate in rad/ms. Produces a ~1.57 s sin cycle and matches
+ * the text-mode char halo breath in `TextOverlayCanvas.tsx` so a selected
+ * char and a selected drawing object share a single visual language.
+ */
+const BREATH_RATE = 0.004;
+
+/** Fixed halo color — brand neon. Intentionally NOT tied to the active
+ *  paint effect so the selection indicator reads identically across modes
+ *  regardless of which effect is painting the strokes themselves. */
+const HALO_STROKE = '#00ffcc';
+const HALO_FILL = 'rgba(0, 255, 204, 0.18)';
+
+/** Corner-radius of the rounded halo rect. */
+const HALO_RADIUS = 12;
+
+/**
+ * Layer 15 — Selection Halo
  *
- * Renders animated marching-ants bounding box and corner handles
- * for each selected object. Drawn directly to main canvas (not cached)
- * since it requires per-frame animation.
+ * Renders a breathing neon halo around each selected object. Unified with
+ * the text-mode char halo (`TextOverlayCanvas.tsx`) so selection reads as a
+ * single visual language across drawing- and text-modes:
+ *
+ *   - solid outline, not marching ants — Glymo is gesture-driven; the
+ *     "dashed selection region" idiom inherited from desktop 2D apps does
+ *     not match the interaction model.
+ *   - no corner handles — there is no tap-drag-resize affordance for
+ *     gesture users, so handles were dead UI and visual noise.
+ *   - fixed `#00ffcc` — the paint effect recolors the strokes inside the
+ *     halo; the halo itself stays brand-consistent, matching the text
+ *     mode's ambient-rim-light.
+ *
+ * Drawn directly to the main canvas (not cached) because of the per-frame
+ * breathing animation. The `_effectColor` parameter is preserved in the
+ * public signature for API stability with `CanvasRenderer` but intentionally
+ * unused — see rationale above. Rename to an underscore prefix keeps
+ * `noUnusedParameters` happy without sacrificing the positional API.
  */
 export function renderSelection(
   ctx: CanvasRenderingContext2D,
   selectedIds: ReadonlySet<string>,
   objectStore: ObjectStore,
-  effectColor: string,
+  _effectColor: string,
   timestamp: number,
   dpr: number,
 ): void {
@@ -34,79 +53,70 @@ export function renderSelection(
 
   ctx.save();
 
-  // Parse effect color and create semi-transparent variant
-  const strokeColor = withAlpha(effectColor, 0.7);
-  const handleColor = withAlpha(effectColor, 0.9);
-  const glowColor = withAlpha(effectColor, 0.3);
+  const breath = 0.5 + 0.5 * Math.sin(timestamp * BREATH_RATE);
+  const fillAlpha = (0.55 + 0.25 * breath) * 0.3;
+  const strokeAlpha = 0.7 + 0.2 * breath;
+  const glowBlur = (10 + 4 * breath) * dpr;
 
-  // Marching ants animation offset
-  const dashOffset = -(timestamp * DASH_SPEED) % DASH_CYCLE;
-  // Pre-compute scaled dash pattern outside loop (avoid per-frame allocation)
-  const scaledDash = DASH_PATTERN.map(v => v * dpr);
+  const pad = HALO_PAD * dpr;
+  const radius = HALO_RADIUS * dpr;
 
   for (const objectId of selectedIds) {
     const obj = objectStore.getObject(objectId);
     if (!obj) continue;
 
-    const x = obj.bbox.x - SELECTION_PAD * dpr;
-    const y = obj.bbox.y - SELECTION_PAD * dpr;
-    const w = obj.bbox.width + SELECTION_PAD * 2 * dpr;
-    const h = obj.bbox.height + SELECTION_PAD * 2 * dpr;
+    const x = obj.bbox.x - pad;
+    const y = obj.bbox.y - pad;
+    const w = obj.bbox.width + pad * 2;
+    const h = obj.bbox.height + pad * 2;
 
-    // Glow pass
-    ctx.shadowBlur = 6 * dpr;
-    ctx.shadowColor = glowColor;
-    ctx.strokeStyle = strokeColor;
+    // Ambient rim-light — reads as a soft glow behind the object.
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = fillAlpha;
+    ctx.fillStyle = HALO_FILL;
+    ctx.beginPath();
+    roundRectPath(ctx, x, y, w, h, radius);
+    ctx.fill();
+
+    // Neon outline — single breathing stroke, no dash pattern.
+    ctx.globalAlpha = strokeAlpha;
+    ctx.strokeStyle = HALO_STROKE;
     ctx.lineWidth = 2 * dpr;
-    ctx.setLineDash(scaledDash);
-    ctx.lineDashOffset = dashOffset * dpr;
-    ctx.strokeRect(x, y, w, h);
+    ctx.shadowColor = HALO_STROKE;
+    ctx.shadowBlur = glowBlur;
+    ctx.beginPath();
+    roundRectPath(ctx, x, y, w, h, radius);
+    ctx.stroke();
 
-    // Clear shadow for handles
+    // Reset shadow between objects so the next iteration starts clean.
     ctx.shadowBlur = 0;
-    ctx.shadowColor = 'transparent';
-
-    // Corner handles
-    ctx.fillStyle = handleColor;
-    const r = HANDLE_RADIUS * dpr;
-    const corners: [number, number][] = [
-      [x, y],
-      [x + w, y],
-      [x, y + h],
-      [x + w, y + h],
-    ];
-    for (const [cx, cy] of corners) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
   }
 
-  // Reset dash
-  ctx.setLineDash([]);
   ctx.restore();
 }
 
-/** Convert a CSS color string to an rgba string with given alpha */
-function withAlpha(color: string, alpha: number): string {
-  // Handle hex colors (#rgb, #rrggbb, #rrggbbaa)
-  if (color.startsWith('#')) {
-    let hex = color.slice(1);
-    if (hex.length === 3) hex = hex[0]! + hex[0]! + hex[1]! + hex[1]! + hex[2]! + hex[2]!;
-    if (hex.length >= 6) {
-      const r = parseInt(hex.slice(0, 2), 16);
-      const g = parseInt(hex.slice(2, 4), 16);
-      const b = parseInt(hex.slice(4, 6), 16);
-      return `rgba(${r},${g},${b},${alpha})`;
-    }
-  }
-  // Handle rgb()/rgba() — just replace or add alpha
-  if (color.startsWith('rgb')) {
-    const match = color.match(/[\d.]+/g);
-    if (match && match.length >= 3) {
-      return `rgba(${match[0]},${match[1]},${match[2]},${alpha})`;
-    }
-  }
-  // Fallback: return as-is
-  return color;
+/**
+ * Rounded-rect sub-path. `CanvasRenderingContext2D.roundRect` exists on
+ * modern browsers but headless-canvas backends used in Node-based tests do
+ * not ship it consistently, so we emit the arc construction directly.
+ */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const radius = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.arcTo(x + w, y, x + w, y + radius, radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.arcTo(x + w, y + h, x + w - radius, y + h, radius);
+  ctx.lineTo(x + radius, y + h);
+  ctx.arcTo(x, y + h, x, y + h - radius, radius);
+  ctx.lineTo(x, y + radius);
+  ctx.arcTo(x, y, x + radius, y, radius);
+  ctx.closePath();
 }

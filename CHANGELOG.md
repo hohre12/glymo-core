@@ -5,6 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] - 2026-04-21
+
+### Added — Media-art mesh animation pause API
+
+The 2026-04-21 Studio ADR removes drawing-mode auto-animation entirely —
+classifier success no longer auto-plays an AnimationProfile, and media-art
+meshes no longer auto-spin on `setModel`. Animation only plays when the
+user explicitly selects an object and pinches with the air-magic tool. To
+support the mesh half of that contract, `Hologram3DRenderer` now exposes a
+pause/resume surface that the UI kit drives from `useGestureDispatcher`.
+
+- **`src/hologram/Hologram3DRenderer.ts`** — new private field
+  `meshAnimationPaused: boolean` defaults to `true`. `setModel()` sets it
+  to `true` again after clock init, so every freshly loaded mesh arrives
+  frozen (no auto-play, even if a prior mesh was playing when swapped).
+  `renderMeshFrame` now gates the mixer tick and the mesh update hook on
+  `!meshAnimationPaused`; while paused the clocks' deltas are drained
+  (`mixerClock.getDelta()` / `meshFrameClock.getDelta()`) so a resume
+  never fast-forwards by the paused interval — playback picks up from the
+  exact frozen pose. Two new public methods:
+  - `isMeshAnimationPaused(): boolean` — always `true` in text mode.
+  - `toggleMeshAnimation(): boolean` — flips the flag and returns the new
+    paused state (`true` if now paused, `false` if now playing); no-op +
+    returns `true` in text mode or before `setModel` resolves.
+
+### Fixed — Spurious self-dependency
+
+- **`package.json`** — removed an erroneous `"@glymo/core": "^0.13.0"`
+  entry that had been introduced into the `dependencies` block during
+  the 0.13.0 bump. The package was self-declaring as its own runtime
+  dependency, which under `npm install` would pull an older 0.13.x
+  tarball into `node_modules/@glymo/core/node_modules/` and risk a
+  bundler resolving duplicate copies. No source file inside `src/`
+  imports from `@glymo/core` (verified by grep), so the line was pure
+  noise; removing it is behaviour-neutral for consumers.
+
+### Tests
+
+- **`tests/hologram-mesh-mode.test.ts`** — 6 new tests under the
+  "Hologram3DRenderer mesh-animation pause" describe block:
+  paused-by-default in text mode, paused-on-setModel, toggle flip
+  flops, no-op in text mode, re-pause on subsequent `setModel`, and
+  `renderFrame` safety while paused. Brings the file to 23/23 tests.
+
+### Semver
+
+Minor bump — only additive API surface (`isMeshAnimationPaused`,
+`toggleMeshAnimation`). Existing renderers upgrading from 0.14.0 see
+meshes pause by default, which is the intended behaviour change; the
+paired UI kit (`@glymo/ui@0.22.0`) drives the resume path. Hosts that
+load `@glymo/core@0.15.0` with `@glymo/ui@<0.22.0` will see frozen
+media-art meshes with no way to wake them — hence the peer-dep floor
+bump in the UI kit.
+
+## [0.14.0] - 2026-04-21
+
+### Changed — Drawing-mode selection halo unified with text-mode
+
+Studio QA sweep (2026-04-21) flagged that the selection indicator differed
+between the two modes — text mode drew a breathing cyan halo, drawing mode
+drew a marching-ants dashed bbox plus four corner handles. Glymo is a
+gesture-driven surface (no pointer resize affordance), so the handles and
+the dash animation were decorative legacy from an earlier mouse-first
+prototype. The two indicators are now visually identical; drawing mode
+matches the text-overlay halo language in `@glymo/ui`
+(`TextOverlayCanvas.tsx:866-887`).
+
+- **`src/render/layers/selection.ts`** — rewritten. No more `setLineDash`,
+  no `arc()` corner handles. Instead: a rounded-rect path drawn with
+  `moveTo + lineTo + arcTo` (headless-canvas compatible), filled with a
+  translucent `rgba(0, 255, 204, 0.18)` ambient pass under `'lighter'`
+  composite, then stroked in solid `#00ffcc`. A breath animation
+  (`breath = 0.5 + 0.5 * Math.sin(timestamp * 0.004)`) modulates alpha and
+  shadow blur; same timestamp + dpr inputs produce deterministic output so
+  the gate tests in `tests/selection.test.ts` can pin the math.
+- **Constants** extracted inline at the top of the file for quick visual
+  tuning: `HALO_PAD = 10`, `HALO_STROKE = '#00ffcc'`,
+  `HALO_FILL = 'rgba(0, 255, 204, 0.18)'`, `HALO_RADIUS = 12`,
+  `BREATH_RATE = 0.004 rad/ms` (≈ 1.57 s period). The breath rate is
+  shared with the text-mode char halo so both surfaces pulse in lockstep
+  when the user is toggling between modes.
+- **Brand-neon lock** — the `effectColor` parameter is preserved in the
+  public signature for backward compat with call sites
+  (`CanvasRenderer.ts:352`) but no longer influences the stroke. The
+  selection halo now stays `#00ffcc` regardless of the active paint
+  effect, matching the text-mode halo. Internally the parameter is
+  renamed `_effectColor` to satisfy `noUnusedParameters: true`.
+
+### Migration
+
+- Call sites that previously relied on the dashed marching-ants visual
+  (none in this repo; the landing preview and the app Studio both consume
+  this layer only through `CanvasRenderer`) will see a solid neon outline
+  instead. The public function signature of `renderSelection(ctx,
+  selectedIds, store, effectColor, timestamp, dpr)` is unchanged, so no
+  caller-side edits are required.
+- Gate tests pinning the new behaviour land in `tests/selection.test.ts`
+  (9 tests) — forks that re-introduce `setLineDash` or bbox corner
+  `arc()` calls will regress.
+
 ## [0.13.0] - 2026-04-21
 
 ### Added — Media Art production-by-default rendering (HR5)

@@ -538,3 +538,79 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
     r.dispose();
   });
 });
+
+// ── Mesh-animation pause API (0.15.0) ───────────────────────────────────────
+//
+// Pins the contract added for the 2026-04-21 Studio ADR that removed
+// drawing-mode auto-animation and froze media-art by default:
+//
+//   - setModel() leaves a freshly loaded mesh paused (isMeshAnimationPaused()
+//     returns true) — no auto-play, matching the drawing-mode policy.
+//   - toggleMeshAnimation() flips the flag and returns the new paused state;
+//     a pair of toggles returns to the initial paused state (idempotent).
+//   - In text mode (no mesh loaded) both getters return true and toggling is
+//     a no-op — defensive against hosts that call the API pre-setModel.
+//   - renderFrame while paused does not throw (clock drains are safe even
+//     when no animation is active).
+
+describe('Hologram3DRenderer mesh-animation pause', () => {
+  it('isMeshAnimationPaused returns true in text mode (no mesh loaded)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    r.dispose();
+  });
+
+  it('freshly loaded mesh is paused (no auto-play)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'fresh', url: 'https://cdn/m.glb' });
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    r.dispose();
+  });
+
+  it('toggleMeshAnimation flips paused → playing → paused', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'toggle', url: 'https://cdn/m.glb' });
+    // Starts paused.
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    // First toggle → playing (returns false).
+    expect(r.toggleMeshAnimation()).toBe(false);
+    expect(r.isMeshAnimationPaused()).toBe(false);
+    // Second toggle → paused again (returns true).
+    expect(r.toggleMeshAnimation()).toBe(true);
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    r.dispose();
+  });
+
+  it('toggleMeshAnimation is a no-op in text mode (returns true, state unchanged)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    expect(r.toggleMeshAnimation()).toBe(true);
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    r.dispose();
+  });
+
+  it('setModel re-pauses even when called while currently playing', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'first', url: 'https://cdn/m1.glb' });
+    r.toggleMeshAnimation(); // → playing
+    expect(r.isMeshAnimationPaused()).toBe(false);
+    // Loading a second model must return to the frozen default so the user
+    // has to opt-in to animation on every new media-art selection.
+    await r.setModel({ type: 'gltf', id: 'second', url: 'https://cdn/m2.glb' });
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    r.dispose();
+  });
+
+  it('renderFrame does not throw while paused', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.setModel({ type: 'gltf', id: 'render-paused', url: 'https://cdn/m.glb' });
+    r.setTransition(1);
+    expect(r.isMeshAnimationPaused()).toBe(true);
+    expect(() => r.renderFrame()).not.toThrow();
+    // After resume renderFrame must also remain safe.
+    r.toggleMeshAnimation();
+    expect(() => r.renderFrame()).not.toThrow();
+    r.dispose();
+  });
+});

@@ -166,6 +166,24 @@ export class Hologram3DRenderer {
    * read (Clock.getDelta is destructive).
    */
   private meshFrameClock: InstanceType<typeof import('three/webgpu').Clock> | null = null;
+  /**
+   * Paused flag for mesh-mode animation. When `true` (default), neither the
+   * glTF AnimationMixer (`mixer.update`) nor the source-driven update hook
+   * (`meshUpdate`, e.g. procedural-planet axial spin) advance per frame —
+   * the mesh renders as a still image. Every `setModel` call resets this to
+   * `true` so a freshly loaded mesh is always frozen; the consumer must
+   * explicitly call `toggleMeshAnimation()` to resume playback.
+   *
+   * This is the Studio "user-authored scene" convention (2026-04-21): the
+   * media-art picker places a mesh at rest, and only the user's `magic`
+   * air-tool pinch kicks it into motion. See
+   * `glymo-ui/src/canvas/hooks/useGestureDispatcher.ts` for the dispatch site.
+   *
+   * Clocks continue to tick while paused so `getDelta()` does not accumulate
+   * unrelated frame time — we discard the delta before handing it to the
+   * animation driver.
+   */
+  private meshAnimationPaused = true;
   // Note: color and font were removed — the renderer uses hardcoded hologram
   // color (0x00bbff) and loads its own 3D font file. If per-instance color/font
   // customization is needed later, add setter methods instead of constructor args.
@@ -433,6 +451,11 @@ export class Hologram3DRenderer {
       if (this.meshUpdate) this.meshFrameClock = new THREE.Clock();
     }
 
+    // Freshly loaded meshes are always paused. The consumer wakes the
+    // animation via toggleMeshAnimation() in response to an explicit user
+    // action (the air-magic pinch).
+    this.meshAnimationPaused = true;
+
     return state;
   }
 
@@ -444,6 +467,33 @@ export class Hologram3DRenderer {
   /** Read-only handle to the current mesh state. Null in text mode. */
   getMeshState(): MediaArtMeshState | null {
     return this.meshState;
+  }
+
+  /**
+   * Whether mesh-mode animation is currently paused. Always `true` immediately
+   * after a `setModel` call until `toggleMeshAnimation()` resumes it.
+   * Returns `true` in text mode (no mesh to animate).
+   */
+  isMeshAnimationPaused(): boolean {
+    return this.meshAnimationPaused;
+  }
+
+  /**
+   * Flip the mesh-mode animation paused flag. Returns the new paused state:
+   * `true` if the mesh is now paused, `false` if now playing. No-op in text
+   * mode (returns `true` — there is no mesh to animate).
+   *
+   * Called by the air-magic pinch handler in
+   * `glymo-ui/src/canvas/hooks/useGestureDispatcher.ts` when the pinch
+   * intersects the media-art mesh bounding box. The underlying clocks'
+   * deltas are always drained per frame while paused (see `renderMeshFrame`)
+   * so a resume never fast-forwards — playback always picks up from the
+   * paused pose rather than jumping ahead.
+   */
+  toggleMeshAnimation(): boolean {
+    if (this.mode !== 'mesh' || !this.meshState) return true;
+    this.meshAnimationPaused = !this.meshAnimationPaused;
+    return this.meshAnimationPaused;
   }
 
   /**
@@ -814,20 +864,31 @@ export class Hologram3DRenderer {
     if (this.meshUTime) this.meshUTime.value = elapsed;
     if (this.meshUTransition) this.meshUTransition.value = transition;
 
-    // Tick the animation mixer if this GLB shipped clips.
-    if (this.meshState.mixer && this.mixerClock) {
-      const dt = this.mixerClock.getDelta();
-      (this.meshState.mixer as { update: (dt: number) => void }).update(dt);
-    }
+    // Animation gate: when paused (the default post-setModel), drain the
+    // clocks' pending deltas so resume does not fast-forward by the entire
+    // paused duration, but skip the mixer + update hook calls so the mesh
+    // renders frozen. `uTime` still advances (line 814) because the shader
+    // may rely on elapsed time for static effects like fresnel and the
+    // entry `uTransition` has its own driver.
+    if (this.meshAnimationPaused) {
+      this.mixerClock?.getDelta();
+      this.meshFrameClock?.getDelta();
+    } else {
+      // Tick the animation mixer if this GLB shipped clips.
+      if (this.meshState.mixer && this.mixerClock) {
+        const dt = this.mixerClock.getDelta();
+        (this.meshState.mixer as { update: (dt: number) => void }).update(dt);
+      }
 
-    // Source-driven update hook (e.g. procedural planet axial spin). Runs
-    // AFTER mixer + uniform writes so the source can read coherent state.
-    if (this.meshUpdate && this.meshFrameClock) {
-      const dt = this.meshFrameClock.getDelta();
-      try {
-        this.meshUpdate(elapsed, dt);
-      } catch (err) {
-        console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
+      // Source-driven update hook (e.g. procedural planet axial spin). Runs
+      // AFTER mixer + uniform writes so the source can read coherent state.
+      if (this.meshUpdate && this.meshFrameClock) {
+        const dt = this.meshFrameClock.getDelta();
+        try {
+          this.meshUpdate(elapsed, dt);
+        } catch (err) {
+          console.error('[Hologram3DRenderer] Mesh update hook threw:', err);
+        }
       }
     }
 
