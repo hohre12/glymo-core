@@ -409,6 +409,15 @@ export interface SessionDoc {
    * per-character shape and Revision 2 notes in the plan document.
    */
   characters?: CharacterDoc[];
+  /**
+   * Session-level background theme preference (0.18.0). Persisted on
+   * `exportSession`, re-emitted on `loadSession` as `session:restore` so the
+   * UI can re-apply its visual theme. `core` does not interpret the value —
+   * it is a tagged pass-through carrying whichever theme vocabulary the
+   * consumer app uses. Optional so v2 docs pre-dating 0.18.0 continue to
+   * load; missing values default to `'dark'` on the `session:restore` event.
+   */
+  backgroundMode?: 'dark' | 'white';
 }
 
 // ── Bitmap Injection (host-provided) ────────────────
@@ -518,6 +527,13 @@ export interface GlymoEventMap {
    * the media-art feature do not receive this event.
    */
   'media-art:restore': [{ restorations: readonly { objectId: string; modelId: string; sourceLabel: string | null }[] }];
+  /**
+   * Fires at the end of {@link Glymo.loadSession} carrying session-level
+   * visual state that the UI must re-apply (0.18.0). `backgroundMode`
+   * defaults to `'dark'` for v2 docs that predate the field, so subscribers
+   * always receive a concrete value rather than undefined.
+   */
+  'session:restore': [{ backgroundMode: 'dark' | 'white' }];
   [key: `gesture:${string}`]: [import('./gesture/types.js').GestureEvent];
 }
 

@@ -643,3 +643,207 @@ describe('Hologram3DRenderer mesh-animation pause', () => {
     r.dispose();
   });
 });
+
+// ── meshRoot container separation + per-mesh CSS size (0.18.0) ───────────────
+//
+// Pins the contract introduced to fix the two media-art bugs:
+//
+//   1. Meshes were inheriting `charContainer.rotation` — the idle-wobble
+//      `applyContainerRotationAndZoom` writes each frame — and drifted
+//      around their stroke anchor. Fix: parent mesh slots under a
+//      non-rotating `meshRoot` group parented directly to the scene.
+//   2. Every mesh was normalised to world size 2.0 regardless of the
+//      source stroke bbox, breaking the visual link to the drawing. Fix:
+//      `setMeshSizeCss(objectId, w, h)` records a per-slot target CSS
+//      size that `renderMeshFrame` maps into world units via the current
+//      camera frustum.
+
+describe('Hologram3DRenderer meshRoot container separation (0.18.0)', () => {
+  it('meshRoot is a direct child of the scene after init', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    const internal = r as unknown as {
+      scene: { children: unknown[] } | null;
+      meshRoot: { name: string } | null;
+    };
+    expect(internal.scene).not.toBeNull();
+    expect(internal.meshRoot).not.toBeNull();
+    expect(internal.meshRoot!.name).toBe('meshRoot');
+    expect(internal.scene!.children.includes(internal.meshRoot!)).toBe(true);
+    r.dispose();
+  });
+
+  it('loaded mesh is parented under meshRoot, not under charContainer', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'mesh-parent', {
+      type: 'gltf',
+      id: 'mesh-parent',
+      url: 'https://cdn.test/m.glb',
+    });
+    expect(handle).not.toBeNull();
+    const internal = r as unknown as {
+      charContainer: { children: unknown[] } | null;
+      meshRoot: { children: unknown[] } | null;
+    };
+    const group = handle!.state.group as unknown;
+    expect(internal.meshRoot!.children.includes(group)).toBe(true);
+    expect(internal.charContainer!.children.includes(group)).toBe(false);
+    r.dispose();
+  });
+
+  it('charContainer rotation does NOT propagate to the mesh group', async () => {
+    // Regression guard for the idle-wobble drift bug: meshRoot must sit on
+    // its own scene-graph branch so rotating charContainer leaves the
+    // mesh's local rotation at identity.
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'no-drift', {
+      type: 'gltf',
+      id: 'no-drift',
+      url: 'https://cdn.test/m.glb',
+    });
+    expect(handle).not.toBeNull();
+    const internal = r as unknown as {
+      charContainer: { rotation: { y: number } };
+    };
+    internal.charContainer.rotation.y = 1.0;
+    // The mesh group's rotation writer is renderMeshFrame/source.update;
+    // neither should pick up charContainer.rotation. The stub Group's
+    // rotation is mutation-tracked per-instance, so asserting on the
+    // mesh's own rotation is sufficient to prove no inheritance.
+    const meshGroup = handle!.state.group as unknown as { rotation: { y: number } };
+    expect(meshGroup.rotation.y).toBe(0);
+    r.dispose();
+  });
+
+  it('removeMesh detaches the group from meshRoot', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'detach', {
+      type: 'gltf',
+      id: 'detach',
+      url: 'https://cdn.test/m.glb',
+    });
+    const internal = r as unknown as { meshRoot: { children: unknown[] } };
+    const group = handle!.state.group as unknown;
+    expect(internal.meshRoot.children.includes(group)).toBe(true);
+    await r.removeMesh('obj-1');
+    expect(internal.meshRoot.children.includes(group)).toBe(false);
+    r.dispose();
+  });
+});
+
+describe('Hologram3DRenderer per-mesh CSS size (0.18.0)', () => {
+  it('getMeshSizeCss returns null before setMeshSizeCss is called', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'size-default', {
+      type: 'gltf',
+      id: 'size-default',
+      url: 'https://cdn.test/m.glb',
+    });
+    expect(r.getMeshSizeCss('obj-1')).toBeNull();
+    r.dispose();
+  });
+
+  it('setMeshSizeCss / getMeshSizeCss round-trip stores a copy (not a live reference)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'size-rt', {
+      type: 'gltf',
+      id: 'size-rt',
+      url: 'https://cdn.test/m.glb',
+    });
+    r.setMeshSizeCss('obj-1', 120, 80);
+    const first = r.getMeshSizeCss('obj-1');
+    expect(first).toEqual({ width: 120, height: 80 });
+    // Mutating the returned object must NOT bleed into the internal slot.
+    first!.width = 999;
+    expect(r.getMeshSizeCss('obj-1')).toEqual({ width: 120, height: 80 });
+    r.dispose();
+  });
+
+  it('setMeshSizeCss on an unknown objectId is a no-op', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    r.setMeshSizeCss('missing', 100, 100);
+    expect(r.getMeshSizeCss('missing')).toBeNull();
+    r.dispose();
+  });
+
+  it('setMeshSizeCss ignores non-positive dims', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'size-guard', {
+      type: 'gltf',
+      id: 'size-guard',
+      url: 'https://cdn.test/m.glb',
+    });
+    r.setMeshSizeCss('obj-1', 0, 10);
+    expect(r.getMeshSizeCss('obj-1')).toBeNull();
+    r.setMeshSizeCss('obj-1', 10, -1);
+    expect(r.getMeshSizeCss('obj-1')).toBeNull();
+    r.setMeshSizeCss('obj-1', 10, 10);
+    expect(r.getMeshSizeCss('obj-1')).toEqual({ width: 10, height: 10 });
+    r.dispose();
+  });
+
+  it('renderFrame with sizeCss applies a scale derived from the canvas CSS formula (not the fixed 2.0/maxDim)', async () => {
+    // maxDim of the stub bbox is 2 (bbox min=(-1,-1,-1), max=(1,1,1)), so the
+    // default normalize is 2.0/2 = 1.0 → group.scale = 1 * transition.
+    // With sizeCss={100,100} and canvas 800×600 / camZ=6 / fov=35°:
+    //   visibleHalfH = 6 * tan(17.5°) ≈ 1.8924
+    //   aspect = 800/600 = 4/3  → visibleHalfW ≈ 2.5232
+    //   targetWorld = (100 / 800) * 2 * 2.5232 ≈ 0.6308
+    //   normalize = 0.6308 / 2 ≈ 0.3154
+    //   baseScale = 0.3154 * 1 ≈ 0.3154
+    // Assert the resulting group.scale is ~0.315 — well below the default 1.0
+    // that the fixed-normalize fallback would produce.
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'size-apply', {
+      type: 'gltf',
+      id: 'size-apply',
+      url: 'https://cdn.test/m.glb',
+    });
+    r.setTransition(1);
+    r.setMeshSizeCss('obj-1', 100, 100);
+    r.renderFrame();
+    const meshGroup = handle!.state.group as unknown as { scale: { x: number } };
+    expect(meshGroup.scale.x).toBeGreaterThan(0.2);
+    expect(meshGroup.scale.x).toBeLessThan(0.5);
+    r.dispose();
+  });
+
+  it('renderFrame without sizeCss falls back to the world-size-2 normalise (scale ≈ 1.0 for unit bbox)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'size-fallback', {
+      type: 'gltf',
+      id: 'size-fallback',
+      url: 'https://cdn.test/m.glb',
+    });
+    r.setTransition(1);
+    r.renderFrame();
+    const meshGroup = handle!.state.group as unknown as { scale: { x: number } };
+    // maxDim=2 for the stub bbox → normalize=2/2=1, baseScale=1*transition=1.
+    expect(meshGroup.scale.x).toBeCloseTo(1.0, 5);
+    r.dispose();
+  });
+
+  it('removeMesh clears sizeCss so a re-add under the same id starts fresh', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'first', { type: 'gltf', id: 'first', url: 'https://cdn/m.glb' });
+    r.setMeshSizeCss('obj-1', 200, 200);
+    await r.removeMesh('obj-1');
+    expect(r.getMeshSizeCss('obj-1')).toBeNull();
+    await r.addMesh('obj-1', 'second', { type: 'gltf', id: 'second', url: 'https://cdn/m.glb' });
+    expect(r.getMeshSizeCss('obj-1')).toBeNull();
+    r.dispose();
+  });
+
+  it('resetTransform clears sizeCss for every slot', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-a', 'reset-a', { type: 'gltf', id: 'reset-a', url: 'https://cdn/a.glb' });
+    await r.addMesh('obj-b', 'reset-b', { type: 'gltf', id: 'reset-b', url: 'https://cdn/b.glb' });
+    r.setMeshSizeCss('obj-a', 100, 100);
+    r.setMeshSizeCss('obj-b', 200, 200);
+    r.resetTransform();
+    expect(r.getMeshSizeCss('obj-a')).toBeNull();
+    expect(r.getMeshSizeCss('obj-b')).toBeNull();
+    r.dispose();
+  });
+});

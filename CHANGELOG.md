@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.0] - 2026-04-22
+
+### Added
+- `Hologram3DRenderer.meshRoot` — a new non-rotating `THREE.Group` attached as a direct child of the scene. All meshes added via `addMesh()` are now parented under `meshRoot`, isolating them from the idle-wobble rotation (`applyContainerRotationAndZoom`) that writes each frame to `charContainer`. Fixes the "media art drifts off the stroke anchor while idling" bug.
+- `Hologram3DRenderer.setMeshSizeCss(objectId, width, height)` / `getMeshSizeCss(objectId)` — per-slot CSS-size-aware mesh normalisation. When set, `renderMeshFrame` computes `targetWorld = (sizeCss.axis / canvasCss.axis) * 2 * visibleHalf` on the dominant axis and derives `normalize = targetWorld / maxDim`. Falls back to the legacy `2.0 / maxDim` when unset.
+- `Glymo.setMeshSizeCss` / `Glymo.getMeshSizeCss` — facade APIs mirroring the renderer surface so UI consumers can size a media-art mesh to match the original stroke's CSS footprint.
+- `SessionDoc.backgroundMode?: 'dark' | 'white'` — optional field. `exportSession()` persists the current theme; `loadSession()` re-emits the theme via the new `session:restore` event. Backward-compatible: older docs without the field load cleanly and surface `'dark'` as the default.
+- `'session:restore'` event on the Glymo event bus with payload `{ backgroundMode: 'dark' | 'white' }`.
+
+### Changed
+- `Glymo.setBackgroundMode` accepts the widened union `'solid' | 'transparent' | 'dark' | 'white'`. Theme values (`'dark' | 'white'`) route into session state for export; renderer values route to the renderer as before.
+- `InternalMeshSlot` now carries `sizeCss: { width: number; height: number } | null` (default `null`). `clearMesh`/`removeMesh`/`resetTransform` reset it alongside the existing `offsetCss`.
+
+### Verified
+- Grep confirmed no `blendMode: 'screen'` usage under `src/` — the white-background visibility fix is scoped entirely to `@glymo/ui` compositor layers.
+
 ## [0.17.0] - 2026-04-22
 
 ### Breaking

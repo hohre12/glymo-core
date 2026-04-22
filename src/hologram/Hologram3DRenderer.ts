@@ -91,6 +91,17 @@ interface InternalMeshSlot {
    * zoom driven by `charContainer`.
    */
   offsetCss: { x: number; y: number } | null;
+  /**
+   * Target CSS size for the mesh (0.18.0). When set, `renderMeshFrame` scales
+   * the mesh so its largest axis matches `sizeCss` in canvas CSS pixels —
+   * preserving the visual link between the user's stroke bbox and the
+   * media-art mesh it is applied to. `null` falls back to the pre-0.18.0
+   * behaviour of normalising every mesh to world size 2.0.
+   *
+   * Populated by `setMeshSizeCss(objectId, width, height)`; cleared by
+   * `disposeMeshSlot` / `resetTransform` (mesh-sizing is slot-owned state).
+   */
+  sizeCss: { width: number; height: number } | null;
 }
 
 // ── Lazy Three.js WebGPU imports ──────────────────────────────────────────────
@@ -177,6 +188,18 @@ export class Hologram3DRenderer {
   private scene: InstanceType<typeof import('three/webgpu').Scene> | null = null;
   private camera: InstanceType<typeof import('three/webgpu').PerspectiveCamera> | null = null;
   private charContainer: InstanceType<typeof import('three/webgpu').Group> | null = null;
+  /**
+   * Non-rotating parent group for media-art mesh slots. Added in 0.18.0 so
+   * meshes no longer inherit the idle-wobble (`Math.sin(elapsed*0.5)*0.3`)
+   * that `applyContainerRotationAndZoom` writes onto `charContainer` each
+   * frame. Meshes were drifting around their stroke anchor because they
+   * shared `charContainer` with the text-mode chars; moving them under
+   * `meshRoot` keeps them aligned to the original bbox centre while leaving
+   * the existing char rotation pipeline unchanged. `meshRoot` is written
+   * exclusively via per-slot `translateMeshTo` logic inside
+   * `renderMeshFrame`; `applyContainerRotationAndZoom` must never touch it.
+   */
+  private meshRoot: InstanceType<typeof import('three/webgpu').Group> | null = null;
   private pivotGroup: InstanceType<typeof import('three/webgpu').Group> | null = null;
   private loadedFont: InstanceType<typeof import('three/examples/jsm/loaders/FontLoader.js').Font> | null = null;
 
@@ -387,6 +410,10 @@ export class Hologram3DRenderer {
     this.activeMeshDrag = false;
     for (const slot of this.meshes.values()) {
       slot.offsetCss = null;
+      // 0.18.0: per-mesh CSS size is reset here too so "reset scene"
+      // genuinely returns every mesh to its default normalise-to-world-2
+      // scaling, not to the last size the caller happened to set.
+      slot.sizeCss = null;
     }
     if (this.charContainer) {
       this.charContainer.position.set(0, 0, 0);
@@ -444,6 +471,7 @@ export class Hologram3DRenderer {
       loaded: false,
       handle: null,
       offsetCss: null,
+      sizeCss: null,
     };
     this.meshes.set(objectId, slot);
 
@@ -523,10 +551,13 @@ export class Hologram3DRenderer {
     winner.uTransition = state.uTransition ?? null;
     winner.update = state.update ? state.update.bind(state) : null;
 
-    // Attach the group under charContainer so the existing rotation / zoom /
-    // spread pipeline applies untouched.
-    if (this.charContainer) {
-      this.charContainer.add(
+    // Attach the group under meshRoot (0.18.0) instead of charContainer so
+    // the mesh does NOT inherit the idle-wobble rotation the char pipeline
+    // writes onto charContainer each frame. meshRoot is a sibling group
+    // parented directly to the scene, so the projection still sees identity
+    // transform above the mesh group itself.
+    if (this.meshRoot) {
+      this.meshRoot.add(
         state.group as InstanceType<typeof import('three/webgpu').Object3D>,
       );
     }
@@ -776,6 +807,47 @@ export class Hologram3DRenderer {
     this.activeMeshDrag = false;
   }
 
+  /**
+   * Set the target CSS size for the mesh registered under `objectId`.
+   *
+   * Added in 0.18.0 to fix the "every mesh same size" bug: pre-0.18.0
+   * `renderMeshFrame` normalised every mesh to world size 2.0
+   * (`normalize = 2.0 / maxDim`) regardless of the originating stroke bbox,
+   * so a tiny stroke and a huge stroke produced the same on-screen mesh.
+   * Callers now pass the CSS dimensions of the source bbox (typically the
+   * GlymoObject's bbox.width/height after applying media art) and the
+   * renderer scales the mesh so its largest axis matches `width` or
+   * `height` in canvas CSS pixels.
+   *
+   * No-op when the slot doesn't exist — avoids silently succeeding for a
+   * caller that racing-calls setMeshSizeCss before addMesh resolves.
+   * Negative / zero dimensions are ignored with a warn — a pathological
+   * bbox should not collapse the mesh to invisible.
+   */
+  setMeshSizeCss(objectId: string, width: number, height: number): void {
+    const slot = this.meshes.get(objectId);
+    if (!slot) return;
+    if (!(width > 0) || !(height > 0)) {
+      console.warn(
+        `[Hologram3DRenderer] setMeshSizeCss ignored non-positive dims (objectId: ${objectId}, w: ${width}, h: ${height})`,
+      );
+      return;
+    }
+    slot.sizeCss = { width, height };
+  }
+
+  /**
+   * Read the target CSS size previously set by `setMeshSizeCss` for
+   * `objectId`, or `null` when no size has been set (the mesh then falls
+   * back to the world-size-2 normalisation). Returns a copy so callers
+   * cannot mutate internal state.
+   */
+  getMeshSizeCss(objectId: string): { width: number; height: number } | null {
+    const slot = this.meshes.get(objectId);
+    if (!slot || !slot.sizeCss) return null;
+    return { ...slot.sizeCss };
+  }
+
   // ── Internal: mesh-mode helpers ─────────────────────────────────────────────
 
   private createMeshSource(descriptor: MeshSourceDescriptor): MeshSource {
@@ -804,8 +876,10 @@ export class Hologram3DRenderer {
       }
       slot.attachCleanup = null;
     }
-    if (slot.state && this.charContainer) {
-      this.charContainer.remove(
+    // Detach from meshRoot (0.18.0) — slots are now parented there, not
+    // under charContainer.
+    if (slot.state && this.meshRoot) {
+      this.meshRoot.remove(
         slot.state.group as InstanceType<typeof import('three/webgpu').Object3D>,
       );
     }
@@ -822,6 +896,10 @@ export class Hologram3DRenderer {
     slot.update = null;
     slot.handle = null;
     slot.loaded = false;
+    // sizeCss reset is part of the 0.18.0 per-mesh sizing contract (Change 2):
+    // cleared meshes must not leak a prior asset's target size into a later
+    // slot under the same objectId.
+    slot.sizeCss = null;
   }
 
   /** Find the nearest char to a CSS point using 3D raycasting, returns {id, dist} or null */
@@ -1168,7 +1246,51 @@ export class Hologram3DRenderer {
         bb.max.y - bb.min.y,
         bb.max.z - bb.min.z,
       );
-      const normalize = maxDim > 0 ? 2.0 / maxDim : 1.0;
+      // Cache visibleHalf{W,H} here — both the sizeCss branch and the
+      // offsetCss branch below need the same camera-frustum projection, so
+      // computing it once per slot per frame is the canonical path.
+      let visibleHalfH = 0;
+      let visibleHalfW = 0;
+      let canvasCssW = 0;
+      let canvasCssH = 0;
+      if (this.camera && this.canvas) {
+        canvasCssW = this.canvas.clientWidth;
+        canvasCssH = this.canvas.clientHeight;
+        const camZ = 6 / this.zoom;
+        const fovRad = (35 * Math.PI) / 180;
+        visibleHalfH = camZ * Math.tan(fovRad / 2);
+        visibleHalfW = visibleHalfH * this.camera.aspect;
+      }
+
+      // Per-mesh CSS size (0.18.0). When sizeCss is set, scale the mesh so
+      // its largest axis matches the caller-supplied CSS dimension — this
+      // keeps the media-art asset visually proportional to the source
+      // stroke bbox. Falls back to the historical world-size-2
+      // normalisation when sizeCss is null (no size wired, or caller opted
+      // out).
+      let normalize: number;
+      if (
+        slot.sizeCss &&
+        canvasCssW > 0 &&
+        canvasCssH > 0 &&
+        maxDim > 0 &&
+        visibleHalfW > 0 &&
+        visibleHalfH > 0
+      ) {
+        // Match the axis we use for maxDim — we pick the longer source axis
+        // and map it into world units via the corresponding visibleHalf.
+        // Horizontal strokes (width >= height) use the W axis; vertical
+        // strokes use the H axis. This mirrors how `maxDim` itself is the
+        // mesh's largest bbox side and keeps the scale ratio consistent.
+        const useWidthAxis = slot.sizeCss.width >= slot.sizeCss.height;
+        const targetCss = useWidthAxis ? slot.sizeCss.width : slot.sizeCss.height;
+        const canvasCss = useWidthAxis ? canvasCssW : canvasCssH;
+        const visibleHalf = useWidthAxis ? visibleHalfW : visibleHalfH;
+        const targetWorld = (targetCss / canvasCss) * 2 * visibleHalf;
+        normalize = targetWorld / maxDim;
+      } else {
+        normalize = maxDim > 0 ? 2.0 / maxDim : 1.0;
+      }
       const baseScale = normalize * this.transition;
       group.scale.set(baseScale, baseScale, baseScale);
 
@@ -1182,19 +1304,11 @@ export class Hologram3DRenderer {
       // without a re-translate call from the host.
       let offX = 0;
       let offY = 0;
-      if (slot.offsetCss && this.camera && this.canvas) {
-        const w = this.canvas.clientWidth;
-        const h = this.canvas.clientHeight;
-        if (w > 0 && h > 0) {
-          const camZ = 6 / this.zoom;
-          const fovRad = (35 * Math.PI) / 180;
-          const visibleHalfH = camZ * Math.tan(fovRad / 2);
-          const visibleHalfW = visibleHalfH * this.camera.aspect;
-          const ndcX = (slot.offsetCss.x / w) * 2.0 - 1.0;
-          const ndcY = -((slot.offsetCss.y / h) * 2.0 - 1.0);
-          offX = ndcX * visibleHalfW;
-          offY = ndcY * visibleHalfH;
-        }
+      if (slot.offsetCss && canvasCssW > 0 && canvasCssH > 0) {
+        const ndcX = (slot.offsetCss.x / canvasCssW) * 2.0 - 1.0;
+        const ndcY = -((slot.offsetCss.y / canvasCssH) * 2.0 - 1.0);
+        offX = ndcX * visibleHalfW;
+        offY = ndcY * visibleHalfH;
       }
 
       group.position.set(
@@ -1243,6 +1357,25 @@ export class Hologram3DRenderer {
       this.disposeMeshSlot(slot);
     }
     this.meshes.clear();
+    // meshRoot cleanup (0.18.0) — disposeMeshSlot already detached every
+    // slot's group, but a defensive clear-and-remove guarantees no stray
+    // children (e.g. a subclass or future debug aid parented directly) leak
+    // their GPU resources past dispose().
+    if (this.meshRoot) {
+      for (const child of [...this.meshRoot.children]) {
+        this.meshRoot.remove(child as InstanceType<typeof import('three/webgpu').Object3D>);
+        (child as InstanceType<typeof import('three/webgpu').Object3D>).traverse((obj) => {
+          if ((obj as any).geometry) (obj as any).geometry.dispose();
+          if ((obj as any).material) {
+            const mat = (obj as any).material;
+            if (Array.isArray(mat)) mat.forEach((m: any) => m.dispose());
+            else mat.dispose();
+          }
+        });
+      }
+      if (this.scene) this.scene.remove(this.meshRoot);
+      this.meshRoot = null;
+    }
     this.mixerClock = null;
     this.meshFrameClock = null;
     for (const [, entry] of this.charMeshes) {
@@ -1342,6 +1475,15 @@ export class Hologram3DRenderer {
       // ── Container group for all chars ────────────────
       this.charContainer = new THREE.Group();
       this.scene.add(this.charContainer);
+
+      // ── Non-rotating parent for media-art mesh slots (0.18.0) ──
+      // Separate from `charContainer` so media-art meshes are not driven by
+      // the idle-wobble rotation that `applyContainerRotationAndZoom` writes
+      // onto `charContainer` every frame. Meshes are parented here in
+      // `addMesh`; per-frame scale/position is written in `renderMeshFrame`.
+      this.meshRoot = new THREE.Group();
+      this.meshRoot.name = 'meshRoot';
+      this.scene.add(this.meshRoot);
 
       // ── Pivot indicator: subtle crosshair at rotation center ──
       this.pivotGroup = new THREE.Group();

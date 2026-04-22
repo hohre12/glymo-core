@@ -68,6 +68,15 @@ export class Glymo {
 
   private backgroundMode: 'solid' | 'transparent' = 'solid';
   private backgroundColor = '#000000';
+  /**
+   * Session-level background theme (0.18.0). Persisted in
+   * {@link SessionDoc.backgroundMode} and re-emitted on `session:restore`
+   * so the consumer app can re-apply its visual theme after a reload.
+   * Distinct from `backgroundMode` above, which is the renderer's
+   * solid-vs-transparent canvas-clear axis. `core` does not interpret this
+   * value; it is a tagged pass-through for the UI's theme vocabulary.
+   */
+  private sessionBackgroundMode: 'dark' | 'white' = 'dark';
 
   private strokes: Stroke[] = [];
   private fills: Fill[] = [];
@@ -113,6 +122,17 @@ export class Glymo {
 
   // Set via setMeshHitTestFn — null when no host renderer is registered.
   private meshHitTestFn: ((x: number, y: number) => string | null) | null = null;
+
+  /**
+   * Per-object target CSS size for media-art meshes (0.18.0). Mirror store
+   * of the renderer-side slot's `sizeCss`: kept here so the Glymo facade
+   * can expose `setMeshSizeCss` / `getMeshSizeCss` without depending on the
+   * UI-owned `Hologram3DRenderer` instance (the renderer lives in
+   * `@glymo/core` but is instantiated by the UI layer on its own canvas).
+   * The UI wires the value into the renderer via the Hologram3DRenderer's
+   * own `setMeshSizeCss` (same-name, same signature) after persisting here.
+   */
+  private meshSizeCssStore = new Map<string, { width: number; height: number }>();
 
   // Selection & Correction
   private readonly selectionManager: SelectionManager;
@@ -852,6 +872,38 @@ export class Glymo {
   }
 
   /**
+   * Record the target CSS size for a media-art mesh applied to `objectId`
+   * (0.18.0). The UI layer calls this after applying media art so the
+   * renderer can scale the mesh proportionally to the underlying stroke
+   * bbox instead of normalising every asset to world size 2.
+   *
+   * `core` stores the value on {@link Glymo} and the UI-owned
+   * `Hologram3DRenderer` mirrors it through its own same-named
+   * `setMeshSizeCss(objectId, width, height)` — matching the existing
+   * `translateMeshTo` / `getMeshOffsetCss` split where the renderer owns
+   * the projection math while `core` owns the public surface.
+   *
+   * Non-positive dimensions are silently ignored — a pathological bbox
+   * should not collapse the mesh to invisible.
+   */
+  setMeshSizeCss(objectId: string, width: number, height: number): void {
+    this.assertNotDestroyed();
+    if (!(width > 0) || !(height > 0)) return;
+    this.meshSizeCssStore.set(objectId, { width, height });
+  }
+
+  /**
+   * Read the target CSS size previously set by `setMeshSizeCss` for
+   * `objectId`, or `null` when no size has been recorded. Returns a copy
+   * so callers cannot mutate internal state.
+   */
+  getMeshSizeCss(objectId: string): { width: number; height: number } | null {
+    this.assertNotDestroyed();
+    const stored = this.meshSizeCssStore.get(objectId);
+    return stored ? { ...stored } : null;
+  }
+
+  /**
    * Hit-test a point and select the object at that position. Mesh-first
    * dispatch: if a host registered `setMeshHitTestFn`, a click on a
    * rendered mesh routes to that object before the stroke hit-test runs.
@@ -1183,11 +1235,30 @@ export class Glymo {
 
   // ── Background ─────────────────────────────────────
   /**
-   * Switch between a solid black background and a transparent one.
-   * Use 'transparent' when a camera video feed is shown behind the canvas.
+   * Switch canvas background mode.
+   *
+   * Two vocabularies are accepted since 0.18.0:
+   *
+   *   - `'solid' | 'transparent'` (original): toggles whether the canvas
+   *     clears to opaque black or alpha 0 so a camera video feed shows
+   *     through behind the canvas.
+   *   - `'dark' | 'white'` (0.18.0): session-level theme preference,
+   *     persisted to {@link SessionDoc.backgroundMode} and re-emitted as
+   *     `session:restore` on load. `core` does not interpret the theme
+   *     value — the UI layer routes it back through its own background
+   *     wiring (and will typically also call `setBackgroundMode('solid')`
+   *     separately to drive the renderer).
+   *
+   * Widening the existing setter — rather than adding a second public API —
+   * preserves the "one canonical path for background" contract the UI
+   * already relies on for session restore.
    */
-  setBackgroundMode(mode: 'solid' | 'transparent'): void {
+  setBackgroundMode(mode: 'solid' | 'transparent' | 'dark' | 'white'): void {
     this.assertNotDestroyed();
+    if (mode === 'dark' || mode === 'white') {
+      this.sessionBackgroundMode = mode;
+      return;
+    }
     this.backgroundMode = mode;
     this.renderer.setBackgroundMode(mode);
   }
@@ -1386,6 +1457,14 @@ export class Glymo {
     if (characterDocs.length > 0) {
       doc.characters = characterDocs;
     }
+    // Session-level background theme (0.18.0). Only write the field when
+    // the session diverges from the default `'dark'`; v2 docs that predate
+    // the field load back as undefined + default to 'dark' via
+    // `session:restore`, so we keep the wire shape minimal for the common
+    // case and avoid a gratuitous diff on every saved session.
+    if (this.sessionBackgroundMode !== 'dark') {
+      doc.backgroundMode = this.sessionBackgroundMode;
+    }
     return doc;
   }
 
@@ -1515,6 +1594,15 @@ export class Glymo {
     if (restorations.length > 0) {
       this.eventBus.emit('media-art:restore', { restorations });
     }
+
+    // Session-level restore (0.18.0). Defaults `backgroundMode` to `'dark'`
+    // for v2 docs that predate the field so subscribers always receive a
+    // concrete value rather than undefined. Updates the in-engine
+    // `sessionBackgroundMode` slot so a subsequent `exportSession` round-
+    // trips the same value the consumer is about to re-apply.
+    const restoredBackgroundMode: 'dark' | 'white' = doc.backgroundMode ?? 'dark';
+    this.sessionBackgroundMode = restoredBackgroundMode;
+    this.eventBus.emit('session:restore', { backgroundMode: restoredBackgroundMode });
   }
 
   /**
