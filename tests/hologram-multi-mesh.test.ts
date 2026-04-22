@@ -138,6 +138,7 @@ const stubs = vi.hoisted(() => {
   stubTslNode.normalize = (): unknown => stubTslNode;
   Object.defineProperty(stubTslNode, 'y', { get: () => stubTslNode });
   Object.defineProperty(stubTslNode, 'a', { get: () => stubTslNode });
+  Object.defineProperty(stubTslNode, 'rgb', { get: () => stubTslNode });
 
   return {
     StubObject3D,
@@ -232,6 +233,7 @@ vi.mock('three/tsl', () => {
     pass: () => ({
       getTextureNode: () => stubs.stubTslNode,
     }),
+    vec4: () => stubs.stubTslNode,
   };
 });
 

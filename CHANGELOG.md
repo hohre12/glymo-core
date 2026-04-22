@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] - 2026-04-22
+
+### Fixed
+- `Hologram3DRenderer.renderMeshFrame` now normalises per-mesh scale by the chosen axis's **mesh** bbox extent instead of the overall `maxDim = max(x, y, z)`. Pre-0.19 assets whose deepest bbox axis was Z (e.g. a standing avocado, a quadruped GLB) rendered visibly smaller than the originating stroke because the scale ratio was computed against Z even though the stroke only constrains width or height. Now the mesh's X extent matches the stroke's width when `width >= height`, and Y extent matches when `height > width`.
+- `Hologram3DRenderer` PostProcessing output node now explicitly preserves scene alpha: `outputNode = vec4(sceneColor.rgb.add(bloomPass.rgb), sceneColor.a)`. The previous `sceneColor.add(bloomPass)` form clobbered the framebuffer alpha to 1 across the entire WebGPU canvas because `bloomPass` carries its own alpha channel. Under the `@glymo/ui` compositor's `source-over` blend (introduced in 0.29.0 to prevent `screen`-blend white saturation), an opaque WebGPU canvas covered the 2D drawing layer — the reported "apply media-art → strokes disappear + black background" multi-mesh regression. Splitting colour from alpha here keeps empty pixels transparent so the hologram canvas overlays the drawing canvas non-destructively.
+
+### Added
+- `computeMeshNormalize(input: MeshNormalizeInput): number` — pure helper extracted from `renderMeshFrame` so the CSS-size-to-world-scale math is unit-testable without spinning up a WebGPU renderer. Covered by 8 regression tests in `src/hologram/__tests__/computeMeshNormalize.test.ts` including the deep-Z "standing avocado" case that motivated the fix. Non-breaking — the renderer delegates to the helper internally; nothing in the public API changed.
+
+### Notes
+- The alpha-preservation fix cannot be meaningfully covered by JSDOM unit tests because the TSL output node is opaque at the JS level — the bug only surfaces under a real WebGPU runtime where vec4 channel semantics take effect. Regression coverage for this class of bug belongs in an end-to-end visual-regression suite (Playwright snapshot on a white-background Studio page). Tracking as a documentation gap in the Playwright backlog.
+
 ## [0.18.0] - 2026-04-22
 
 ### Added

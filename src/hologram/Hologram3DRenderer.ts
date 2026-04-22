@@ -176,6 +176,60 @@ function needsTextureFallback(char: string): boolean {
       || (code >= 0x3040 && code <= 0x30FF);
 }
 
+// ── Per-mesh normalize scalar ─────────────────────────────────────────────────
+//
+// Pure computation extracted from `renderMeshFrame` (0.19.0) so the
+// CSS-size-to-world-scale math is unit-testable without spinning up a WebGPU
+// renderer. The regression it exists to pin down: pre-0.19 the `sizeCss` path
+// normalised by `Math.max(bb width, bb height, bb depth)` — for any mesh whose
+// deepest extent is Z (standing avocado, quadruped, tall building) this
+// shrunk the rendered width/height well below the source stroke bbox. The
+// correct scale ratio picks the SAME axis on both the stroke bbox
+// (width vs height) and the mesh bbox (x vs y), so the visible silhouette
+// matches what the user drew.
+//
+// Inputs are plain numbers + a Box3-shaped bbox (not a real three.js Box3) so
+// this helper has zero runtime three.js dependency and runs in JSDOM.
+export interface MeshNormalizeInput {
+  sizeCss: { width: number; height: number } | null;
+  canvasCssW: number;
+  canvasCssH: number;
+  visibleHalfW: number;
+  visibleHalfH: number;
+  bb: {
+    min: { x: number; y: number; z: number };
+    max: { x: number; y: number; z: number };
+  };
+}
+
+export function computeMeshNormalize(input: MeshNormalizeInput): number {
+  const { sizeCss, canvasCssW, canvasCssH, visibleHalfW, visibleHalfH, bb } = input;
+  const maxDim = Math.max(
+    bb.max.x - bb.min.x,
+    bb.max.y - bb.min.y,
+    bb.max.z - bb.min.z,
+  );
+  if (
+    sizeCss &&
+    canvasCssW > 0 &&
+    canvasCssH > 0 &&
+    maxDim > 0 &&
+    visibleHalfW > 0 &&
+    visibleHalfH > 0
+  ) {
+    const useWidthAxis = sizeCss.width >= sizeCss.height;
+    const targetCss = useWidthAxis ? sizeCss.width : sizeCss.height;
+    const canvasCss = useWidthAxis ? canvasCssW : canvasCssH;
+    const visibleHalf = useWidthAxis ? visibleHalfW : visibleHalfH;
+    const targetWorld = (targetCss / canvasCss) * 2 * visibleHalf;
+    const meshAxis = useWidthAxis
+      ? bb.max.x - bb.min.x
+      : bb.max.y - bb.min.y;
+    return meshAxis > 0 ? targetWorld / meshAxis : targetWorld / maxDim;
+  }
+  return maxDim > 0 ? 2.0 / maxDim : 1.0;
+}
+
 // ── Renderer Class ────────────────────────────────────────────────────────────
 
 export class Hologram3DRenderer {
@@ -1241,11 +1295,6 @@ export class Hologram3DRenderer {
       // via setTransition) until task 3.x migrates entry/exit to the
       // per-object media-art transition API.
       const bb = state.bbox;
-      const maxDim = Math.max(
-        bb.max.x - bb.min.x,
-        bb.max.y - bb.min.y,
-        bb.max.z - bb.min.z,
-      );
       // Cache visibleHalf{W,H} here — both the sizeCss branch and the
       // offsetCss branch below need the same camera-frustum projection, so
       // computing it once per slot per frame is the canonical path.
@@ -1263,34 +1312,20 @@ export class Hologram3DRenderer {
       }
 
       // Per-mesh CSS size (0.18.0). When sizeCss is set, scale the mesh so
-      // its largest axis matches the caller-supplied CSS dimension — this
-      // keeps the media-art asset visually proportional to the source
-      // stroke bbox. Falls back to the historical world-size-2
-      // normalisation when sizeCss is null (no size wired, or caller opted
-      // out).
-      let normalize: number;
-      if (
-        slot.sizeCss &&
-        canvasCssW > 0 &&
-        canvasCssH > 0 &&
-        maxDim > 0 &&
-        visibleHalfW > 0 &&
-        visibleHalfH > 0
-      ) {
-        // Match the axis we use for maxDim — we pick the longer source axis
-        // and map it into world units via the corresponding visibleHalf.
-        // Horizontal strokes (width >= height) use the W axis; vertical
-        // strokes use the H axis. This mirrors how `maxDim` itself is the
-        // mesh's largest bbox side and keeps the scale ratio consistent.
-        const useWidthAxis = slot.sizeCss.width >= slot.sizeCss.height;
-        const targetCss = useWidthAxis ? slot.sizeCss.width : slot.sizeCss.height;
-        const canvasCss = useWidthAxis ? canvasCssW : canvasCssH;
-        const visibleHalf = useWidthAxis ? visibleHalfW : visibleHalfH;
-        const targetWorld = (targetCss / canvasCss) * 2 * visibleHalf;
-        normalize = targetWorld / maxDim;
-      } else {
-        normalize = maxDim > 0 ? 2.0 / maxDim : 1.0;
-      }
+      // the user's drawn axis (width vs height of the stroke bbox) matches
+      // the caller-supplied CSS dimension. Extracted into `computeMeshNormalize`
+      // in 0.19.0 so the maxDim-vs-per-axis regression is pinned by unit tests.
+      const normalize = computeMeshNormalize({
+        sizeCss: slot.sizeCss,
+        canvasCssW,
+        canvasCssH,
+        visibleHalfW,
+        visibleHalfH,
+        bb: {
+          min: { x: bb.min.x, y: bb.min.y, z: bb.min.z },
+          max: { x: bb.max.x, y: bb.max.y, z: bb.max.z },
+        },
+      });
       const baseScale = normalize * this.transition;
       group.scale.set(baseScale, baseScale, baseScale);
 
@@ -1448,7 +1483,7 @@ export class Hologram3DRenderer {
       // emissive (mediaArtTSL.ts), threshold=0.7 means only the bright rim
       // pushes through, strength=1.05 keeps the rim crisp instead of
       // saturating the silhouette.
-      const { pass } = tsl;
+      const { pass, vec4 } = tsl;
       const scenePass = pass(this.scene, this.camera);
       const sceneColor = scenePass.getTextureNode('output');
       const bloomPass = bloomFn(sceneColor);
@@ -1457,7 +1492,22 @@ export class Hologram3DRenderer {
       (bloomPass as any).radius.value = 0.75;
 
       this.postProcessing = new THREE.PostProcessing(this.renderer);
-      this.postProcessing.outputNode = sceneColor.add(bloomPass);
+      // Alpha-preserving composite (0.19.0). The naive `sceneColor.add(bloomPass)`
+      // form clobbered the output alpha to 1 across the full framebuffer because
+      // `bloomPass` carries its own alpha channel and vec4+vec4 adds all four
+      // components. That made the WebGPU canvas fully opaque, and under CSS
+      // `source-over` compositing (introduced in @glymo/ui 0.29.0 to avoid
+      // the `screen`-blend white saturation) the hologram canvas covered the
+      // 2D drawing layer — the "apply media-art → strokes disappear + black
+      // background" regression user-reported on 2026-04-22. Splitting colour
+      // from alpha here keeps empty pixels transparent so the hologram canvas
+      // can sit on top of the drawing canvas without clobbering it, while the
+      // scene's own alpha still drives where the mesh + bloom halo are
+      // rendered.
+      this.postProcessing.outputNode = vec4(
+        sceneColor.rgb.add(bloomPass.rgb),
+        sceneColor.a,
+      );
 
       // ── Load font ────────────────────────────────────
       for (const url of DEFAULT_FONT_URLS) {
