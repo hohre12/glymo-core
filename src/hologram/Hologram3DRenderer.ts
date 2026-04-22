@@ -73,6 +73,24 @@ interface InternalMeshSlot {
    * identity-compare. Null while loading; populated atomically at commit.
    */
   handle: MeshHandle | null;
+  /**
+   * Per-mesh offset in canvas CSS coordinates. `null` means the mesh renders
+   * centered at the canvas origin (default).
+   *
+   * Why per-slot and not a shared `charContainer.position`? In the multi-mesh
+   * era (v0.16+) each media-art mesh must be positioned independently —
+   * applying two assets to two different GlymoObjects should spawn them at
+   * the two objects' bbox centers, not stacked at the same point. Pre-0.17
+   * the single-mesh predecessor leaned on `charContainer.position` to move
+   * THE mesh; with N meshes that approach translates ALL of them together.
+   *
+   * Populated by `translateMeshTo(objectId, x, y)`; cleared by `resetTransform`
+   * (media-art's "reset scene" semantics). Consumed inside `renderMeshFrame`
+   * where it is composited with the per-slot bbox-centering so the mesh
+   * renders at (canvas-center + offsetCss) without disturbing rotation /
+   * zoom driven by `charContainer`.
+   */
+  offsetCss: { x: number; y: number } | null;
 }
 
 // ── Lazy Three.js WebGPU imports ──────────────────────────────────────────────
@@ -229,19 +247,26 @@ export class Hologram3DRenderer {
   private activeDragId: string | null = null;
   /**
    * Mesh single-hand pinch-grab state. `activeMeshDrag` fades the pivot
-   * indicator in during translate (same channel as two-hand `handActive`);
-   * `meshGrabPosition` records the last committed charContainer position in
-   * world units so tests and future commit paths can inspect the release
-   * value without reaching into Three.js internals. Both fields are
-   * renderer-wide — drag is inherently a single-hand affordance, so even
-   * with multi-mesh only one mesh is being dragged at a time.
+   * indicator in during translate (same channel as two-hand `handActive`).
+   * It is renderer-wide — drag is inherently a single-hand affordance, so
+   * even with multi-mesh only one mesh is being dragged at a time. The
+   * mesh's actual position lives in `InternalMeshSlot.offsetCss`, read by
+   * `renderMeshFrame` every frame; there is no separate "last grab
+   * position" snapshot because the slot IS the canonical source of truth.
    */
   private activeMeshDrag = false;
-  private meshGrabPosition: { x: number; y: number } | null = null;
 
-  /** Last committed mesh-mode grab position in world units (read by tests and future commit paths). */
-  getLastMeshGrabPosition(): { x: number; y: number } | null {
-    return this.meshGrabPosition;
+  /**
+   * Last committed mesh-mode grab position for a specific slot, or `null`
+   * when the slot doesn't exist, isn't loaded, or has never been
+   * `translateMeshTo`'d. Offered so callers (tests, future commit paths)
+   * can inspect the release value without reaching into Three.js
+   * internals. CSS coordinates — caller converts to world units if needed.
+   */
+  getMeshOffsetCss(objectId: string): { x: number; y: number } | null {
+    const slot = this.meshes.get(objectId);
+    if (!slot || !slot.loaded) return null;
+    return slot.offsetCss ? { ...slot.offsetCss } : null;
   }
 
   private startTime = performance.now();
@@ -342,7 +367,15 @@ export class Hologram3DRenderer {
     this.activeDragId = null;
   }
 
-  /** Reset all transforms to initial state */
+  /**
+   * Reset all transforms to initial state. Rotation, zoom, spread, and any
+   * active drag state are cleared. Per-slot mesh offsets (`slot.offsetCss`)
+   * are ALSO cleared so every mesh returns to the canvas center — the
+   * "reset scene" semantics users expect. `charContainer.position` is
+   * reset defensively even though the new per-mesh positioning path no
+   * longer writes to it; this keeps the container at canonical origin in
+   * case an older external caller mutated it directly.
+   */
   resetTransform(): void {
     this.rotX = 0;
     this.rotY = 0;
@@ -352,7 +385,9 @@ export class Hologram3DRenderer {
     this.movedChars.clear();
     this.activeDragId = null;
     this.activeMeshDrag = false;
-    this.meshGrabPosition = null;
+    for (const slot of this.meshes.values()) {
+      slot.offsetCss = null;
+    }
     if (this.charContainer) {
       this.charContainer.position.set(0, 0, 0);
     }
@@ -408,6 +443,7 @@ export class Hologram3DRenderer {
       loadToken: token,
       loaded: false,
       handle: null,
+      offsetCss: null,
     };
     this.meshes.set(objectId, slot);
 
@@ -689,38 +725,39 @@ export class Hologram3DRenderer {
 
   /**
    * Translate the mesh registered under `objectId` so its visual center
-   * tracks the supplied CSS point. Implemented as a charContainer
-   * translation — the mesh group is a child of charContainer and the
-   * renderMeshFrame pass keeps the mesh self-centered inside that container,
-   * so moving the container moves the mesh without disturbing the rotation
-   * pivot.
+   * tracks the supplied CSS point (in canvas-local coordinates).
+   *
+   * Per-mesh semantics. Sets ONLY `slot.offsetCss` for this objectId — the
+   * actual group.position write happens inside `renderMeshFrame`, which
+   * composites the bbox-centering offset with the per-slot CSS offset every
+   * frame. This preserves three invariants:
+   *
+   *   1. Other meshes are not moved. Pre-0.17 the predecessor implementation
+   *      mutated `charContainer.position`, which is a SHARED parent of every
+   *      mesh group — a single translateMeshTo therefore translated every
+   *      mesh on the scene. The multi-mesh era (v0.16+) requires independent
+   *      positioning, so the offset now lives per-slot.
+   *   2. Rotation / zoom driven by `charContainer` continue to apply to the
+   *      moved mesh (the mesh group is still a child of charContainer, just
+   *      not at container-local origin).
+   *   3. Per-frame bbox-centering still runs — the offset is added to the
+   *      centering term inside the loop rather than replacing it, so meshes
+   *      with asymmetric bboxes (e.g. planets with clouds) remain centered
+   *      on the translated point instead of drifting by half their bbox.
    *
    * No-op when the slot doesn't exist / isn't loaded, or when the renderer
-   * has not finished initialising (camera/canvas/container all need to be
-   * live).
+   * has not finished initialising.
    */
   translateMeshTo(objectId: string, x: number, y: number): void {
     const slot = this.meshes.get(objectId);
     if (!slot || !slot.loaded) return;
-    if (!this.camera || !this.canvas || !this.charContainer) return;
+    if (!this.camera || !this.canvas) return;
 
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
     if (w <= 0 || h <= 0) return;
 
-    // Same CSS → world projection used by the text-mode active-drag path
-    // (see renderFrame L607-611 / L636-637).
-    const camZ = 6 / this.zoom;
-    const fovRad = 35 * Math.PI / 180;
-    const visibleHalfH = camZ * Math.tan(fovRad / 2);
-    const visibleHalfW = visibleHalfH * this.camera.aspect;
-    const ndcX = (x / w) * 2.0 - 1.0;
-    const ndcY = -((y / h) * 2.0 - 1.0);
-    const worldX = ndcX * visibleHalfW;
-    const worldY = ndcY * visibleHalfH;
-
-    this.charContainer.position.set(worldX, worldY, 0);
-    this.meshGrabPosition = { x: worldX, y: worldY };
+    slot.offsetCss = { x, y };
   }
 
   /**
@@ -1138,7 +1175,33 @@ export class Hologram3DRenderer {
       const cx = (bb.max.x + bb.min.x) * 0.5;
       const cy = (bb.max.y + bb.min.y) * 0.5;
       const cz = (bb.max.z + bb.min.z) * 0.5;
-      group.position.set(-cx * baseScale, -cy * baseScale, -cz * baseScale);
+
+      // Per-mesh CSS offset (set by translateMeshTo). Converting once per
+      // frame here — rather than caching world units at translate time —
+      // lets window resizes / zoom changes re-project the same CSS anchor
+      // without a re-translate call from the host.
+      let offX = 0;
+      let offY = 0;
+      if (slot.offsetCss && this.camera && this.canvas) {
+        const w = this.canvas.clientWidth;
+        const h = this.canvas.clientHeight;
+        if (w > 0 && h > 0) {
+          const camZ = 6 / this.zoom;
+          const fovRad = (35 * Math.PI) / 180;
+          const visibleHalfH = camZ * Math.tan(fovRad / 2);
+          const visibleHalfW = visibleHalfH * this.camera.aspect;
+          const ndcX = (slot.offsetCss.x / w) * 2.0 - 1.0;
+          const ndcY = -((slot.offsetCss.y / h) * 2.0 - 1.0);
+          offX = ndcX * visibleHalfW;
+          offY = ndcY * visibleHalfH;
+        }
+      }
+
+      group.position.set(
+        -cx * baseScale + offX,
+        -cy * baseScale + offY,
+        -cz * baseScale,
+      );
     }
   }
 

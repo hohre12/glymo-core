@@ -692,6 +692,18 @@ export class Glymo {
     this.objectStore.addFillToObject(objectId, fill.id);
   }
 
+  /**
+   * Look up a GlymoObject by its id. Returns the live reference — callers
+   * SHOULD NOT mutate the returned bbox / strokeIds / fillIds arrays
+   * directly; use `translateObject` or the appropriate mutation API. Host
+   * code (e.g. the media-art apply path in CanvasEngine) reads this to
+   * compute the bbox center so a newly-loaded mesh can be positioned at
+   * the object's canvas location instead of at the scene origin.
+   */
+  getObject(id: string): GlymoObject | undefined {
+    return this.objectStore.getObject(id);
+  }
+
   /** Find the GlymoObject that contains a specific stroke */
   getObjectByStrokeId(strokeId: string): GlymoObject | undefined {
     return this.objectStore.getObjectByStrokeId(strokeId);

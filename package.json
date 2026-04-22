@@ -1,6 +1,6 @@
 {
   "name": "@glymo/core",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Hand-powered creative toolkit for the browser. Hand tracking + artistic effects + gesture control in one library.",
   "type": "module",
   "main": "./dist/glymo.js",

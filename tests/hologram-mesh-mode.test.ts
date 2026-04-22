@@ -476,15 +476,22 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
     r.dispose();
   });
 
-  it('translateMeshTo moves charContainer.position for a loaded mesh', async () => {
+  it('translateMeshTo stores a per-slot CSS offset for a loaded mesh (no charContainer mutation)', async () => {
+    // v0.17 per-mesh positioning: the offset is stored on the InternalMeshSlot
+    // and applied inside renderMeshFrame. charContainer.position MUST stay at
+    // origin so other meshes — which share the same parent container — are
+    // not dragged along with this one.
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.addMesh('obj-1', 'translate', { type: 'gltf', id: 'translate', url: 'https://cdn/m.glb' });
     r.grabMesh('obj-1');
-    // Upper-right of the 800×600 mock canvas — positive NDC X, positive NDC Y.
     r.translateMeshTo('obj-1', 700, 100);
+    const offset = r.getMeshOffsetCss('obj-1');
+    expect(offset).not.toBeNull();
+    expect(offset!.x).toBe(700);
+    expect(offset!.y).toBe(100);
     const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
-    expect(container.position.x).toBeGreaterThan(0);
-    expect(container.position.y).toBeGreaterThan(0);
+    expect(container.position.x).toBe(0);
+    expect(container.position.y).toBe(0);
     expect(container.position.z).toBe(0);
     r.dispose();
   });
@@ -492,27 +499,44 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
   it('translateMeshTo is a no-op when the slot is absent', async () => {
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.ready;
-    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } | null }).charContainer;
-    const before = { x: container?.position.x ?? 0, y: container?.position.y ?? 0 };
     r.translateMeshTo('obj-1', 500, 200);
-    expect(container?.position.x).toBe(before.x);
-    expect(container?.position.y).toBe(before.y);
+    expect(r.getMeshOffsetCss('obj-1')).toBeNull();
+    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } | null }).charContainer;
+    expect(container?.position.x ?? 0).toBe(0);
+    expect(container?.position.y ?? 0).toBe(0);
     r.dispose();
   });
 
-  it('grab → translate → release keeps the final position on the group', async () => {
+  it('grab → translate → release keeps the slot offset intact (not cleared by release)', async () => {
+    // Release only drops the renderer-wide `activeMeshDrag` flag. The slot's
+    // offsetCss is deliberately preserved so the mesh stays where the user
+    // dropped it — future grabs re-anchor on translateMeshTo, and
+    // resetTransform is the escape hatch that clears every slot's offset.
     const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
     await r.addMesh('obj-1', 'seq', { type: 'gltf', id: 'seq', url: 'https://cdn/m.glb' });
     expect(r.grabMesh('obj-1')).toBe(true);
     r.translateMeshTo('obj-1', 600, 200);
-    const container = (r as unknown as { charContainer: { position: { x: number; y: number; z: number } } }).charContainer;
-    const committed = { x: container.position.x, y: container.position.y };
-    expect(committed.x).not.toBe(0);
+    const committed = r.getMeshOffsetCss('obj-1');
+    expect(committed).toEqual({ x: 600, y: 200 });
     r.releaseMesh();
-    // Position is persisted by the Three.js Group — release only clears the
-    // internal drag flag, it does not rewind translation.
-    expect(container.position.x).toBe(committed.x);
-    expect(container.position.y).toBe(committed.y);
+    expect(r.getMeshOffsetCss('obj-1')).toEqual(committed);
+    r.dispose();
+  });
+
+  it('translateMeshTo on one mesh does NOT move another mesh on the same renderer', async () => {
+    // Regression lock for the 2026-04-22 "center-of-screen" bug: prior to
+    // v0.17 translateMeshTo mutated the shared charContainer.position, which
+    // dragged every mesh together. This test spawns two meshes and asserts
+    // that moving one leaves the other's offset untouched.
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-a', 'multi-a', { type: 'gltf', id: 'multi-a', url: 'https://cdn/a.glb' });
+    await r.addMesh('obj-b', 'multi-b', { type: 'gltf', id: 'multi-b', url: 'https://cdn/b.glb' });
+    r.translateMeshTo('obj-a', 200, 150);
+    expect(r.getMeshOffsetCss('obj-a')).toEqual({ x: 200, y: 150 });
+    expect(r.getMeshOffsetCss('obj-b')).toBeNull();
+    r.translateMeshTo('obj-b', 600, 450);
+    expect(r.getMeshOffsetCss('obj-a')).toEqual({ x: 200, y: 150 });
+    expect(r.getMeshOffsetCss('obj-b')).toEqual({ x: 600, y: 450 });
     r.dispose();
   });
 

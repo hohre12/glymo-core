@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.0] - 2026-04-22
+
+### Breaking
+- `Hologram3DRenderer.translateMeshTo(objectId, x, y)` semantics changed: it no longer mutates the shared `charContainer.position`. Instead it stores a per-slot CSS-space offset (`slot.offsetCss = { x, y }`) on the `InternalMeshSlot`. The renderer frame loop composes each mesh's bbox-centred world position with its own offset, so multiple meshes on the same scene can sit at independent positions. This fixes the "move one mesh, all meshes follow" bug that blocked multi-object media art from the 0.16.0 multi-mesh API.
+- `getLastMeshGrabPosition()` removed. Replaced by `getMeshOffsetCss(objectId): { x: number; y: number } | null` — same shape, but per-object.
+
+### Added
+- `Glymo.getObject(id: string): GlymoObject | undefined` — public accessor over `objectStore.getObject`. UI consumers need the live bbox to position a mesh at the stroked object's centre (see `@glymo/ui@0.28.0` `CanvasEngine.applyMediaArt` wiring).
+
+### Fixed
+- `resetTransform` now clears every slot's `offsetCss` in addition to the legacy fields. Previously a `resetTransform` call between two media-art applies could leave a stale offset on a slot that survived the reset.
+
 ## [0.16.0] - 2026-04-22
 
 ### Breaking
