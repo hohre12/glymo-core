@@ -964,7 +964,14 @@ export class Glymo {
    */
   setObjectMetadata(objectId: string, key: string, value: unknown): boolean {
     this.assertNotDestroyed();
-    return this.objectStore.updateMetadata(objectId, key, value);
+    const applied = this.objectStore.updateMetadata(objectId, key, value);
+    // Any public metadata change may be render-affecting (e.g., `mediaArt`
+    // triggers the render-layer skip guards at src/render/layers/completed.ts
+    // and fill.ts). Invalidate the offscreen cache on success so the next
+    // frame reflects the change. Internal high-level methods (`polishObject`,
+    // `revertCorrection`) bypass this wrapper and call `markDirty` themselves.
+    if (applied) this.renderer.markDirty();
+    return applied;
   }
 
   /**

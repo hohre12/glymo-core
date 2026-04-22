@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `selectObjectAtPoint` is now mesh-first → stroke-fallback. When a mesh hit-tester is registered and returns a live object id, selection routes there; otherwise the existing stroke hit-test runs unchanged. Also: `selectObject` / `selectObjectAtPoint` are now strict single-select (previous selection cleared before the new one).
 - `CanvasRenderer` skips strokes and fills whose owning `GlymoObject` has `metadata.mediaArt` set. Rendering of those objects is delegated to `Hologram3DRenderer`. The 2D cache guard is a no-op when `objectStore` is absent, preserving backward compat for callers that don't pass one.
 - A stale mesh id returned by the host hit-tester now logs a `[Glymo] selectObjectAtPoint: mesh hit-tester returned unknown objectId "X" — falling through to stroke hit-test` warning (matches the existing `selectObject` warning style) and proceeds to the stroke fallback instead of silently no-op'ing.
+- `Glymo.setObjectMetadata` now invalidates the 2D cache on success (single-call semantics for external callers). Internal methods `polishObject` / `revertCorrection` that bypass the public wrapper retain their explicit `markDirty` call.
 
 ## [0.15.1] - 2026-04-21
 
