@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] - 2026-04-22
+
+### Breaking
+- `Hologram3DRenderer.setModel` removed. Use `addMesh(objectId, modelId, descriptor)` / `removeMesh(objectId)` instead — the renderer now manages N concurrent meshes keyed by object id.
+- `releaseMesh()` no longer accepts an advisory `objectId` argument — it always releases the legacy single-mesh slot. Multi-mesh callers use `removeMesh(objectId)`.
+- `isMeshAnimationPaused(objectId)` now returns `boolean | null` (null when no mesh is mounted for the given id), symmetric with `toggleMeshAnimation`.
+
+### Added
+- `Hologram3DRenderer.addMesh(objectId, modelId, descriptor, ctx?)` / `removeMesh(objectId)` / `getMesh(objectId)` / `getAllMeshIds()` / `hasAnyMesh()` — N-mesh renderer API.
+- `Hologram3DRenderer.hitTestMeshForSelection(cssX, cssY): string | null` — nearest-mesh pick for host-driven selection dispatch.
+- `Glymo.setMeshHitTestFn(fn | null)` — host-provided mesh hit-tester. `selectObjectAtPoint` consults it before falling through to stroke hit-test.
+- `MeshHandle` type exported from `@glymo/core`.
+- `media-art:restore` event emitted by `loadSession` with `{ restorations: [{ objectId, modelId, sourceLabel }] }` for every object whose SessionDoc metadata carries `mediaArt`. UI consumers subscribe to reconstruct 3D meshes on session reload.
+
+### Changed
+- `selectObjectAtPoint` is now mesh-first → stroke-fallback. When a mesh hit-tester is registered and returns a live object id, selection routes there; otherwise the existing stroke hit-test runs unchanged. Also: `selectObject` / `selectObjectAtPoint` are now strict single-select (previous selection cleared before the new one).
+- `CanvasRenderer` skips strokes and fills whose owning `GlymoObject` has `metadata.mediaArt` set. Rendering of those objects is delegated to `Hologram3DRenderer`. The 2D cache guard is a no-op when `objectStore` is absent, preserving backward compat for callers that don't pass one.
+- A stale mesh id returned by the host hit-tester now logs a `[Glymo] selectObjectAtPoint: mesh hit-tester returned unknown objectId "X" — falling through to stroke hit-test` warning (matches the existing `selectObject` warning style) and proceeds to the stroke fallback instead of silently no-op'ing.
+
 ## [0.15.1] - 2026-04-21
 
 ### Fixed — English text-mode spatial grouping regression
