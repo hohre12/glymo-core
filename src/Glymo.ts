@@ -908,11 +908,22 @@ export class Glymo {
    * dispatch: if a host registered `setMeshHitTestFn`, a click on a
    * rendered mesh routes to that object before the stroke hit-test runs.
    * When no mesh is hit (or no mesh tester is registered) the stroke
-   * fallback restores the previous drawing-mode selection behaviour.
+   * fallback handles drawing-mode hit-testing.
    *
-   * Single-select: selecting a new object clears the previous selection.
-   * The old toggle semantics (click twice = deselect) are retired as of
-   * 0.16.0 because media-art workflows always target exactly one object.
+   * Selection semantics (restored in 0.20.0):
+   *   - Hit a new object            → clear prior + select new (single-select)
+   *   - Hit the already-selected id → clear (re-pinch toggles off)
+   *   - Miss (no mesh, no stroke)   → no-op (preserve existing selection)
+   *
+   * Miss-no-op is a deliberate restoration of the toggle semantics retired
+   * in 0.16.0. In the pinch-driven gesture path MediaPipe HandLandmarker
+   * can emit 1–2 degenerate-landmark frames as the hand exits camera view,
+   * where thumb/index collapse close enough to pass `PINCH_THRESHOLD`.
+   * Those frames previously hit empty canvas and silently cleared the
+   * user's selection (studio "hand-down deselect" bug). The only ways to
+   * clear a selection are now: (a) re-pinch the same object via this
+   * method's toggle-off path, (b) the host calls
+   * {@link Glymo.clearSelection} directly (e.g. tool/mode change).
    */
   selectObjectAtPoint(x: number, y: number): GlymoObject | undefined {
     this.assertNotDestroyed();
@@ -925,8 +936,7 @@ export class Glymo {
       if (meshObjectId) {
         const obj = this.objectStore.getObject(meshObjectId);
         if (obj) {
-          this.selectionManager.clearSelection();
-          this.selectionManager.select(obj.id);
+          this.applyToggleSelect(obj.id);
           return obj;
         }
         // Host returned a stale id — warn and fall through to the stroke path.
@@ -938,20 +948,27 @@ export class Glymo {
       }
     }
 
-    // 2) Stroke fallback (drawing-mode default).
+    // 2) Stroke fallback (drawing-mode default). Miss = no-op.
     const strokeId = this.hitTestStroke(x, y);
-    if (!strokeId) {
-      this.selectionManager.clearSelection();
-      return undefined;
-    }
+    if (!strokeId) return undefined;
     const obj = this.objectStore.getObjectByStrokeId(strokeId);
-    if (!obj) {
-      this.selectionManager.clearSelection();
-      return undefined;
-    }
-    this.selectionManager.clearSelection();
-    this.selectionManager.select(obj.id);
+    if (!obj) return undefined;
+    this.applyToggleSelect(obj.id);
     return obj;
+  }
+
+  /**
+   * Toggle-select helper shared by the mesh and stroke hit paths of
+   * {@link Glymo.selectObjectAtPoint}. If `objectId` is already selected,
+   * clears selection (toggle off). Otherwise replaces any prior selection
+   * with `objectId` (single-select).
+   */
+  private applyToggleSelect(objectId: string): void {
+    const alreadySelected = this.selectionManager.isSelected(objectId);
+    this.selectionManager.clearSelection();
+    if (!alreadySelected) {
+      this.selectionManager.select(objectId);
+    }
   }
 
   /** Toggle selection on a specific object */

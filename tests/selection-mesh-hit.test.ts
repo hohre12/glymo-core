@@ -130,8 +130,9 @@ describe('Glymo.selectObjectAtPoint with mesh hit-tester', () => {
   });
 
   it('single-select: selecting a different object clears the previous selection', () => {
-    // Behaviour change in 0.16.0: previously selectObjectAtPoint used toggle;
-    // now it's single-select. Selecting A then B leaves only B selected.
+    // Selecting A then B leaves only B selected. Re-affirmed in 0.20.0:
+    // the restored toggle-off semantics fire only when the hit id EQUALS
+    // the currently-selected id, not on any hit.
     const a = g.createObject([], { x: 0, y: 0, width: 10, height: 10 });
     const b = g.createObject([], { x: 20, y: 0, width: 10, height: 10 });
 
@@ -142,5 +143,88 @@ describe('Glymo.selectObjectAtPoint with mesh hit-tester', () => {
     g.setMeshHitTestFn(() => b.id);
     g.selectObjectAtPoint(25, 5);
     expect(g.getSelectedObjectIds()).toEqual([b.id]);
+  });
+
+  // ── 0.20.0 semantics: miss = no-op, re-hit = toggle off ────────────────────
+  // These tests guard against the MediaPipe degenerate-landmark hand-down
+  // bug: previously `selectObjectAtPoint` cleared selection on every miss
+  // (mesh stale-id, stroke-none, stroke-no-object), which meant the 1–2
+  // spurious pinch frames as the hand exits camera view silently wiped
+  // whatever the user had selected. The method now preserves selection on
+  // every miss path and only clears when the user re-hits the already-
+  // selected object (toggle off).
+
+  it('miss (stroke hit-test returns no strokeId) preserves existing selection', () => {
+    const a = g.createObject([], { x: 0, y: 0, width: 10, height: 10 });
+    g.selectObject(a.id);
+    expect(g.getSelectedObjectIds()).toEqual([a.id]);
+
+    // No mesh tester, no strokes loaded → stroke hit-test returns null →
+    // method returns undefined WITHOUT clearing.
+    const result = g.selectObjectAtPoint(999, 999);
+    expect(result).toBeUndefined();
+    expect(g.getSelectedObjectIds()).toEqual([a.id]);
+  });
+
+  it('miss (mesh tester returns null, no strokes) preserves existing selection', () => {
+    const a = g.createObject([], { x: 0, y: 0, width: 10, height: 10 });
+    g.selectObject(a.id);
+    g.setMeshHitTestFn(() => null);
+
+    const result = g.selectObjectAtPoint(999, 999);
+    expect(result).toBeUndefined();
+    expect(g.getSelectedObjectIds()).toEqual([a.id]);
+  });
+
+  it('miss (mesh tester returns stale id, stroke fallback misses) preserves existing selection', () => {
+    // Host-bug shape: mesh tester returns an objectId that no longer
+    // exists in the store. Pre-0.20.0 this cleared the selection even
+    // when the stroke fallback also missed. Post-0.20.0: warn + no-op.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const a = g.createObject([], { x: 0, y: 0, width: 10, height: 10 });
+    g.selectObject(a.id);
+    g.setMeshHitTestFn(() => 'stale-object-id');
+
+    const result = g.selectObjectAtPoint(999, 999);
+    expect(result).toBeUndefined();
+    expect(g.getSelectedObjectIds()).toEqual([a.id]);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('re-pinch on the already-selected object (mesh path) toggles selection OFF', () => {
+    const a = g.createObject([], { x: 0, y: 0, width: 10, height: 10 });
+    g.setMeshHitTestFn(() => a.id);
+    g.selectObjectAtPoint(5, 5);
+    expect(g.getSelectedObjectIds()).toEqual([a.id]);
+
+    // Second pinch on the same mesh → toggle off.
+    g.selectObjectAtPoint(5, 5);
+    expect(g.getSelectedObjectIds()).toEqual([]);
+  });
+
+  it('re-pinch on the already-selected object (stroke path) toggles selection OFF', () => {
+    g.loadStrokes([makeStrokeDoc('s1', 100, 100)]);
+    const obj = g.createObject(['s1'], { x: 90, y: 90, width: 40, height: 40 });
+
+    g.selectObjectAtPoint(105, 105);
+    expect(g.getSelectedObjectIds()).toEqual([obj.id]);
+
+    // Second pinch on the same stroke → toggle off.
+    g.selectObjectAtPoint(105, 105);
+    expect(g.getSelectedObjectIds()).toEqual([]);
+  });
+
+  it('returned GlymoObject is the hit object even when the call is toggling OFF', () => {
+    // Callers that use the return value for UI feedback (e.g. `setSelectionCount`
+    // in useGestureDispatcher) still need to know WHICH object was hit, even
+    // when the net effect is a deselect. Return shape must stay consistent
+    // with the new-selection case.
+    const a = g.createObject([], { x: 0, y: 0, width: 10, height: 10 });
+    g.setMeshHitTestFn(() => a.id);
+    g.selectObjectAtPoint(5, 5);
+    const toggleResult = g.selectObjectAtPoint(5, 5);
+    expect(toggleResult?.id).toBe(a.id);
+    expect(g.getSelectedObjectIds()).toEqual([]);
   });
 });

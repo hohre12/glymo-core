@@ -40,6 +40,18 @@ const HALO_RADIUS = 12;
  * public signature for API stability with `CanvasRenderer` but intentionally
  * unused — see rationale above. Rename to an underscore prefix keeps
  * `noUnusedParameters` happy without sacrificing the positional API.
+ *
+ * Background-agnostic composite (2026-04-22, 0.20.1):
+ * The halo used to switch to `globalCompositeOperation = 'lighter'` for the
+ * ambient fill pass, inherited from the dark-background-first design. Under
+ * `SessionDoc.backgroundMode === 'white'` (added in 0.18.0) `lighter` clamps
+ * every channel to 255 against the (255,255,255) dest, so the entire halo
+ * goes invisible over a white canvas — exact mirror of the 0.29.0
+ * `@glymo/ui` compositor fix (`screen → source-over`). We now stay on the
+ * `save()` default (`source-over`) so alpha blending dominates, making the
+ * halo read on light, mid, and dark backgrounds alike. The shadowBlur glow
+ * around the stroke preserves the "ambient rim-light" feel without the
+ * channel-saturation hazard of `lighter`.
  */
 export function renderSelection(
   ctx: CanvasRenderingContext2D,
@@ -71,7 +83,10 @@ export function renderSelection(
     const h = obj.bbox.height + pad * 2;
 
     // Ambient rim-light — reads as a soft glow behind the object.
-    ctx.globalCompositeOperation = 'lighter';
+    // No composite override: we rely on the `save()` default (`source-over`)
+    // so the halo is visible against light, mid, and dark backgrounds.
+    // The shadowBlur glow below carries the "rim-light" feel that the old
+    // `lighter` additive pass used to provide on dark canvases.
     ctx.globalAlpha = fillAlpha;
     ctx.fillStyle = HALO_FILL;
     ctx.beginPath();

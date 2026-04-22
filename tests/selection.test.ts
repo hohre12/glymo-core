@@ -155,12 +155,22 @@ describe('renderSelection — halo unification (2026-04-21)', () => {
     expect(shadowColors).toContain('#00ffcc');
   });
 
-  it('switches to `lighter` composite for the ambient fill pass', () => {
+  it('does NOT switch to `lighter` composite (white-background visibility regression gate)', () => {
+    // Pre-0.20.1 the ambient fill pass wrote `globalCompositeOperation =
+    // 'lighter'`. On `SessionDoc.backgroundMode === 'white'` (added in
+    // 0.18.0) the additive formula clamps channels against a (255,255,255)
+    // dest, so the halo went fully invisible over a white canvas — the
+    // exact mirror of the 0.29.0 `@glymo/ui` compositor `screen → source-
+    // over` fix. This test pins the background-agnostic composite so that
+    // a future "make it glow harder" refactor cannot silently reintroduce
+    // the saturation hazard.
     const { ctx, writes } = makeRecordingContext();
     const store = makeObjectStoreWith([makeObject('obj-1')]);
     renderSelection(ctx, new Set(['obj-1']), store, '#ff0000', 0, 1);
-    const composites = writes.filter((w) => w.prop === 'globalCompositeOperation').map((w) => w.value);
-    expect(composites).toContain('lighter');
+    const composites = writes
+      .filter((w) => w.prop === 'globalCompositeOperation')
+      .map((w) => w.value);
+    expect(composites).not.toContain('lighter');
   });
 
   it('animates via a sin-wave breath — same timestamp twice produces identical alpha writes', () => {

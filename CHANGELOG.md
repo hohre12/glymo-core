@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.20.1] - 2026-04-22
+
+### Fixed
+- Drawing-mode selection halo was invisible on a white background. `renderSelection` (`src/render/layers/selection.ts`) used `ctx.globalCompositeOperation = 'lighter'` for the ambient fill pass — inherited from the dark-background-first unification shipped in 0.14.0. Under `SessionDoc.backgroundMode === 'white'` (added in 0.18.0) the additive formula clamps every channel against the (255, 255, 255) dest, so the cyan halo resolved to white over a white canvas and the selected object had no visible indicator. The composite override is removed; the halo now stays on the `save()` default (`source-over`), so alpha blending dominates and the indicator reads on light, mid, and dark backgrounds alike. The shadowBlur glow around the stroke carries the "ambient rim-light" feel that the `lighter` pass used to provide on dark canvases.
+
+### Notes
+- Exact mirror of the 0.29.0 `@glymo/ui` compositor fix (`hologram` / `webgpu` layers went from `'screen'` to `'source-over'` for the same white-background saturation reason). The selection halo is drawn by `@glymo/core` directly onto the 2D canvas, not through the UI compositor, so the earlier UI-side fix did not cover it.
+- Regression gate: `tests/selection.test.ts` — the pre-existing "switches to `lighter` composite" assertion was flipped to "does NOT switch to `lighter`" so a future refactor that tries to add additive bloom back in will fail loud.
+
+## [0.20.0] - 2026-04-22
+
+### Fixed
+- `Glymo.selectObjectAtPoint` no longer clears selection on any miss path. Previously the three miss branches (mesh hit-tester returned a stale objectId, stroke hit-test returned no strokeId, stroke bound to no object) each invoked `SelectionManager.clearSelection()`. Combined with the 1–2 degenerate-landmark frames that MediaPipe's `HandLandmarker` emits as the user's hand exits the camera frame, this meant the trailing low-confidence pinch frames silently wiped the user's selection. Every miss path now returns `undefined` without mutating selection state.
+
+### Changed
+- `Glymo.selectObjectAtPoint` hit semantics are now toggle-aware. A hit on the currently-selected object (via the mesh path OR the stroke path) toggles the selection OFF — symmetric with `selectObject(id)` behaviour. A hit on a different object still atomically replaces the selection (single-select invariant preserved). The returned `GlymoObject` continues to reflect the hit object even when the net effect is a deselect, so callers that drive UI off the return value (e.g. `useGestureDispatcher`'s `setSelectionCount`) see the correct hit target.
+- Private helper `Glymo.applyToggleSelect(objectId)` extracted from the two hit branches so the toggle logic lives in one place. Not part of the public API.
+
+### Notes
+- The underlying MediaPipe degenerate-landmark emissions are not fixed here — this change is defence-in-depth at the selection dispatch layer. A stricter upstream filter (e.g. reject frames where thumb-tip / index-tip distance falls below `PINCH_THRESHOLD` AND landmark confidence is below a floor) would additionally block the spurious pinches from ever reaching the dispatcher, but would couple selection stability to an extra MediaPipe invariant we do not currently assert. The selection-layer no-op is sufficient to restore the user-reported spec.
+- 8 new regression tests added to `tests/selection-mesh-hit.test.ts` under the "0.20.0 semantics" section covering every miss path, both toggle-off paths, and the return-value consistency contract.
+
 ## [0.19.0] - 2026-04-22
 
 ### Fixed
