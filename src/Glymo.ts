@@ -1464,6 +1464,23 @@ export class Glymo {
     }
 
     this.renderer.markDirty();
+
+    // Media-art restore (Task 2.4). Fires AFTER all other hydration + emits
+    // so that any `character:change` / renderer-reset handlers in the UI run
+    // first. UI Task 3.6 subscribes here to reconstruct 3D meshes.
+    const restorations: { objectId: string; modelId: string; sourceLabel: string | null }[] = [];
+    for (const obj of this.objectStore.getAllObjects()) {
+      const ma = obj.metadata?.mediaArt as { modelId?: unknown; sourceLabel?: unknown } | null | undefined;
+      if (!ma || typeof ma.modelId !== 'string') continue;
+      restorations.push({
+        objectId: obj.id,
+        modelId: ma.modelId,
+        sourceLabel: typeof ma.sourceLabel === 'string' ? ma.sourceLabel : null,
+      });
+    }
+    if (restorations.length > 0) {
+      this.eventBus.emit('media-art:restore', { restorations });
+    }
   }
 
   /**

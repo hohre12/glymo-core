@@ -509,6 +509,15 @@ export interface GlymoEventMap {
   'correction:applied': [{ objectId: string; corrections: string[] }];
   'correction:reverted': [{ objectId: string }];
   'object:translated': [{ id: string; dx: number; dy: number }];
+  /**
+   * Fires at the end of {@link Glymo.loadSession} for every object whose
+   * `metadata.mediaArt` contains a valid `modelId` string. The UI layer
+   * (Task 3.6) subscribes to reconstruct 3D meshes for restored objects.
+   *
+   * Only fires when `restorations` is non-empty — sessions that never used
+   * the media-art feature do not receive this event.
+   */
+  'media-art:restore': [{ restorations: readonly { objectId: string; modelId: string; sourceLabel: string | null }[] }];
   [key: `gesture:${string}`]: [import('./gesture/types.js').GestureEvent];
 }
 
