@@ -38,6 +38,21 @@ const DEFAULT_EFFECT: EffectPresetName = 'neon';
 const MAX_STROKES = 50;
 const CLEAR_FADE_MS = 300;
 
+// ── Module-level helpers ──────────────────────────────
+
+/**
+ * Boundary validator for `metadata.mediaArt` entries loaded from a SessionDoc.
+ * The saved blob is `unknown` — this guard confirms it has at least the
+ * required `modelId` string. `sourceLabel` remains optional and is
+ * normalised to `string | null` at the emit site.
+ */
+function isMediaArtMeta(value: unknown): value is { modelId: string; sourceLabel?: string | null } {
+  if (value === null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.modelId !== 'string') return false;
+  return true;
+}
+
 // ── Main Class ───────────────────────────────────────
 
 export class Glymo {
@@ -1470,8 +1485,8 @@ export class Glymo {
     // first. UI Task 3.6 subscribes here to reconstruct 3D meshes.
     const restorations: { objectId: string; modelId: string; sourceLabel: string | null }[] = [];
     for (const obj of this.objectStore.getAllObjects()) {
-      const ma = obj.metadata?.mediaArt as { modelId?: unknown; sourceLabel?: unknown } | null | undefined;
-      if (!ma || typeof ma.modelId !== 'string') continue;
+      const ma = obj.metadata?.mediaArt;
+      if (!isMediaArtMeta(ma)) continue;
       restorations.push({
         objectId: obj.id,
         modelId: ma.modelId,
