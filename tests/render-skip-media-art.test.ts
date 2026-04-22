@@ -145,7 +145,7 @@ describe('renderCompletedStrokes: animated path skips mesh-applied strokes', () 
     ctx = makeFakeCtx();
   });
 
-  it('does not call ctx.save() for the mesh-applied animated stroke (s1)', () => {
+  it('does not call ctx.translate with s1 pivot when s1 is mesh-applied (skips animated draw block)', () => {
     // Provide a StrokeAnimator that returns a transform for BOTH strokes
     // so both take the animated path.
     const mockTransform = {
@@ -171,14 +171,21 @@ describe('renderCompletedStrokes: animated path skips mesh-applied strokes', () 
       store,
     );
 
-    // ctx.save() is called per animated stroke that is NOT skipped:
-    //   - animated loop itself:  1 save
-    //   - renderGlowPass:        1 save
-    //   - renderMainStroke:      1 save
-    // → 3 saves for s2 only (s1 is mesh-applied → skipped entirely).
-    // Without the guard: 6 saves (3 per stroke × 2 strokes).
-    const saveCalls = (ctx.save as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(saveCalls).toBe(3); // only s2's draws contribute
+    // We verify the guard's effect directly rather than via ctx.save count,
+    // because save count is brittle: if renderGlowPass or renderMainStroke ever
+    // adds another save() pass (e.g. shadow), the count changes for unrelated reasons.
+    //
+    // s1's bbox is { x:0, y:0, width:10, height:1 } → pivot (5, 0.5).
+    // s2's bbox is { x:20, y:0, width:10, height:1 } → pivot (25, 0.5).
+    // If s1 entered the animated draw block, ctx.translate(5 + 0, 0.5 + 0) = (5, 0.5) would be called.
+    // Assert that call never happened — i.e. s1 was skipped entirely.
+    const translateCalls = (ctx.translate as ReturnType<typeof vi.fn>).mock.calls;
+    const s1PivotCalled = translateCalls.some(([x, y]) => x === 5 && y === 0.5);
+    expect(s1PivotCalled).toBe(false);
+
+    // Sanity: s2 DID enter the draw block — its pivot translate was called.
+    const s2PivotCalled = translateCalls.some(([x, y]) => x === 25 && y === 0.5);
+    expect(s2PivotCalled).toBe(true);
   });
 });
 
@@ -207,6 +214,25 @@ describe('renderFills: skips mesh-applied fills', () => {
     expect(drawImageCalls).toBe(1);
     // And it should be called with f2's bitmap
     expect((ctx.drawImage as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe(f2.bitmap);
+  });
+});
+
+describe('renderCompletedStrokes: null objectStore — guard is a no-op', () => {
+  it('renders all strokes when objectStore is null (guard is a no-op)', () => {
+    // With no objectStore, the mediaArt guard cannot fire. Both strokes render
+    // normally — this locks in backward-compat for callers that don't pass a store.
+    const s1 = makeStroke('s1', 0, 0, 10, 0);
+    const s2 = makeStroke('s2', 20, 0, 30, 0);
+
+    const cacheCtx = makeFakeCacheCtx();
+    const cache = makeFakeCache();
+    const ctx = makeFakeCtx();
+
+    renderCompletedStrokes(ctx, [s1, s2], cache, cacheCtx, true, null, null);
+
+    // Both strokes drawn: each produces 2 beginPath calls (glow + main).
+    const beginPathCalls = (cacheCtx.beginPath as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(beginPathCalls).toBe(4);
   });
 });
 

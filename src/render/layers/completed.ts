@@ -85,10 +85,8 @@ export function renderCompletedStrokes(
       const transform = transformCache.get(stroke.id);
       if (!transform) continue;
       if (stroke.smoothed.length < 2) continue;
-      if (objectStore) {
-        const obj = objectStore.getObjectByStrokeId(stroke.id);
-        if (obj?.metadata?.mediaArt) continue;
-      }
+      const obj = objectStore?.getObjectByStrokeId(stroke.id);
+      if (obj?.metadata?.mediaArt) continue;
 
       const style = resolveEffect(stroke.effect);
       const overrides = getOverrides(stroke);
@@ -97,7 +95,6 @@ export function renderCompletedStrokes(
       // otherwise fall back to individual stroke bounds.
       // This ensures strokes and fills in the same object share the same pivot.
       let cx: number, cy: number;
-      const obj = objectStore?.getObjectByStrokeId(stroke.id);
       if (obj) {
         cx = obj.bbox.x + obj.bbox.width / 2;
         cy = obj.bbox.y + obj.bbox.height / 2;

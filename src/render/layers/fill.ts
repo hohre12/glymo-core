@@ -20,31 +20,27 @@ export function renderFills(
   const now = performance.now();
 
   for (const fill of fills) {
+    const obj = objectStore?.getObjectByFillId(fill.id);
+
     // Skip fills whose owning object has a 3D mesh applied (mediaArt guard)
-    if (objectStore) {
-      const obj = objectStore.getObjectByFillId(fill.id);
-      if (obj?.metadata?.mediaArt) continue;
-    }
+    if (obj?.metadata?.mediaArt) continue;
 
     // Check if this fill belongs to an object with an active animation
-    if (objectStore && animator) {
-      const obj = objectStore.getObjectByFillId(fill.id);
-      if (obj && obj.strokeIds.length > 0) {
-        // Get the animation transform from the first stroke in the object
-        const transform = animator.getTransform(obj.strokeIds[0]!, now);
-        if (transform) {
-          const cx = obj.bbox.x + obj.bbox.width / 2;
-          const cy = obj.bbox.y + obj.bbox.height / 2;
-          ctx.save();
-          ctx.globalAlpha = transform.opacity;
-          ctx.translate(cx + transform.translateX, cy + transform.translateY);
-          ctx.rotate(transform.rotation);
-          ctx.scale(transform.scale, transform.scale);
-          ctx.translate(-cx, -cy);
-          ctx.drawImage(fill.bitmap, 0, 0);
-          ctx.restore();
-          continue;
-        }
+    if (obj && animator && obj.strokeIds.length > 0) {
+      // Get the animation transform from the first stroke in the object
+      const transform = animator.getTransform(obj.strokeIds[0]!, now);
+      if (transform) {
+        const cx = obj.bbox.x + obj.bbox.width / 2;
+        const cy = obj.bbox.y + obj.bbox.height / 2;
+        ctx.save();
+        ctx.globalAlpha = transform.opacity;
+        ctx.translate(cx + transform.translateX, cy + transform.translateY);
+        ctx.rotate(transform.rotation);
+        ctx.scale(transform.scale, transform.scale);
+        ctx.translate(-cx, -cy);
+        ctx.drawImage(fill.bitmap, 0, 0);
+        ctx.restore();
+        continue;
       }
     }
 
