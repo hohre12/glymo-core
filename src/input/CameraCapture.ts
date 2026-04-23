@@ -1,7 +1,6 @@
 import type { InputCapture, RawInputPoint } from '../types.js';
 import { PINCH_THRESHOLD } from '../gesture/constants.js';
 import { clamp01 } from '../gesture/math.js';
-import { OneEuroFilter } from '../filter/OneEuroFilter.js';
 import { GestureDetector } from './GestureDetector.js';
 import { computePinchDistance, computeSpeed, zToPressure } from './camera-utils.js';
 
@@ -17,9 +16,15 @@ const PEN_STATE_DEBOUNCE_FRAMES = 3;
 /** Minimum pixel movement to emit a new point (rejects sub-pixel jitter) */
 const MIN_MOVE_DISTANCE = 2.0;
 
-// OneEuroFilter for position smoothing — uses the canonical implementation
-// from src/filter/OneEuroFilter.ts. Essential for hand tracking where
-// MediaPipe landmarks jitter significantly.
+// Landmark smoothing is intentionally NOT applied here — raw fingertip
+// positions flow straight into the pipeline. The single authoritative
+// filter stage is `StabilizeStage` (pipeline/stages/StabilizeStage.ts),
+// which applies source-aware OneEuroFilter params on the stroke-point
+// side. Chaining two filters (pre-2026-04-23 design) accumulated phase
+// lag without measurable jitter benefit — the loose CameraCapture pass
+// (β = 0.5) barely smoothed anything, while the tight StabilizeStage
+// pass (β = 0.001) already covered the hand-tracking jitter budget.
+// See `tests/filter-regression.test.ts` for the parameter-drift gate.
 
 /** MediaPipe hand landmarker model URL */
 export const MODEL_URL =
@@ -201,22 +206,14 @@ export class CameraCapture implements InputCapture {
   // State machine: OPEN → PINCHED → OPEN = one tap = one break.
   // This is the most reliable signal MediaPipe provides.
 
-  // OneEuroFilters for position smoothing (critical for forward-pointing fingers)
-  // minCutoff=1.0: moderate smoothing when hand is still (filters jitter)
-  // beta=0.5: high speed responsiveness (no lag when drawing fast)
-  // dCutoff=1.0: derivative smoothing
-  private xFilter = new OneEuroFilter(1.0, 0.5, 1.0);
-  private yFilter = new OneEuroFilter(1.0, 0.5, 1.0);
-
   // ── Second-hand drawing (hand index 1) ───────────────
   // Tracks a second concurrent pinch-based stroke independently from hand 0.
-  // Uses its own filters and pen state so the two hands never interfere.
+  // Uses its own pen state so the two hands never interfere. Position
+  // smoothing is the pipeline's responsibility (StabilizeStage), not ours.
   private penDown2 = false;
   private pendingStateFrames2 = 0;
   private pendingState2 = false;
   private lastDrawPos2: { x: number; y: number } | null = null;
-  private xFilter2 = new OneEuroFilter(1.0, 0.5, 1.0);
-  private yFilter2 = new OneEuroFilter(1.0, 0.5, 1.0);
   // Callbacks for the second-hand stroke stream (optional — only set when caller needs two-hand drawing)
   private onPoint2: PointCallback | null = null;
   private onPenState2: PenStateCallback | null = null;
@@ -271,8 +268,6 @@ export class CameraCapture implements InputCapture {
       this.lastDrawPos = null;
       this.pauseFrames = 0;
       this.pausedAt = null;
-      this.xFilter.reset();
-      this.yFilter.reset();
       this.onPenState(false);
     }
   }
@@ -312,8 +307,6 @@ export class CameraCapture implements InputCapture {
       this.pendingStateFrames2 = 0;
       this.pendingState2 = false;
       this.lastDrawPos2 = null;
-      this.xFilter2.reset();
-      this.yFilter2.reset();
     }
   }
 
@@ -361,15 +354,10 @@ export class CameraCapture implements InputCapture {
     this.pauseFrames = 0;
     this.pausedAt = null;
 
-
-    this.xFilter.reset();
-    this.yFilter.reset();
     this.penDown2 = false;
     this.pendingStateFrames2 = 0;
     this.pendingState2 = false;
     this.lastDrawPos2 = null;
-    this.xFilter2.reset();
-    this.yFilter2.reset();
     this.onLandmarks = null;
   }
 
@@ -760,12 +748,10 @@ export class CameraCapture implements InputCapture {
       this.noHandFrames++;
       if (this.penDown && this.noHandFrames >= this.NO_HAND_DEBOUNCE) {
         this.penDown = false;
-  
+
         this.lastDrawPos = null;
         this.pauseFrames = 0;
         this.pausedAt = null;
-        this.xFilter.reset();
-        this.yFilter.reset();
         this.onPenState(false);
       }
       // Emit hand:lost when hand first disappears (after debounce)
@@ -861,11 +847,7 @@ export class CameraCapture implements InputCapture {
     }
 
     // ── Compute drawing position ──────────────────────────
-    // Only feed the OneEuroFilter when pen is down (or about to go down).
-    // When pen is up (fist/other), the fingertip landmark is unreliable
-    // (curled position, near palm) — feeding it would contaminate the filter
-    // and cause the first frame of the next stroke to start at the wrong position.
-
+    // Raw fingertip geometry only; StabilizeStage owns all smoothing.
     // Use adjusted (viewport-corrected) landmarks for drawing position
     const tip2d = adjLandmarks[8]!;
     const dip2d = adjLandmarks[7]!;
@@ -880,13 +862,13 @@ export class CameraCapture implements InputCapture {
     const rawX = (1 - (tip2d.x * (1 - blendWeight) + dip2d.x * blendWeight)) * canvasWidth;
     const rawY = (tip2d.y * (1 - blendWeight) + dip2d.y * blendWeight) * canvasHeight;
 
-    // Only filter when drawing — keeps filter state clean
-    const filteredX = isPenDown ? this.xFilter.filter(rawX, now) : rawX;
-    const filteredY = isPenDown ? this.yFilter.filter(rawY, now) : rawY;
-
+    // Raw fingertip — the single authoritative filter stage is
+    // StabilizeStage, applied downstream on stroke points. See the class
+    // comment above the OneEuroFilter mention for the dual-filter
+    // removal rationale (2026-04-23).
     const indexTip = {
-      x: filteredX,
-      y: filteredY,
+      x: rawX,
+      y: rawY,
       z: worldLandmarks[8]!.z,
     };
 
@@ -902,8 +884,6 @@ export class CameraCapture implements InputCapture {
       this.penDown2 = false;
       this.pendingStateFrames2 = 0;
       this.lastDrawPos2 = null;
-      this.xFilter2.reset();
-      this.yFilter2.reset();
       this.onPenState2(false);
     }
   }
@@ -939,12 +919,8 @@ export class CameraCapture implements InputCapture {
         this.lastDrawPos2 = null;
 
         if (isPinching2) {
-          this.xFilter2.reset();
-          this.yFilter2.reset();
           this.onPenState2!(true);
         } else {
-          this.xFilter2.reset();
-          this.yFilter2.reset();
           this.onPenState2!(false);
         }
       }
@@ -954,26 +930,24 @@ export class CameraCapture implements InputCapture {
 
     if (!this.penDown2) return;
 
-    // Compute mirrored position for hand 1 index fingertip
+    // Compute mirrored position for hand 1 index fingertip. Raw — the
+    // downstream StabilizeStage owns smoothing for every input path.
     const tip2 = adjLandmarks2[8]!;
     const rawX2 = (1 - tip2.x) * canvasWidth;
     const rawY2 = tip2.y * canvasHeight;
 
-    const filteredX2 = this.xFilter2.filter(rawX2, now);
-    const filteredY2 = this.yFilter2.filter(rawY2, now);
-
     // Minimum movement threshold to reject sub-pixel jitter
     if (this.lastDrawPos2) {
-      const mdx = filteredX2 - this.lastDrawPos2.x;
-      const mdy = filteredY2 - this.lastDrawPos2.y;
+      const mdx = rawX2 - this.lastDrawPos2.x;
+      const mdy = rawY2 - this.lastDrawPos2.y;
       if (Math.sqrt(mdx * mdx + mdy * mdy) < MIN_MOVE_DISTANCE) return;
     }
 
-    this.lastDrawPos2 = { x: filteredX2, y: filteredY2 };
+    this.lastDrawPos2 = { x: rawX2, y: rawY2 };
 
     const point2: RawInputPoint = {
-      x: filteredX2,
-      y: filteredY2,
+      x: rawX2,
+      y: rawY2,
       t: now,
       source: 'camera',
       pressure: zToPressure(tip2.z),
@@ -1032,7 +1006,7 @@ export class CameraCapture implements InputCapture {
       return;
     }
 
-    // Minimum movement threshold: reject sub-pixel jitter from OneEuroFilter
+    // Minimum movement threshold: reject sub-pixel jitter before emitting
     if (this.lastDrawPos) {
       const mdx = x - this.lastDrawPos.x;
       const mdy = y - this.lastDrawPos.y;

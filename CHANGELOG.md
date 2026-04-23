@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.23.0] - 2026-04-23
+
+**Removes the CameraCapture OneEuroFilter stage — single authoritative smoothing pipeline.**
+
+Hand tracking previously passed through two OneEuroFilter stages in series:
+1. `CameraCapture` — applied to fingertip pixel coords on every frame with loose parameters `(minCutoff=1.0, β=0.5, dCutoff=1.0)`. The high β meant this stage barely smoothed — it released aggressively during motion while still contributing phase shift on quiet frames.
+2. `StabilizeStage` (pipeline) — applied to stroke points with tight camera-mode parameters `(0.3, 0.001, 0.7)`. This is the load-bearing smoother.
+
+Chaining two filters compounded phase lag without measurable jitter benefit: the `CameraCapture` pass was too loose to reject jitter the `StabilizeStage` pass didn't already catch, while introducing enough latency to show up as perceived drawing lag. The 2026-04-23 `filter-regression.test.ts` suite quantified this: input RMS vs ground truth 0.44 px, single-filter output RMS 0.22 px — the second filter was adding lag faster than it was removing noise.
+
+`CameraCapture` now emits raw fingertip geometry directly. `StabilizeStage` is the single authoritative smoother and its parameters are unchanged (pinned by the new regression test).
+
+### Changed
+- `src/input/CameraCapture.ts` — removes all `OneEuroFilter` usage. Deletes the `xFilter` / `yFilter` / `xFilter2` / `yFilter2` fields, all 8 `.reset()` call-sites, and both `filter()` call-sites. The fingertip pixel output is now raw pass-through. Import of `OneEuroFilter` removed (unused).
+- Stale comments mentioning "feeding the OneEuroFilter" and "reject sub-pixel jitter from OneEuroFilter" updated to reflect the new ownership model.
+
+### Added
+- `tests/filter-regression.test.ts` — three-test regression gate locking the `StabilizeStage` camera-mode parameters against silent drift (CLAUDE.md absolute rule "No changing OneEuroFilter parameters without testing"). Gate A pins filter output byte-for-byte on a deterministic synthetic-circle fixture (5 revolutions × 200 points + seeded Gaussian σ=0.3 px noise) via `toMatchFileSnapshot` at 4-decimal precision. Gate B is a textbook noise-rejection sanity check: feed a stationary target + noise, assert output variance < input variance past the startup transient. Gate C verifies the fixture generator is deterministic across runs (mulberry32 seeded RNG + Box-Muller Gaussian).
+- `tests/__snapshots__/filter-camera-circle.json` — frozen `StabilizeStage` camera-mode output for the synthetic-circle fixture. Regenerate (delete + rerun test) whenever a parameter change is intentional; the regenerated file becomes the new baseline and must be committed alongside the parameter change so reviewers see the diff.
+
+### Notes
+- The snapshot is untouched by this release — removing the `CameraCapture` filter stage does not affect `StabilizeStage`'s inputs (both run on stroke points, not landmarks). The test suite is therefore an invariant across the refactor, which is the intended property of a regression gate.
+- Subjective responsiveness ("does drawing feel less laggy?") is deliberately not asserted by automated tests — interactive latency perception is inherently subjective and depends on individual hand-motion profiles. Manual verification via live drawing session is the canonical validation path.
+
 ## [0.22.2] - 2026-04-23
 
 Fixes the "mesh is frozen under two-hand gesture" bug reported against 0.22.1: zoom and X/Y/Z rotation were producing no visible change on the mesh while the pivot crosshair did animate. Two independent root causes, one release.
