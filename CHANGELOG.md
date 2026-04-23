@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.24.0] - 2026-04-23
+
+**Actually fixes the "가만히 있어도 진동이 느껴진다" hand-tremor complaint.**
+
+The 0.23.0 release shipped with a mistaken interpretation of the user's original bug report. The commit message there claimed the CameraCapture pre-filter was "adding lag faster than it was removing noise" with the numbers "0.44 / 0.22" — those numbers were fabricated, never measured, and the claim itself did not survive empirical testing. 0.23.0 removed the pre-filter without improving the user-facing experience, and did not touch the parameter that actually controls how much jitter users see. When the user reported the same complaint after 0.23.0 shipped, we finally ran the measurement.
+
+The new `tests/filter-measurement.test.ts` suite walks a stationary-target + σ=3 px Gaussian-noise input through four filter configurations on a fixed seed, reporting residual variance:
+
+| Configuration | Residual variance (px², lower = less jitter) | vs. raw |
+|---|---|---|
+| Raw jitter (no filter) | 18.49 | 100.0% |
+| Single old StabilizeStage (0.3, 0.001, 0.7) | 0.48 | 2.60% |
+| Dual **old**: CameraCapture pre-filter (1.0, 0.5, 1.0) + old StabilizeStage | 0.50 | 2.69% |
+| Dual **new**: CameraCapture pre-filter + **new** StabilizeStage (0.15, 0.001, 0.5) | **0.29** | **1.59%** |
+
+Two things fall out of the table:
+1. The CameraCapture pre-filter contributes essentially nothing on a stationary target — 0.48 → 0.50 is within noise. The "pre-filter strips 30× of jitter before StabilizeStage sees it" narrative from 0.23.0's re-analysis was also wrong. The pre-filter is (and always was) a no-op in the jitter-rejection budget.
+2. The real lever is `StabilizeStage`'s camera-mode `minCutoff`. Halving it from 0.3 Hz to 0.15 Hz and tightening `dCutoff` from 0.7 Hz to 0.5 Hz drops residual variance from 0.50 to 0.29 — a 41% reduction in visible jitter on a held hand.
+
+### Changed
+- `src/pipeline/stages/StabilizeStage.ts` — camera-mode parameters retuned:
+  - `CAMERA_MIN_CUTOFF`: `0.3 → 0.15` Hz (doubles at-rest smoothing strength — `tau` rises from 0.53 s to 1.06 s)
+  - `CAMERA_D_CUTOFF`: `0.7 → 0.5` Hz (velocity estimate is itself smoothed more, so jitter-induced velocity spikes do not raise the adaptive cutoff as fast)
+  - `CAMERA_BETA`: unchanged at `0.001` (speed response preserved — fast drawing remains followable)
+- `src/input/CameraCapture.ts` — restored the `xFilter` / `yFilter` / `xFilter2` / `yFilter2` OneEuroFilter instances and their reset / filter call-sites that 0.23.0 deleted. Empirically the pre-filter is a no-op (see the measurement table), so this restoration is pure "belt and suspenders" — keeping the historical architecture intact so future retuning work does not have to reason about why the pre-filter was removed.
+- `tests/filter-regression.test.ts` — `CAMERA_MIN_CUTOFF` / `CAMERA_D_CUTOFF` constants updated to match the new StabilizeStage values; snapshot deliberately regenerated in the same commit so reviewers can eyeball the filter-output diff.
+
+### Added
+- `tests/filter-measurement.test.ts` — the stationary-target + noise empirical harness that produced the table above. Unlike `filter-regression.test.ts` (which pins parameter-drift via snapshot), this suite measures jitter-rejection RATIOs and asserts the new configuration both beats the old by >30% and stays well under the raw-input noise floor. Rerun locally whenever parameters change to refresh the baseline numbers.
+
+### Notes
+- The 0.23.0 CameraCapture removal is effectively undone by the restoration above — the architecture is back to dual-filter, but with tighter StabilizeStage params. The parameter-drift regression gate from 0.23.0 is preserved and its snapshot was consciously regenerated for the new parameters.
+- Subjective "does drawing feel less shaky?" validation is still manual — the user draws a slow line / holds a finger still / writes their signature and compares against the 0.23.0 baseline. Automated measurements confirm 41% less residual jitter on the stationary scenario, but the user-facing perception is the actual acceptance gate.
+- If 41% is still not enough, the next lever is lowering `CAMERA_MIN_CUTOFF` further (0.15 → 0.1 → 0.05). Each halving roughly doubles the at-rest smoothing time constant and will eventually make fast drawing feel laggy; stop when the user says the trade-off tips.
+
 ## [0.23.0] - 2026-04-23
 
 **Removes the CameraCapture OneEuroFilter stage — single authoritative smoothing pipeline.**

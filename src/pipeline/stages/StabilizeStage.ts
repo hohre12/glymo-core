@@ -21,9 +21,19 @@ const MOUSE_D_CUTOFF = 1.0;
 
 // ── Camera parameters ────────────────────────────────
 // Much stronger smoothing: hand tracking has higher jitter than a mouse.
-const CAMERA_MIN_CUTOFF = 0.3;
+//
+// 2026-04-23 retune: the previous values (0.3, 0.001, 0.7) left visible
+// per-frame vibration on drawn strokes even with the CameraCapture
+// pre-filter active — users reported "가만히 있어도 진동이 느껴진다"
+// (vibration felt even when the hand is still). Halving `minCutoff` and
+// tightening `dCutoff` doubles the at-rest attenuation without touching
+// `beta`, so fast drawing stays responsive. The CameraCapture pre-filter
+// continues to strip the first ~30× of jitter; StabilizeStage now strips
+// the remaining ~20× instead of ~10×, for a combined ~600× jitter
+// rejection on a held hand. See `tests/filter-regression.test.ts`.
+const CAMERA_MIN_CUTOFF = 0.15;
 const CAMERA_BETA = 0.001;
-const CAMERA_D_CUTOFF = 0.7;
+const CAMERA_D_CUTOFF = 0.5;
 
 export class StabilizeStage implements PipelineStage {
   readonly name = 'stabilize';

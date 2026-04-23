@@ -150,9 +150,9 @@ function runFilter(
 // snapshot drift the next time the suite runs, which is the intended
 // failure mode for a "parameter drift" regression gate.
 
-const CAMERA_MIN_CUTOFF = 0.3;
+const CAMERA_MIN_CUTOFF = 0.15;
 const CAMERA_BETA = 0.001;
-const CAMERA_D_CUTOFF = 0.7;
+const CAMERA_D_CUTOFF = 0.5;
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
