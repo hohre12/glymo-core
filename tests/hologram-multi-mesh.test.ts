@@ -390,4 +390,85 @@ describe('Hologram3DRenderer multi-mesh', () => {
     expect(hitId).toBeNull();
     renderer.dispose();
   });
+
+  // ── translateMeshBy (0.21.0) ────────────────────────────────────────────
+  //
+  // Additive counterpart to `translateMeshTo` used by the core→renderer
+  // mesh-sync path (`Glymo.setMeshTranslator` → `translateMeshBy`). The
+  // tests use `getMeshOffsetCss` as the observable — it returns the CSS
+  // offset the renderer composites into the frame position each tick. DPR
+  // is stubbed to 1 via the top-level `vi.stubGlobal('window', {...})`
+  // so `(dx, dy)` canvas-pixel input maps 1:1 to CSS offset delta; the
+  // separate DPR>1 assertion below re-stubs window for that single test.
+  //
+  // The absolute-variant `translateMeshTo` must retain its existing semantics
+  // so the current CanvasEngine initial-anchor call site is unaffected —
+  // pin it here too.
+
+  it('translateMeshBy seeds offsetCss with the delta when no prior offset exists', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    expect(renderer.getMeshOffsetCss('obj-1')).toBeNull();
+
+    renderer.translateMeshBy('obj-1', 20, -10);
+    // DPR=1 → canvas-pixel input maps 1:1 to CSS offset.
+    expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 20, y: -10 });
+    renderer.dispose();
+  });
+
+  it('translateMeshBy composes additively with an existing offsetCss', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    // Seed an absolute anchor via the existing translateMeshTo path.
+    renderer.translateMeshTo('obj-1', 100, 50);
+    expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 100, y: 50 });
+
+    renderer.translateMeshBy('obj-1', 5, -3);
+    expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 105, y: 47 });
+
+    renderer.translateMeshBy('obj-1', -10, 10);
+    expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 95, y: 57 });
+    renderer.dispose();
+  });
+
+  it('translateMeshBy converts canvas-pixel delta → CSS via devicePixelRatio', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    // Re-stub window for this test only; restore at end so neighbouring
+    // tests keep DPR=1.
+    const prevWindow = (globalThis as unknown as { window: { devicePixelRatio: number } }).window;
+    vi.stubGlobal('window', { devicePixelRatio: 2 });
+    try {
+      renderer.translateMeshBy('obj-1', 40, 20);
+      // canvas-pixel (40, 20) → CSS (20, 10) at DPR=2.
+      expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 20, y: 10 });
+    } finally {
+      vi.stubGlobal('window', prevWindow);
+      renderer.dispose();
+    }
+  });
+
+  it('translateMeshBy is a no-op for unknown or unloaded objectIds', async () => {
+    // Unknown id — addMesh was never called for it.
+    renderer.translateMeshBy('unknown', 10, 10);
+    expect(renderer.getMeshOffsetCss('unknown')).toBeNull();
+    renderer.dispose();
+  });
+
+  it('translateMeshBy is a no-op on zero delta (fast path; does not create a blank offset)', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    renderer.translateMeshBy('obj-1', 0, 0);
+    // No offset should have been created — the additive path explicitly
+    // early-returns to avoid churning the slot state on no-op deltas.
+    expect(renderer.getMeshOffsetCss('obj-1')).toBeNull();
+    renderer.dispose();
+  });
+
+  it('translateMeshTo (absolute) remains independent of translateMeshBy', async () => {
+    await renderer.addMesh('obj-1', 'earth', earthDescriptor());
+    renderer.translateMeshBy('obj-1', 7, 7);
+    expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 7, y: 7 });
+
+    // translateMeshTo REPLACES the offset — it must not add on top.
+    renderer.translateMeshTo('obj-1', 200, 150);
+    expect(renderer.getMeshOffsetCss('obj-1')).toEqual({ x: 200, y: 150 });
+    renderer.dispose();
+  });
 });

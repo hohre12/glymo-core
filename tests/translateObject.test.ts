@@ -134,4 +134,88 @@ describe('Glymo.translateObject', () => {
     const s1 = g.getStrokes().find((s) => s.id === 's1');
     expect(s1!.raw[0]).toMatchObject({ x: 5, y: 5 });
   });
+
+  // ── setMeshTranslator / translateObject mesh-sync (0.21.0) ──────────────
+  //
+  // The host-provided translator fires with the same (id, dx, dy) as the
+  // underlying stroke translation so media-art meshes follow their
+  // GlymoObject under move-tool drag (see Glymo.setMeshTranslator JSDoc).
+  // Renderer seam is the UI-owned Hologram3DRenderer.translateMeshBy, but
+  // core only sees the function passed in via setMeshTranslator; these
+  // tests stub it with a vi.fn to pin the contract.
+
+  it('forwards the translateObject delta to the host-provided mesh translator', () => {
+    g.loadStrokes([makeStrokeDoc('s1', 0, 0)]);
+    const obj = g.createObject(['s1'], { x: 0, y: 0, width: 20, height: 10 });
+    const translator = vi.fn<(id: string, dx: number, dy: number) => void>();
+    g.setMeshTranslator(translator);
+
+    g.translateObject(obj.id, 11, -7);
+
+    expect(translator).toHaveBeenCalledTimes(1);
+    expect(translator).toHaveBeenCalledWith(obj.id, 11, -7);
+  });
+
+  it('does not invoke the translator on unknown id (object:translated not emitted either)', () => {
+    const translator = vi.fn<(id: string, dx: number, dy: number) => void>();
+    g.setMeshTranslator(translator);
+
+    const ok = g.translateObject('does-not-exist', 10, 10);
+    expect(ok).toBe(false);
+    expect(translator).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke the translator on zero-delta (no-op fast path)', () => {
+    g.loadStrokes([makeStrokeDoc('s1', 0, 0)]);
+    const obj = g.createObject(['s1'], { x: 0, y: 0, width: 20, height: 10 });
+    const translator = vi.fn<(id: string, dx: number, dy: number) => void>();
+    g.setMeshTranslator(translator);
+
+    const ok = g.translateObject(obj.id, 0, 0);
+    expect(ok).toBe(true);
+    expect(translator).not.toHaveBeenCalled();
+  });
+
+  it('works without a registered translator (backward-compatible default)', () => {
+    // Regression gate: pre-0.21.0 callers never installed a translator and
+    // translateObject must continue to succeed as a pure stroke/bbox move.
+    g.loadStrokes([makeStrokeDoc('s1', 0, 0)]);
+    const obj = g.createObject(['s1'], { x: 0, y: 0, width: 20, height: 10 });
+
+    const handler = vi.fn();
+    g.on('object:translated', handler);
+
+    const ok = g.translateObject(obj.id, 3, 4);
+    expect(ok).toBe(true);
+    expect(handler).toHaveBeenCalledWith({ id: obj.id, dx: 3, dy: 4 });
+    const s1 = g.getStrokes()[0]!;
+    expect(s1.raw[0]).toMatchObject({ x: 3, y: 4 });
+  });
+
+  it('unregisters the translator when setMeshTranslator(null) is called', () => {
+    g.loadStrokes([makeStrokeDoc('s1', 0, 0)]);
+    const obj = g.createObject(['s1'], { x: 0, y: 0, width: 20, height: 10 });
+    const translator = vi.fn<(id: string, dx: number, dy: number) => void>();
+    g.setMeshTranslator(translator);
+    g.setMeshTranslator(null);
+
+    g.translateObject(obj.id, 5, 5);
+    expect(translator).not.toHaveBeenCalled();
+  });
+
+  it('still emits object:translated even if the translator throws', () => {
+    g.loadStrokes([makeStrokeDoc('s1', 0, 0)]);
+    const obj = g.createObject(['s1'], { x: 0, y: 0, width: 20, height: 10 });
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    g.setMeshTranslator(() => { throw new Error('boom'); });
+    const handler = vi.fn();
+    g.on('object:translated', handler);
+
+    const ok = g.translateObject(obj.id, 1, 1);
+    expect(ok).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy).toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
 });

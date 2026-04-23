@@ -123,6 +123,18 @@ export class Glymo {
   // Set via setMeshHitTestFn — null when no host renderer is registered.
   private meshHitTestFn: ((x: number, y: number) => string | null) | null = null;
 
+  // Set via setMeshTranslator — null when no host renderer is registered.
+  // Host-provided additive translator for a media-art mesh bound to `objectId`.
+  // Called from `translateObject(id, dx, dy)` with the SAME `(dx, dy)` delta so
+  // the mesh follows its underlying GlymoObject whenever the object is moved
+  // (move-tool drag, gesture translate, etc.). The function seam mirrors
+  // `setMeshHitTestFn` — core stays renderer-agnostic, the UI owns the
+  // Hologram3DRenderer reference and wires the translation through on mount.
+  // Delta unit is canvas-pixel, matching `translateObject`'s public contract;
+  // the renderer converts to CSS internally. No-op when no mesh is bound to
+  // the id (renderer decides).
+  private meshTranslator: ((objectId: string, dx: number, dy: number) => void) | null = null;
+
   /**
    * Per-object target CSS size for media-art meshes (0.18.0). Mirror store
    * of the renderer-side slot's `sizeCss`: kept here so the Glymo facade
@@ -559,6 +571,17 @@ export class Glymo {
    *
    * Limitation: fills are full-canvas bitmaps (no per-pixel offset), so
    * fills inside the object are intentionally NOT translated.
+   *
+   * Media-art mesh sync (0.21.0): if a host has registered a
+   * {@link Glymo.setMeshTranslator | mesh translator} via
+   * {@link Glymo.setMeshTranslator} the same `(dx, dy)` delta is forwarded so
+   * any Hologram3DRenderer mesh bound to this object follows the underlying
+   * strokes. The translator is invoked unconditionally — the renderer
+   * decides whether the id owns a live mesh slot and no-ops otherwise. This
+   * collapses the previous "single-hand pinch moves the mesh" UX into the
+   * canonical move-tool path: mesh translation is now strictly driven by
+   * the object's translation, and the move tool is the only gesture that
+   * produces such translations (see `@glymo/ui` 0.33.0 release notes).
    */
   translateObject(id: string, dx: number, dy: number): boolean {
     this.assertNotDestroyed();
@@ -585,6 +608,21 @@ export class Glymo {
     obj.bbox.x += dx;
     obj.bbox.y += dy;
     this.renderer.markDirty();
+
+    // Mirror the delta into any media-art mesh bound to this object. The
+    // translator itself is host-provided (via `setMeshTranslator`) and is
+    // responsible for the renderer-side no-op when the id has no live slot.
+    if (this.meshTranslator) {
+      try {
+        this.meshTranslator(id, dx, dy);
+      } catch (err) {
+        // A throwing translator must not prevent the stroke translation
+        // from completing or the event from firing — the host will see
+        // the error in their console and can decide how to recover.
+        console.error('[Glymo] meshTranslator threw while mirroring translateObject:', err);
+      }
+    }
+
     this.eventBus.emit('object:translated', { id, dx, dy });
     return true;
   }
@@ -869,6 +907,33 @@ export class Glymo {
    */
   setMeshHitTestFn(fn: ((x: number, y: number) => string | null) | null): void {
     this.meshHitTestFn = fn;
+  }
+
+  /**
+   * Host registers an additive mesh translator so {@link Glymo.translateObject}
+   * can mirror its stroke-translation delta into any media-art mesh bound to
+   * the same `objectId` (0.21.0). Pass `null` to unregister.
+   *
+   * Invariants / contract:
+   *   1. Delta units match `translateObject`: canvas-pixel (DPR-scaled),
+   *      NOT CSS. The renderer translator converts once at its boundary so
+   *      the core surface stays uniform; host code does not convert.
+   *   2. Mesh-bound check lives in the translator — `translateObject` calls
+   *      it unconditionally, so the host (Hologram3DRenderer) silently
+   *      no-ops when the id has no live slot. This matches the `translateMeshTo`
+   *      convention and lets the core stay agnostic of renderer lifecycle.
+   *   3. Additive semantics only. There is no absolute-position variant; the
+   *      absolute path (`Hologram3DRenderer.translateMeshTo`) is retained
+   *      for the initial-anchor call site in `CanvasEngine.applyMediaArt`
+   *      and the full-reposition path in `object:translated` subscribers
+   *      that re-anchor to the fresh bbox centre.
+   *
+   * Function-seam pattern is identical to `setMeshHitTestFn`: core stays
+   * renderer-agnostic, the UI layer owns the concrete `Hologram3DRenderer`
+   * reference and wires the delta forwarder on mount.
+   */
+  setMeshTranslator(fn: ((objectId: string, dx: number, dy: number) => void) | null): void {
+    this.meshTranslator = fn;
   }
 
   /**

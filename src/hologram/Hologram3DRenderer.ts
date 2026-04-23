@@ -374,9 +374,16 @@ export class Hologram3DRenderer {
     if (rotZ !== undefined) this.rotZ = rotZ;
   }
 
-  /** Set zoom level (clamped to 0.3 - 3.0) */
+  /**
+   * Set zoom level. Lower-clamped to 0.01 to prevent a zero / negative
+   * multiplier from vanishing the mesh (degenerate transform); NO UPPER
+   * BOUND — callers are free to drive the mesh arbitrarily large via
+   * two-hand stretch per user request (2026-04-23). The previous 0.3–3.0
+   * clamp was a design-era default that also capped mesh mode; the floor
+   * is kept only as a mathematical safety rail.
+   */
   setZoom(zoom: number): void {
-    this.zoom = Math.max(0.3, Math.min(3.0, zoom));
+    this.zoom = Math.max(0.01, zoom);
   }
 
   /** Set transition progress (0 = hidden, 1 = fully visible) */
@@ -812,6 +819,14 @@ export class Hologram3DRenderer {
    * Translate the mesh registered under `objectId` so its visual center
    * tracks the supplied CSS point (in canvas-local coordinates).
    *
+   * ABSOLUTE positioning variant. Accepts CSS pixels in canvas-local
+   * coordinates and replaces any prior `offsetCss`. Used as the initial
+   * anchor after `addMesh` and by the `object:translated` subscriber that
+   * re-anchors the mesh to the fresh bbox centre. For ADDITIVE deltas that
+   * mirror a `Glymo.translateObject` call, use {@link translateMeshBy}
+   * instead — the two APIs coexist intentionally (see `translateMeshBy`
+   * JSDoc for the unit contract).
+   *
    * Per-mesh semantics. Sets ONLY `slot.offsetCss` for this objectId — the
    * actual group.position write happens inside `renderMeshFrame`, which
    * composites the bbox-centering offset with the per-slot CSS offset every
@@ -843,6 +858,66 @@ export class Hologram3DRenderer {
     if (w <= 0 || h <= 0) return;
 
     slot.offsetCss = { x, y };
+  }
+
+  /**
+   * Translate the mesh registered under `objectId` by the additive
+   * `(dx, dy)` delta (0.21.0). Canonical UI-side sink for
+   * {@link Glymo.translateObject | Glymo.translateObject}'s mesh-sync path
+   * (see `Glymo.setMeshTranslator`).
+   *
+   * Unit contract — deliberately ALIGNED with `Glymo.translateObject`:
+   *   - Input `(dx, dy)` are CANVAS-PIXEL deltas (DPR-scaled), matching the
+   *     public `translateObject(id, dx, dy)` signature so the host wiring
+   *     forwards the delta verbatim without a DPR conversion at the seam.
+   *   - `slot.offsetCss`, however, lives in CSS pixels because the
+   *     `renderMeshFrame` NDC projection uses `canvas.clientWidth/Height`.
+   *     The CSS-conversion therefore happens HERE, once, instead of at
+   *     every `translateObject` call site.
+   *
+   * Semantics:
+   *   - When an offset already exists, the delta is added to it. This is
+   *     the common case — `CanvasEngine.applyMediaArt` seeds `slot.offsetCss`
+   *     via `translateMeshTo(cx, cy)` immediately after `addMesh`, so every
+   *     `translateMeshBy` call after the first anchor composes with it.
+   *   - If no prior offset has been set (pathological race, e.g. translate
+   *     fires before the anchor), the delta seeds a fresh offset. The
+   *     renderer's per-frame bbox-centring still runs, so the mesh lands at
+   *     `(bbox-centre + (dx_css, dy_css))` rather than silently tracking
+   *     nothing — this keeps the translate observably effective even in
+   *     the race window.
+   *
+   * No-op when the slot doesn't exist, isn't loaded, the renderer hasn't
+   * finished initialising, or the canvas has zero dimensions — same
+   * guards as `translateMeshTo`.
+   */
+  translateMeshBy(objectId: string, dx: number, dy: number): void {
+    const slot = this.meshes.get(objectId);
+    if (!slot || !slot.loaded) return;
+    if (!this.camera || !this.canvas) return;
+
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    if (w <= 0 || h <= 0) return;
+
+    if (dx === 0 && dy === 0) return;
+
+    // Canvas-pixel → CSS-pixel at the boundary. The renderer owns the DPR
+    // conversion so `Glymo.setMeshTranslator` callers forward the
+    // `translateObject` delta verbatim.
+    const dpr =
+      typeof window !== 'undefined' && window.devicePixelRatio > 0
+        ? window.devicePixelRatio
+        : 1;
+    const dxCss = dx / dpr;
+    const dyCss = dy / dpr;
+
+    if (slot.offsetCss) {
+      slot.offsetCss.x += dxCss;
+      slot.offsetCss.y += dyCss;
+    } else {
+      slot.offsetCss = { x: dxCss, y: dyCss };
+    }
   }
 
   /**

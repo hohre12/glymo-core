@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.22.0] - 2026-04-23
+
+Removes the hard 3.0x upper clamp on `Hologram3DRenderer.setZoom` per user spec (2026-04-23). The legacy `Math.max(0.3, Math.min(3.0, zoom))` clamp was a design-era default carried over from the text-hologram era; in mesh mode (Media Art) it capped the maximum visible mesh size at 3× the original stroke's CSS bbox, which the user reported as "미디어아트가 원본 영역을 못 벗어난다" after PR 1 + PR 2 of the gesture-delegation refactor landed. The hard cap is now removed; only a lower mathematical floor of `0.01` remains to guard against zero / negative / NaN-driven degenerate transforms. Callers are now free to drive the mesh arbitrarily large via two-hand stretch.
+
+### Changed
+- `Hologram3DRenderer.setZoom(zoom)` — clamp changed from `Math.max(0.3, Math.min(3.0, zoom))` to `Math.max(0.01, zoom)`. No upper bound. Pairs with `@glymo/ui@0.35.0`'s `useHologramController` (controller floor lowered to 0.3 UX rail, no upper) and `useHologram3D.setZoom` (aligned 0.01 floor, no upper).
+
+### Notes
+- Non-breaking for every pre-0.22.0 caller that respected the old range — those calls continue to produce the same result because `Math.max(0.01, zoom)` is a strict superset of the old `Math.max(0.3, Math.min(3.0, zoom))` output set for inputs in `[0.3, 3.0]`. Callers that previously hit the upper clamp will now see the un-clamped value applied, which is the intended user-visible change.
+- No tests pin the old 3.0 ceiling (grep-verified across `glymo-core/tests` and `glymo-ui/src/canvas/hooks/__tests__`), so the removal does not require a test-update cascade.
+
+## [0.21.0] - 2026-04-23
+
+Aligns media-art mesh translation with the move-tool-only invariant agreed with the team lead on 2026-04-23: holograms and media-art meshes only translate via the `move` tool, while zoom and X/Y/Z rotation remain two-hand-only. Under the previous surface the mesh could also be dragged by a one-hand pinch routed through `Hologram3DRenderer.translateMeshTo`, which duplicated the move-tool path and was the source of the "mesh drifts off its stroke anchor when I pinch" regression class. With this release `Glymo.translateObject` becomes the single canonical driver: the core facade gains a host-provided mesh translator seam so any move-tool delta (delivered through `Glymo.translateObject`) is forwarded verbatim to the renderer's new additive `translateMeshBy`, and the renderer keeps `translateMeshTo` as the absolute-anchor variant for the initial-mount and object-translated-subscriber reposition paths.
+
+### Added
+- `Glymo.setMeshTranslator(fn | null)` — host-provided additive mesh translator. `translateObject(id, dx, dy)` invokes it with the same `(id, dx, dy)` immediately after the stroke/bbox mutation so any media-art mesh bound to the same id follows the object. Function-seam pattern mirrors `setMeshHitTestFn` (core stays renderer-agnostic); delta unit is canvas-pixel (DPR-scaled), matching `translateObject`'s public signature so host wiring forwards the delta verbatim without a boundary conversion.
+- `Hologram3DRenderer.translateMeshBy(objectId, dx, dy)` — additive counterpart to `translateMeshTo`. Accepts canvas-pixel delta, converts to CSS internally via `window.devicePixelRatio`, and composes with the existing `slot.offsetCss` when present (seeds a fresh offset when absent). No-op on unknown / unloaded slots, zero-delta, or pre-initialisation. This is the canonical sink for `Glymo.setMeshTranslator` callbacks.
+
+### Changed
+- `Glymo.translateObject` now forwards its delta through the registered mesh translator (if any) between the `renderer.markDirty()` and `object:translated` emit. Translator throws are caught and logged via `console.error` so a misbehaving host cannot suppress the stroke translation or the downstream event. Backward-compatible — the translator seam defaults to `null`, so pre-0.21.0 callers see the exact same code path.
+- `Hologram3DRenderer.translateMeshTo` JSDoc clarified: it remains the ABSOLUTE-positioning variant used by the initial-anchor call site in `@glymo/ui`'s `CanvasEngine.applyMediaArt` and the `object:translated` re-anchor path. Additive callers MUST use `translateMeshBy`; the two APIs are deliberately separate because they encode different unit conventions (CSS pixels absolute vs canvas-pixel delta).
+
+### Notes
+- No breaking changes. The new translator seam and the new renderer method are strictly additive — existing consumers that do not install a translator (i.e. every pre-0.21.0 wiring) behave identically to 0.20.1.
+- Pairs with `@glymo/ui@0.33.0`, which wires `Glymo.setMeshTranslator` to the `Hologram3DRenderer.translateMeshBy` seam alongside `setMeshHitTestFn` in `CanvasEngine`, and removes the mesh one-hand pinch branch (`hitTestMeshForSelection` → `grabMesh` → `translateMeshTo`) from `useHologramController`.
+- 6 new regression tests in `tests/translateObject.test.ts` (translator forwarding, unknown-id gate, zero-delta gate, backward-compat default, unregister path, throwing-translator resilience). 6 new renderer-level tests in `tests/hologram-multi-mesh.test.ts` covering `translateMeshBy` seed / compose / DPR conversion / unknown-id / zero-delta / independence from `translateMeshTo`.
+
 ## [0.20.1] - 2026-04-22
 
 ### Fixed
