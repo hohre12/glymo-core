@@ -525,8 +525,19 @@ export interface GlymoEventMap {
    *
    * Only fires when `restorations` is non-empty — sessions that never used
    * the media-art feature do not receive this event.
+   *
+   * `offsetCss` / `sizeCss` are forwarded from `metadata.mediaArt` when
+   * the saved payload included them (0.22.0). Legacy sessions that predate
+   * the field omit them; subscribers should fall back to the object's
+   * bbox-derived anchor in that case to preserve the pre-0.22.0 behaviour.
    */
-  'media-art:restore': [{ restorations: readonly { objectId: string; modelId: string; sourceLabel: string | null }[] }];
+  'media-art:restore': [{ restorations: readonly {
+    objectId: string;
+    modelId: string;
+    sourceLabel: string | null;
+    offsetCss: { x: number; y: number } | null;
+    sizeCss: { width: number; height: number } | null;
+  }[] }];
   /**
    * Fires at the end of {@link Glymo.loadSession} carrying session-level
    * visual state that the UI must re-apply (0.18.0). `backgroundMode`

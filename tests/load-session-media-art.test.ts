@@ -120,7 +120,7 @@ describe('loadSession: media-art:restore event', () => {
 
     expect(payloads).toHaveLength(1);
     expect(payloads[0]).toEqual({
-      restorations: [{ objectId: 'o1', modelId: 'earth', sourceLabel: null }],
+      restorations: [{ objectId: 'o1', modelId: 'earth', sourceLabel: null, offsetCss: null, sizeCss: null }],
     });
   });
 
@@ -150,8 +150,8 @@ describe('loadSession: media-art:restore event', () => {
     expect(payloads).toHaveLength(1);
     expect(payloads[0]).toEqual({
       restorations: [
-        { objectId: 'o1', modelId: 'earth', sourceLabel: 'NASA / Blue Marble' },
-        { objectId: 'o2', modelId: 'astronaut', sourceLabel: null },
+        { objectId: 'o1', modelId: 'earth', sourceLabel: 'NASA / Blue Marble', offsetCss: null, sizeCss: null },
+        { objectId: 'o2', modelId: 'astronaut', sourceLabel: null, offsetCss: null, sizeCss: null },
       ],
     });
   });
@@ -233,7 +233,7 @@ describe('loadSession: media-art:restore event', () => {
 
     expect(payloads).toHaveLength(1);
     expect(payloads[0]).toEqual({
-      restorations: [{ objectId: 'o1', modelId: 'earth', sourceLabel: null }],
+      restorations: [{ objectId: 'o1', modelId: 'earth', sourceLabel: null, offsetCss: null, sizeCss: null }],
     });
   });
 
@@ -262,7 +262,7 @@ describe('loadSession: media-art:restore event', () => {
 
     expect(payloads).toHaveLength(1);
     expect(payloads[0]).toEqual({
-      restorations: [{ objectId: 'good', modelId: 'earth', sourceLabel: 'NASA' }],
+      restorations: [{ objectId: 'good', modelId: 'earth', sourceLabel: 'NASA', offsetCss: null, sizeCss: null }],
     });
   });
 });

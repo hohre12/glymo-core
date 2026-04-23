@@ -43,14 +43,41 @@ const CLEAR_FADE_MS = 300;
 /**
  * Boundary validator for `metadata.mediaArt` entries loaded from a SessionDoc.
  * The saved blob is `unknown` — this guard confirms it has at least the
- * required `modelId` string. `sourceLabel` remains optional and is
- * normalised to `string | null` at the emit site.
+ * required `modelId` string. `sourceLabel`, `offsetCss`, and `sizeCss`
+ * remain optional; offsetCss/sizeCss are read by the UI layer to anchor
+ * and size the restored mesh (0.22.0 — fixes the "meshes snap to canvas
+ * centre on reload" bug). Legacy sessions that predate these fields pass
+ * the guard and simply receive `null` from `extractMediaArtTransform`
+ * below.
  */
-function isMediaArtMeta(value: unknown): value is { modelId: string; sourceLabel?: string | null } {
+function isMediaArtMeta(value: unknown): value is {
+  modelId: string;
+  sourceLabel?: string | null;
+  offsetCss?: { x: number; y: number } | null;
+  sizeCss?: { width: number; height: number } | null;
+} {
   if (value === null || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   if (typeof v.modelId !== 'string') return false;
   return true;
+}
+
+/** Narrow `{ x: number, y: number }` out of an arbitrary metadata value. */
+function extractOffsetCss(value: unknown): { x: number; y: number } | null {
+  if (value === null || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.x !== 'number' || typeof v.y !== 'number') return null;
+  if (!Number.isFinite(v.x) || !Number.isFinite(v.y)) return null;
+  return { x: v.x, y: v.y };
+}
+
+/** Narrow `{ width: number, height: number }` out of an arbitrary metadata value. */
+function extractSizeCss(value: unknown): { width: number; height: number } | null {
+  if (value === null || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.width !== 'number' || typeof v.height !== 'number') return null;
+  if (!(v.width > 0) || !(v.height > 0)) return null;
+  return { width: v.width, height: v.height };
 }
 
 // ── Main Class ───────────────────────────────────────
@@ -1663,7 +1690,13 @@ export class Glymo {
     // Media-art restore (Task 2.4). Fires AFTER all other hydration + emits
     // so that any `character:change` / renderer-reset handlers in the UI run
     // first. UI Task 3.6 subscribes here to reconstruct 3D meshes.
-    const restorations: { objectId: string; modelId: string; sourceLabel: string | null }[] = [];
+    const restorations: {
+      objectId: string;
+      modelId: string;
+      sourceLabel: string | null;
+      offsetCss: { x: number; y: number } | null;
+      sizeCss: { width: number; height: number } | null;
+    }[] = [];
     for (const obj of this.objectStore.getAllObjects()) {
       const ma = obj.metadata?.mediaArt;
       if (!isMediaArtMeta(ma)) continue;
@@ -1671,6 +1704,8 @@ export class Glymo {
         objectId: obj.id,
         modelId: ma.modelId,
         sourceLabel: typeof ma.sourceLabel === 'string' ? ma.sourceLabel : null,
+        offsetCss: extractOffsetCss(ma.offsetCss),
+        sizeCss: extractSizeCss(ma.sizeCss),
       });
     }
     if (restorations.length > 0) {

@@ -140,6 +140,26 @@ export class CameraCapture implements InputCapture {
   private handLandmarker: HandLandmarkerInstance | null = null;
   private animFrameId: number | null = null;
   private active = false;
+  /**
+   * Monotonic generation counter bumped on every `start()` and `stop()`.
+   * `startCamera()` snapshots the value before each `await` and bails out
+   * when the snapshot no longer matches the current generation — the
+   * canonical pattern for cancelling an in-flight async flow. Without this
+   * guard a React Strict Mode double-mount (or a rapid unmount/remount on
+   * route change) triggers the `play() request was interrupted by a new
+   * load request` AbortError because a newer `startCamera` nulls
+   * `this.video.srcObject` while the previous `play()` promise is still
+   * resolving.
+   */
+  private cameraGeneration = 0;
+  /**
+   * Promise handle for the in-flight `video.play()` call. `releaseCamera()`
+   * awaits this (swallowing any rejection) before nulling `srcObject`, so
+   * teardown can never interrupt a pending play — the second half of the
+   * AbortError fix. Kept nullable because release paths that run before
+   * `startCamera` reached the `video.play()` line have nothing to await.
+   */
+  private pendingPlay: Promise<void> | null = null;
 
   // ── Worker off-thread detection ──
   private worker: Worker | null = null;
@@ -321,6 +341,11 @@ export class CameraCapture implements InputCapture {
   stop(): void {
     if (!this.active) return;
     this.active = false;
+    // Invalidate any in-flight `startCamera` before we tear anything down.
+    // The supersession check inside `startCamera` now trips as soon as the
+    // next `await` unfreezes, so the flow releases any stream it acquires
+    // and bails out instead of racing against us here.
+    this.cameraGeneration++;
 
     this.cancelAnimationFrame();
     this.terminateWorker();
@@ -456,14 +481,58 @@ export class CameraCapture implements InputCapture {
   }
 
   private async startCamera(): Promise<void> {
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    // Snapshot the generation at entry; every subsequent `await` re-checks
+    // against the current value so a parallel `stop()` / re-`start()` can
+    // cancel this flow deterministically. `active` is checked in tandem as
+    // a belt-and-suspenders guard for the `stop() → start()` reuse path
+    // where `cameraGeneration` advances but the active flag also flips.
+    const gen = ++this.cameraGeneration;
+    const isSuperseded = (): boolean => gen !== this.cameraGeneration || !this.active;
+
+    const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
     });
+    if (isSuperseded()) {
+      // Release the stream we just acquired — otherwise the camera's green
+      // light stays on after an unmount, and Chrome holds the device busy
+      // for the next start() call.
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
+    this.stream = stream;
 
-    this.video = document.createElement('video');
-    this.video.srcObject = this.stream;
-    this.video.setAttribute('playsinline', '');
-    await this.video.play();
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.setAttribute('playsinline', '');
+    this.video = video;
+
+    // Track the in-flight `play()` so `releaseCamera()` can await it before
+    // nulling `srcObject`. Kept as a class field rather than a local so a
+    // parallel teardown from a different call site (stop() / handleInitError)
+    // can observe and await it.
+    const playPromise = video.play();
+    this.pendingPlay = playPromise.catch(() => {
+      // Swallow intentionally — the rejection is inspected below against
+      // the supersession check. A second consumer (releaseCamera) must not
+      // see an unhandled rejection either, so normalise to resolved.
+    });
+
+    try {
+      await playPromise;
+    } catch (err) {
+      // AbortError from `srcObject = null` during teardown is expected
+      // when we've been superseded; swallow it. A genuine play() failure
+      // (autoplay policy, unsupported format) must still propagate.
+      if (isSuperseded() && err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
+      throw err;
+    } finally {
+      // Only clear the field if we're still the current play; a later
+      // startCamera may have already overwritten it, and we must not wipe
+      // its reference.
+      if (gen === this.cameraGeneration) this.pendingPlay = null;
+    }
   }
 
   private handleInitError(err: unknown): void {
@@ -1043,15 +1112,37 @@ export class CameraCapture implements InputCapture {
   }
 
   private releaseCamera(): void {
-    if (this.stream) {
-      for (const track of this.stream.getTracks()) {
+    // If a `video.play()` is still in flight, nulling `srcObject` below
+    // immediately would trigger the `AbortError: play() request interrupted
+    // by a new load request` console error. The canonical teardown is to
+    // wait for the play promise to settle first (it was wrapped in a
+    // `.catch(() => {})` so awaiting it cannot throw) then release — the
+    // generation bump in `stop()` already prevents the resumed flow from
+    // touching any state. Fire-and-forget the final srcObject-null so
+    // `stop()` stays synchronous, which the caller contract expects.
+    const pending = this.pendingPlay;
+    this.pendingPlay = null;
+    const stream = this.stream;
+    const video = this.video;
+    this.stream = null;
+    this.video = null;
+    if (stream) {
+      for (const track of stream.getTracks()) {
         track.stop();
       }
-      this.stream = null;
     }
-    if (this.video) {
-      this.video.srcObject = null;
-      this.video = null;
+    if (video) {
+      if (pending) {
+        // Defer the srcObject wipe until play() settles. The wrapped
+        // pending is always a resolved-or-normalised promise, so no catch
+        // needed here. On settle, drop the element reference — after this
+        // point garbage collection is free to reclaim it.
+        void pending.then(() => {
+          video.srcObject = null;
+        });
+      } else {
+        video.srcObject = null;
+      }
     }
   }
 
