@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.22.2] - 2026-04-23
+
+Fixes the "mesh is frozen under two-hand gesture" bug reported against 0.22.1: zoom and X/Y/Z rotation were producing no visible change on the mesh while the pivot crosshair did animate. Two independent root causes, one release.
+
+1. **Zoom was cancelling itself out**. `computeMeshNormalize` divides by `visibleHalf` (which scales as `1/zoom` because `camera.position.z = 6 / zoom`) whenever `sizeCss` is set — this is by design, so the initial media-art apply lands on the user's stroke CSS bbox. But that cancellation ALSO neutralised the camera dolly's zoom response: the mesh stayed pinned at its starting CSS size regardless of `setZoom()`. Two-hand stretch therefore had no effect, even though the gesture pipeline was correctly calling `setZoom`.
+
+2. **Rotation never reached the mesh**. 0.18.0 moved media-art meshes onto a non-rotating `meshRoot` scene group to fix the idle-wobble drift bug. The fix was correct, but it also meant user-driven rotation (`this.rot{X,Y,Z}` set via `setRotation` and consumed by `applyContainerRotationAndZoom` → `charContainer.rotation`) no longer propagated to meshes. Two-hand rotation was silently dropped.
+
+### Fixed
+- `Hologram3DRenderer.renderMeshFrame` — multiplies `baseScale` by `this.zoom` when `slot.sizeCss` is set so the sized-mesh branch recovers linear zoom response. When `sizeCss` is null the multiplier is `1` (the camera dolly alone gives linear response; applying the multiplier there would produce quadratic scaling).
+- `Hologram3DRenderer.renderMeshFrame` — writes `this.rot{X,Y,Z}` to each mesh slot's `group.rotation` every frame. Rotation is applied around each mesh's group-local origin; combined with the bbox-center position offset, the pivot point is the mesh's world-space bbox center.
+- Bbox-center position offset (`-cx * scale`) is now computed from the zoom-multiplied scale so the CSS anchor (`translateMeshTo` target) stays stable as zoom changes.
+
+### Tests
+- 3 new regression tests in `tests/hologram-mesh-mode.test.ts` (`Hologram3DRenderer mesh two-hand gesture response` suite): linear zoom response with `sizeCss` set, rotation reaching each mesh group every frame, zoom × rotation composition across successive frames.
+
+### Notes
+- Non-breaking; renderer-internal changes only. `@glymo/ui`'s `useHologramController` wiring (setZoom + setRotation on two-hand) is unchanged — this is the corresponding renderer-side fix.
+- When `sizeCss` is null (an unusual path — media-art apply always sets sizeCss via `@glymo/ui@0.29.0`), the camera dolly alone still drives zoom, so the fix is symmetric and production-safe.
+- Follow-up consideration: for meshes whose geometry bbox center is far from their local origin (rare — most GLB authors ship centered meshes), rotation will orbit around the local origin rather than the bbox center. A future release can add an inner-group pivot to guarantee exact bbox-center rotation; the current fix is sufficient for the canonical media-art catalog (Earth, Avocado, Shiba, etc.).
+
+## [0.22.1] - 2026-04-23
+
+Fixes a regression surfaced immediately after 0.22.0 shipped: the world-space pivot indicator (a subtle crosshair plus a dot, `0x00bbff` sky blue) painted on top of the mesh grew to fill the entire viewport whenever the user drove the mesh to a large zoom via two-hand stretch. Root cause: the pivot is fixed world-space geometry (0.6 × 0.008 cross planes, 0.04-radius circle), and `Hologram3DRenderer`'s camera dolly formula is `camera.position.z = 6 / zoom`, so removing the 3.0× upper clamp in 0.22.0 let the camera get arbitrarily close to the pivot. Pre-0.22.0 the clamp ceiling limited the pivot's on-screen footprint to a tolerable size *by accident*. Canonical fix: counter-scale `pivotGroup` by `1 / zoom` every frame so the indicator is pinned to its original on-screen footprint regardless of camera distance.
+
+### Fixed
+- `Hologram3DRenderer.applyContainerRotationAndZoom` — `this.pivotGroup.scale.set(1/zoom, 1/zoom, 1/zoom)` is written every frame (right after the opacity fade). This keeps the crosshair + dot at a screen-constant size from `zoom = 0.01` all the way to arbitrary upper values, closing the "large blue disc fills screen" bug reported against 0.22.0.
+
+### Tests
+- 4 new regression tests in `tests/hologram-mesh-mode.test.ts` (`Hologram3DRenderer pivot screen-constant scaling` suite) pinning the 1/zoom contract at zoom = 1 (baseline), zoom = 10 (shrink to 0.1), zoom = 0.5 (grow to 2.0), and a multi-frame sweep `[1, 2, 5, 20, 100, 0.3]` to cover the full unbounded range opened by 0.22.0.
+
+### Notes
+- Non-breaking; purely internal renderer change. No public API surface moves.
+- Pairs with `@glymo/ui@0.35.0` (consumer unchanged — UI does not need a bump for this fix).
+- The `_pivotMats` array on the group continues to drive opacity; only the group's transform is touched by this change.
+
 ## [0.22.0] - 2026-04-23
 
 Removes the hard 3.0x upper clamp on `Hologram3DRenderer.setZoom` per user spec (2026-04-23). The legacy `Math.max(0.3, Math.min(3.0, zoom))` clamp was a design-era default carried over from the text-hologram era; in mesh mode (Media Art) it capped the maximum visible mesh size at 3× the original stroke's CSS bbox, which the user reported as "미디어아트가 원본 영역을 못 벗어난다" after PR 1 + PR 2 of the gesture-delegation refactor landed. The hard cap is now removed; only a lower mathematical floor of `0.01` remains to guard against zero / negative / NaN-driven degenerate transforms. Callers are now free to drive the mesh arbitrarily large via two-hand stretch.

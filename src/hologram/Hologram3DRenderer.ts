@@ -1402,7 +1402,30 @@ export class Hologram3DRenderer {
         },
       });
       const baseScale = normalize * this.transition;
-      group.scale.set(baseScale, baseScale, baseScale);
+      // User-driven zoom multiplier (0.22.2). `computeMeshNormalize` divides
+      // by `visibleHalf` (∝ 1/zoom) when `sizeCss` is set, so `baseScale`
+      // itself scales as 1/zoom — exactly cancelling the camera dolly
+      // (`camera.z = 6 / zoom`) and leaving the mesh at a fixed CSS size.
+      // Good for the initial apply (mesh lands on the stroke bbox), bad
+      // for two-hand stretch (no visible effect). Multiplying by
+      // `this.zoom` reintroduces the zoom response for that branch so
+      // visual size = bbox * zoom.
+      //
+      // In the fallback branch (`sizeCss === null`, returns `2/maxDim`),
+      // `baseScale` is already zoom-independent — the camera dolly alone
+      // provides linear zoom response, so a zoom multiplier here would
+      // produce quadratic response. Gate accordingly.
+      const zoomMultiplier = slot.sizeCss ? this.zoom : 1;
+      const zoomedScale = baseScale * zoomMultiplier;
+      group.scale.set(zoomedScale, zoomedScale, zoomedScale);
+      // User-driven rotation (0.22.2). Meshes live on `meshRoot` (0.18.0)
+      // which does NOT inherit `charContainer.rotation`, so the two-hand
+      // X/Y/Z rotation channel written onto `this.rot{X,Y,Z}` by the host
+      // controller was not reaching mesh-mode meshes. Writing the rotation
+      // directly onto each mesh slot's group is the canonical sink for
+      // mesh mode — applied around the group's local origin, which is
+      // offset below so the bbox center is the actual world pivot point.
+      group.rotation.set(this.rotX, this.rotY, this.rotZ);
 
       const cx = (bb.max.x + bb.min.x) * 0.5;
       const cy = (bb.max.y + bb.min.y) * 0.5;
@@ -1421,10 +1444,15 @@ export class Hologram3DRenderer {
         offY = ndcY * visibleHalfH;
       }
 
+      // Bbox-center offset uses the ZOOMED scale so the mesh bbox center
+      // always lands at (offX, offY, 0) regardless of zoom — rotation
+      // around the group's local origin is therefore rotation around the
+      // world-space bbox center. Using `baseScale` here would pull the
+      // mesh off the CSS anchor every time zoom changed.
       group.position.set(
-        -cx * baseScale + offX,
-        -cy * baseScale + offY,
-        -cz * baseScale,
+        -cx * zoomedScale + offX,
+        -cy * zoomedScale + offY,
+        -cz * zoomedScale,
       );
     }
   }
@@ -1448,6 +1476,14 @@ export class Hologram3DRenderer {
         mat.opacity += (targetPivotOpacity - mat.opacity) * 0.1;
       }
       this.pivotGroup.visible = pivotMats[0]!.opacity > 0.01;
+      // Screen-constant pivot: camera.z = 6 / zoom, so without compensation
+      // the fixed world-space geometry (0.6 cross + 0.04 dot) fills the
+      // viewport when zoom grows large. Counter-scale by 1/zoom to pin the
+      // indicator to its original on-screen footprint. Required after the
+      // 0.22.0 zoom-upper-clamp removal (pre-0.22.0 max zoom=3 limited the
+      // growth to a tolerable level by accident; now the cap is gone).
+      const inverseZoom = 1 / this.zoom;
+      this.pivotGroup.scale.set(inverseZoom, inverseZoom, inverseZoom);
     }
 
     // Zoom

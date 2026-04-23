@@ -570,6 +570,246 @@ describe('Hologram3DRenderer mesh single-hand pinch-grab', () => {
   });
 });
 
+// ── Pivot indicator screen-constant size (0.22.1) ────────────────────────────
+//
+// Pins the 1/zoom counter-scale in applyContainerRotationAndZoom. The pivot
+// cross + dot are fixed world-space geometry (0.6 + 0.04 units); camera.z =
+// 6 / zoom brings the camera arbitrarily close as zoom grows, so without
+// counter-scaling the indicator fills the viewport. Added after 0.22.0
+// removed the zoom upper clamp — prior versions capped zoom at 3× by accident
+// which kept the pivot's apparent size tolerable, but the cap is now gone.
+//
+// Regression gate: pivotGroup.scale must be 1/zoom on every frame.
+
+describe('Hologram3DRenderer pivot screen-constant scaling', () => {
+  it('pivotGroup.scale equals 1/zoom at zoom=1 (baseline)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'pivot-baseline', {
+      type: 'gltf',
+      id: 'pivot-baseline',
+      url: 'https://cdn/p.glb',
+    });
+    r.setTransition(1);
+    r.setZoom(1);
+    r.renderFrame();
+    const pivot = (r as unknown as { pivotGroup: { scale: { x: number; y: number; z: number } } }).pivotGroup;
+    expect(pivot.scale.x).toBeCloseTo(1, 5);
+    expect(pivot.scale.y).toBeCloseTo(1, 5);
+    expect(pivot.scale.z).toBeCloseTo(1, 5);
+    r.dispose();
+  });
+
+  it('pivotGroup.scale shrinks to 0.1 at zoom=10 (large zoom compensates)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'pivot-zoom-in', {
+      type: 'gltf',
+      id: 'pivot-zoom-in',
+      url: 'https://cdn/p.glb',
+    });
+    r.setTransition(1);
+    r.setZoom(10);
+    r.renderFrame();
+    const pivot = (r as unknown as { pivotGroup: { scale: { x: number; y: number; z: number } } }).pivotGroup;
+    expect(pivot.scale.x).toBeCloseTo(0.1, 5);
+    expect(pivot.scale.y).toBeCloseTo(0.1, 5);
+    expect(pivot.scale.z).toBeCloseTo(0.1, 5);
+    r.dispose();
+  });
+
+  it('pivotGroup.scale grows to 2 at zoom=0.5 (small zoom expands proportionally)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'pivot-zoom-out', {
+      type: 'gltf',
+      id: 'pivot-zoom-out',
+      url: 'https://cdn/p.glb',
+    });
+    r.setTransition(1);
+    r.setZoom(0.5);
+    r.renderFrame();
+    const pivot = (r as unknown as { pivotGroup: { scale: { x: number; y: number; z: number } } }).pivotGroup;
+    expect(pivot.scale.x).toBeCloseTo(2, 5);
+    expect(pivot.scale.y).toBeCloseTo(2, 5);
+    expect(pivot.scale.z).toBeCloseTo(2, 5);
+    r.dispose();
+  });
+
+  it('pivotGroup.scale follows zoom changes across successive frames', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.addMesh('obj-1', 'pivot-sweep', {
+      type: 'gltf',
+      id: 'pivot-sweep',
+      url: 'https://cdn/p.glb',
+    });
+    r.setTransition(1);
+    const pivot = (r as unknown as { pivotGroup: { scale: { x: number; y: number; z: number } } }).pivotGroup;
+    for (const z of [1, 2, 5, 20, 100, 0.3]) {
+      r.setZoom(z);
+      r.renderFrame();
+      expect(pivot.scale.x).toBeCloseTo(1 / z, 4);
+      expect(pivot.scale.y).toBeCloseTo(1 / z, 4);
+      expect(pivot.scale.z).toBeCloseTo(1 / z, 4);
+    }
+    r.dispose();
+  });
+});
+
+// ── Mesh two-hand gesture response (0.22.2) ──────────────────────────────────
+//
+// Pins the two canonical fixes for the "mesh frozen under two-hand gesture"
+// bug surfaced immediately after 0.22.0 removed the zoom upper clamp:
+//
+//   1. Zoom must produce a visible mesh size change. `computeMeshNormalize`
+//      cancels zoom when `sizeCss` is set (so the initial apply lands at the
+//      stroke CSS bbox), but that cancellation also neutralised the camera
+//      dolly. The `renderMeshFrame` path now multiplies `baseScale * zoom`
+//      when `sizeCss` is set, restoring linear zoom response. When `sizeCss`
+//      is null the multiplier is 1 — the camera dolly alone gives linear
+//      response (multiplying would be quadratic).
+//
+//   2. Rotation must reach the mesh. Meshes live on `meshRoot` (0.18.0)
+//      which does NOT inherit `charContainer.rotation`, so two-hand X/Y/Z
+//      rotation was silently dropped on the floor. `renderMeshFrame` now
+//      writes `this.rot{X,Y,Z}` onto each mesh slot's group.rotation every
+//      frame.
+//
+// The 0.22.2 regression gate keeps both fixes green going forward.
+
+describe('Hologram3DRenderer mesh two-hand gesture response', () => {
+  it('with sizeCss set, mesh visual size grows linearly with setZoom (via scale*zoom proxy)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'zoom-sized', {
+      type: 'gltf',
+      id: 'zoom-sized',
+      url: 'https://cdn/z.glb',
+    });
+    r.setTransition(1);
+    r.setMeshSizeCss('obj-1', 100, 100);
+    const group = handle!.state.group as unknown as { scale: { x: number; y: number; z: number } };
+
+    // In the sizeCss branch, `normalize` is proportional to `visibleHalf`,
+    // which is proportional to `1/zoom` (because `camera.z = 6/zoom`). The
+    // zoom multiplier cancels that so `group.scale` stays constant across
+    // zoom values, and the camera dolly alone provides the linear visual
+    // response. The externally-observable invariant is therefore:
+    //   scale * zoom  ∝  zoom   (linear in zoom)
+    // which is exactly what the screen projection formula reduces to when
+    // the camera is at `z = 6/zoom`.
+
+    r.setZoom(1);
+    r.renderFrame();
+    const effectiveAtZoom1 = group.scale.x * 1;
+    expect(effectiveAtZoom1).toBeGreaterThan(0);
+
+    r.setZoom(2);
+    r.renderFrame();
+    expect(group.scale.x * 2).toBeCloseTo(effectiveAtZoom1 * 2, 5);
+
+    r.setZoom(5);
+    r.renderFrame();
+    expect(group.scale.x * 5).toBeCloseTo(effectiveAtZoom1 * 5, 5);
+
+    r.setZoom(0.5);
+    r.renderFrame();
+    expect(group.scale.x * 0.5).toBeCloseTo(effectiveAtZoom1 * 0.5, 5);
+
+    r.dispose();
+  });
+
+  it('with sizeCss set, group.scale itself is zoom-invariant (the cancellation is the fix)', async () => {
+    // This is the direct regression gate on the 0.22.2 change: without the
+    // `* this.zoom` multiplier in `renderMeshFrame`, `group.scale` scaled
+    // as 1/zoom and the camera dolly cancelled out. With the multiplier,
+    // the two cancellations compose to a CONSTANT `group.scale` plus a
+    // linear camera dolly — net-linear visual response.
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'zoom-invariant', {
+      type: 'gltf',
+      id: 'zoom-invariant',
+      url: 'https://cdn/zi.glb',
+    });
+    r.setTransition(1);
+    r.setMeshSizeCss('obj-1', 100, 100);
+    const group = handle!.state.group as unknown as { scale: { x: number } };
+
+    r.setZoom(1);
+    r.renderFrame();
+    const s1 = group.scale.x;
+
+    for (const z of [0.3, 2, 5, 20]) {
+      r.setZoom(z);
+      r.renderFrame();
+      // scale stays constant in world — camera dolly does the zooming.
+      expect(group.scale.x).toBeCloseTo(s1, 5);
+    }
+
+    r.dispose();
+  });
+
+  it('mesh rotation reflects setRotation every frame', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'rot', {
+      type: 'gltf',
+      id: 'rot',
+      url: 'https://cdn/r.glb',
+    });
+    r.setTransition(1);
+    const group = handle!.state.group as unknown as { rotation: { x: number; y: number; z: number } };
+
+    r.setRotation(0, 0, 0);
+    r.renderFrame();
+    expect(group.rotation.x).toBeCloseTo(0, 5);
+    expect(group.rotation.y).toBeCloseTo(0, 5);
+    expect(group.rotation.z).toBeCloseTo(0, 5);
+
+    r.setRotation(0.5, -0.3, 0.7);
+    r.renderFrame();
+    expect(group.rotation.x).toBeCloseTo(0.5, 5);
+    expect(group.rotation.y).toBeCloseTo(-0.3, 5);
+    expect(group.rotation.z).toBeCloseTo(0.7, 5);
+
+    r.setRotation(1.2, 0.8, -0.4);
+    r.renderFrame();
+    expect(group.rotation.x).toBeCloseTo(1.2, 5);
+    expect(group.rotation.y).toBeCloseTo(0.8, 5);
+    expect(group.rotation.z).toBeCloseTo(-0.4, 5);
+
+    r.dispose();
+  });
+
+  it('zoom and rotation compose per-mesh across successive frames', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    const handle = await r.addMesh('obj-1', 'combo', {
+      type: 'gltf',
+      id: 'combo',
+      url: 'https://cdn/c.glb',
+    });
+    r.setTransition(1);
+    r.setMeshSizeCss('obj-1', 80, 120);
+    const group = handle!.state.group as unknown as {
+      scale: { x: number; y: number; z: number };
+      rotation: { x: number; y: number; z: number };
+    };
+
+    r.setZoom(1);
+    r.setRotation(0, 0, 0);
+    r.renderFrame();
+    const baseScale = group.scale.x;
+
+    // Compose: zoom 3x, yaw quarter turn.
+    r.setZoom(3);
+    r.setRotation(0.1, Math.PI / 2, 0.05);
+    r.renderFrame();
+    // scale stays constant (zoom cancellation); camera dolly delivers
+    // the visual response — same invariant as the zoom-invariant test.
+    expect(group.scale.x).toBeCloseTo(baseScale, 5);
+    expect(group.rotation.x).toBeCloseTo(0.1, 5);
+    expect(group.rotation.y).toBeCloseTo(Math.PI / 2, 5);
+    expect(group.rotation.z).toBeCloseTo(0.05, 5);
+
+    r.dispose();
+  });
+});
+
 // ── Mesh-animation pause API (0.16.0 per-object) ─────────────────────────────
 //
 // Pins the contract added for the 2026-04-21 Studio ADR that removed
