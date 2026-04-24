@@ -1133,6 +1133,19 @@ export class Hologram3DRenderer {
     // same scene graph); for now the mesh path is exclusive and the char
     // loop only runs when no slot is loaded. Container rotation / zoom /
     // pivot indicator at the end of this branch runs for both paths.
+    //
+    // KNOWN LIMITATION (2026-04-24 QA — Issue #3, tracked in the 0.50.0
+    // release notes): with this early-return in place, the scenario
+    // "apply MediaArt → switch to text mode → type a character → select
+    // the hologram tool" renders nothing for the text-mode char because
+    // the slot-count gate short-circuits the char sync loop below. The
+    // user sees their MediaArt mesh alone and their typed glyph never
+    // lifts into the 3D layer. The canonical fix is to drop the exclusive
+    // branch and run BOTH loops per frame (meshes + chars coexist in the
+    // scene graph), then call postProcessing.render() once. That change
+    // is deferred because it requires end-to-end repro verification of
+    // z-order / alpha blending / bloom interaction between the two layer
+    // types — a core-side change without that repro is speculative.
     if (this.meshes.size > 0) {
       this.renderMeshFrame(elapsed);
       this.applyContainerRotationAndZoom(elapsed, transition);
