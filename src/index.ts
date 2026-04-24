@@ -255,6 +255,23 @@ export type { LandmarkPoint } from './gesture/HologramGesture.js';
 export { DiagBus } from './diag/DiagBus.js';
 export type { DiagEvent, DiagStage, DiagListener } from './diag/DiagBus.js';
 
+// ── Render-clock scheduler (Phase 1 of rendering-pipeline-v2) ──────────
+//
+// Single `requestAnimationFrame` consumer with a 6-phase lifecycle. All
+// `@glymo/core` subsystems that used to own their own rAF subscribe here
+// instead; `@glymo/ui` consumes via `Glymo.getScheduler()` in Phase 5.
+// `PostTaskBridge` is a feature-detected alternative for background work
+// that yields rather than competing with render frames.
+
+export { RafScheduler, SCHEDULER_PHASE_ORDER } from './scheduler/RafScheduler.js';
+export type {
+  SchedulerPhase,
+  SchedulerCallback,
+  SchedulerUnsubscribe,
+} from './scheduler/RafScheduler.js';
+export { PostTaskBridge, isPostTaskSupported } from './scheduler/PostTaskBridge.js';
+export type { PostTaskPriority, PostTaskOptions } from './scheduler/PostTaskBridge.js';
+
 // ── Main Class ──────────────────────────────────────
 
 export { Glymo } from './Glymo.js';

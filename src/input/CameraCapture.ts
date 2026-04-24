@@ -4,6 +4,7 @@ import { clamp01 } from '../gesture/math.js';
 import { OneEuroFilter } from '../filter/OneEuroFilter.js';
 import { GestureDetector } from './GestureDetector.js';
 import { computePinchDistance, computeSpeed, zToPressure } from './camera-utils.js';
+import { RafScheduler, type SchedulerUnsubscribe } from '../scheduler/RafScheduler.js';
 
 // Re-export so existing consumers (e.g. index.ts, tests) are not broken
 export { PINCH_THRESHOLD };
@@ -138,7 +139,15 @@ export class CameraCapture implements InputCapture {
   private video: HTMLVideoElement | null = null;
   private stream: MediaStream | null = null;
   private handLandmarker: HandLandmarkerInstance | null = null;
-  private animFrameId: number | null = null;
+  /** Phase 1 (rendering-pipeline-v2): both detection loops (worker-based
+   *  and sync fallback) subscribe to the scheduler's `beforeUpdate` phase
+   *  so sensor input arrives before engine state consumes it each frame.
+   *  `detectionUnsub` is the teardown handle; non-null = active. The
+   *  scheduler is injected — Camera capture never owns its lifecycle (Glymo
+   *  does) but stays operable in stand-alone mode via a private default. */
+  private readonly scheduler: RafScheduler;
+  private readonly ownsScheduler: boolean;
+  private detectionUnsub: SchedulerUnsubscribe | null = null;
   private active = false;
   /**
    * Monotonic generation counter bumped on every `start()` and `stop()`.
@@ -235,11 +244,19 @@ export class CameraCapture implements InputCapture {
     onPenState: PenStateCallback,
     onError: ErrorCallback = () => {},
     onSuccess: SuccessCallback = () => {},
+    scheduler?: RafScheduler,
   ) {
     this.onPoint = onPoint;
     this.onPenState = onPenState;
     this.onError = onError;
     this.onSuccess = onSuccess;
+    if (scheduler) {
+      this.scheduler = scheduler;
+      this.ownsScheduler = false;
+    } else {
+      this.scheduler = new RafScheduler();
+      this.ownsScheduler = true;
+    }
   }
 
   /**
@@ -703,12 +720,12 @@ export class CameraCapture implements InputCapture {
   }
 
   private startWorkerDetectionLoop(): void {
-    const loop = (): void => {
+    if (this.detectionUnsub !== null) return;
+    if (this.ownsScheduler) this.scheduler.start();
+    this.detectionUnsub = this.scheduler.subscribe('beforeUpdate', () => {
       if (!this.active) return;
       this.sendFrameToWorker();
-      this.animFrameId = requestAnimationFrame(loop);
-    };
-    this.animFrameId = requestAnimationFrame(loop);
+    });
   }
 
   private terminateWorker(): void {
@@ -729,12 +746,12 @@ export class CameraCapture implements InputCapture {
   // ── Private: detection loop (sync fallback) ─────────
 
   private startDetectionLoop(): void {
-    const detect = (): void => {
+    if (this.detectionUnsub !== null) return;
+    if (this.ownsScheduler) this.scheduler.start();
+    this.detectionUnsub = this.scheduler.subscribe('beforeUpdate', () => {
       if (!this.active) return;
       this.processFrameSync();
-      this.animFrameId = requestAnimationFrame(detect);
-    };
-    this.animFrameId = requestAnimationFrame(detect);
+    });
   }
 
   /** Sync fallback: detect + process in one blocking call. */
@@ -1105,10 +1122,16 @@ export class CameraCapture implements InputCapture {
   // ── Private: cleanup ─────────────────────────────────
 
   private cancelAnimationFrame(): void {
-    if (this.animFrameId !== null) {
-      cancelAnimationFrame(this.animFrameId);
-      this.animFrameId = null;
+    // Naming kept for call-site stability (3 callers — L350, L646, and the
+    // worker-setup error path). The implementation now unsubscribes from
+    // the shared scheduler instead of calling the browser `cancelAnimation
+    // Frame`, and — if this capture owns its scheduler — stops the
+    // scheduler's rAF chain so a torn-down stand-alone capture is inert.
+    if (this.detectionUnsub !== null) {
+      this.detectionUnsub();
+      this.detectionUnsub = null;
     }
+    if (this.ownsScheduler) this.scheduler.stop();
   }
 
   private releaseCamera(): void {

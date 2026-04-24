@@ -9,6 +9,7 @@ import type { TextRecognizer } from './TextRecognizer.js';
 import type { GlyphExtractor } from './GlyphExtractor.js';
 import type { PointMatcher } from './PointMatcher.js';
 import type { FontMorphAnimator } from './FontMorphAnimator.js';
+import type { RafScheduler } from '../scheduler/RafScheduler.js';
 import { recognizeHandwriting } from './HandwritingRecognizer.js';
 
 /** Maps Tesseract 3-letter language codes to BCP 47 codes used by Google Handwriting API */
@@ -45,6 +46,12 @@ export class TextPipelineController {
     private readonly eventBus: EventBus,
     private readonly stateMachine: SessionStateMachine,
     private effect: EffectPresetName = 'neon',
+    /** Phase 1 (rendering-pipeline-v2): when supplied, every morph
+     *  animator created by this controller shares the host's scheduler
+     *  instead of spinning up its own rAF chain. Undefined in tests /
+     *  stand-alone usage — `FontMorphAnimator` self-provisions in that
+     *  case. */
+    private readonly scheduler?: RafScheduler,
   ) {}
 
   setTypographyMode(mode: TypographyMode): void {
@@ -205,6 +212,7 @@ export class TextPipelineController {
     this.morphAnimator = new FMA(
       { matchedCharacters: matched, effectColor },
       this.eventBus,
+      this.scheduler,
     );
     this.morphAnimator.start();
   }

@@ -5,6 +5,7 @@ import type { EventBus } from '../state/EventBus.js';
 import type { MatchedCharacter, FontMorphOptions } from './types.js';
 import { hexToRgb } from '../util/math.js';
 import { easeOutElastic } from '../animate/MorphAnimator.js';
+import { RafScheduler, type SchedulerUnsubscribe } from '../scheduler/RafScheduler.js';
 
 // ── Constants (IMMUTABLE per design.md) ─────────────
 
@@ -49,12 +50,17 @@ export class FontMorphAnimator {
   private readonly charCount: number;
   private readonly eventBus: EventBus;
 
-  private animFrameId: number | null = null;
+  /** Phase 1 (rendering-pipeline-v2): morph-tick RAF delegated to
+   *  `RafScheduler`. Subscribes to 'update' phase because morph progress
+   *  is engine state (consumed by CanvasRenderer in the 'render' phase). */
+  private readonly scheduler: RafScheduler;
+  private readonly ownsScheduler: boolean;
+  private tickUnsub: SchedulerUnsubscribe | null = null;
   private startTime = 0;
   private active = false;
   private lastFrame: MorphFrame | null = null;
 
-  constructor(options: FontMorphOptions, eventBus: EventBus) {
+  constructor(options: FontMorphOptions, eventBus: EventBus, scheduler?: RafScheduler) {
     this.matchedCharacters = options.matchedCharacters;
     this.allPairs = flattenPairs(options.matchedCharacters);
     this.targetColor = hexToRgb(options.effectColor);
@@ -62,9 +68,17 @@ export class FontMorphAnimator {
     this.cascadeDelay = options.cascadeDelay ?? CASCADE_DELAY_MS;
     this.charCount = options.matchedCharacters.length;
     this.eventBus = eventBus;
+    if (scheduler) {
+      this.scheduler = scheduler;
+      this.ownsScheduler = false;
+    } else {
+      this.scheduler = new RafScheduler();
+      this.ownsScheduler = true;
+    }
   }
 
-  /** Begin the morph animation (uses requestAnimationFrame) */
+  /** Begin the morph animation. Subscribes the morph tick to the shared
+   *  `RafScheduler` ('update' phase); unsubscribes on completion / cancel. */
   start(): void {
     this.active = true;
     this.startTime = performance.now();
@@ -97,10 +111,11 @@ export class FontMorphAnimator {
   /** Cancel ongoing animation */
   cancel(): void {
     this.active = false;
-    if (this.animFrameId !== null) {
-      cancelAnimationFrame(this.animFrameId);
-      this.animFrameId = null;
+    if (this.tickUnsub !== null) {
+      this.tickUnsub();
+      this.tickUnsub = null;
     }
+    if (this.ownsScheduler) this.scheduler.stop();
   }
 
   isActive(): boolean {
@@ -117,21 +132,39 @@ export class FontMorphAnimator {
 
   // ── Private Methods ───────────────────────────────
 
-  /** Schedule the next animation frame via rAF */
+  /** Schedule the morph tick subscription. Called once from `start()` —
+   *  the scheduler drives all subsequent frames via the 'update' phase. */
   private scheduleFrame(): void {
     if (!this.active) return;
-    this.animFrameId = requestAnimationFrame((now) => this.onFrame(now));
+    if (this.tickUnsub !== null) return; // already subscribed
+    if (this.ownsScheduler) this.scheduler.start();
+    this.tickUnsub = this.scheduler.subscribe('update', (now) => {
+      this.onFrame(now);
+    });
   }
 
-  /** Animation frame callback */
+  /** Animation frame callback. Fires once per scheduler tick until the
+   *  morph completes — at which point `update()` flips `active=false` and
+   *  we unsubscribe to avoid running an idle subscription. */
   private onFrame(now: number): void {
-    if (!this.active) return;
-
+    if (!this.active) {
+      // Self-unsubscribe: the subscriber list is iterated from a snapshot,
+      // so this unsub is honoured on the next frame (same semantics as
+      // any `this.tickUnsub()` call).
+      if (this.tickUnsub !== null) {
+        this.tickUnsub();
+        this.tickUnsub = null;
+      }
+      if (this.ownsScheduler) this.scheduler.stop();
+      return;
+    }
     const elapsed = now - this.startTime;
     this.update(elapsed);
-
-    if (this.active) {
-      this.scheduleFrame();
+    if (!this.active && this.tickUnsub !== null) {
+      // Completion path: morph just finished this tick.
+      this.tickUnsub();
+      this.tickUnsub = null;
+      if (this.ownsScheduler) this.scheduler.stop();
     }
   }
 

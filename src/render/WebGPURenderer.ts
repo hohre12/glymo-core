@@ -4,6 +4,7 @@ import { resolveEffect } from '../effects/registry.js';
 import { hexToRgb } from '../util/math.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
 import type { FontMorphAnimator } from '../text/FontMorphAnimator.js';
+import { RafScheduler, type SchedulerUnsubscribe } from '../scheduler/RafScheduler.js';
 import type { EventBus } from '../state/EventBus.js';
 import type { IRenderer, RendererType } from './IRenderer.js';
 import type { OverlayText } from '../text/types.js';
@@ -164,8 +165,12 @@ export class WebGPURenderer implements IRenderer {
   private uniformBuffer: GPUBuffer | null = null;
   private uniformBindGroup: GPUBindGroup | null = null;
 
-  private animationId: number | null = null;
-  private lastFrameTime = 0;
+  /** Phase 1 (rendering-pipeline-v2): RAF loop delegated to the injected
+   *  `RafScheduler`. See the same-named block in `CanvasRenderer.ts` for
+   *  the ownership / stand-alone lifecycle contract. */
+  private readonly scheduler: RafScheduler;
+  private readonly ownsScheduler: boolean;
+  private schedulerUnsub: SchedulerUnsubscribe | null = null;
   private elapsedTime = 0;
 
   private completedStrokes: Stroke[] = [];
@@ -183,9 +188,16 @@ export class WebGPURenderer implements IRenderer {
 
   private initialized = false;
 
-  constructor(canvas: HTMLCanvasElement, dpr: number = 1) {
+  constructor(canvas: HTMLCanvasElement, dpr: number = 1, scheduler?: RafScheduler) {
     this.canvas = canvas;
     this.dpr = dpr;
+    if (scheduler) {
+      this.scheduler = scheduler;
+      this.ownsScheduler = false;
+    } else {
+      this.scheduler = new RafScheduler();
+      this.ownsScheduler = true;
+    }
   }
 
   async init(): Promise<boolean> {
@@ -212,13 +224,19 @@ export class WebGPURenderer implements IRenderer {
   setEventBus(_bus: EventBus): void { /* reserved for future event emission */ }
 
   start(): void {
-    if (this.animationId !== null) return;
-    this.lastFrameTime = performance.now();
-    this.animationId = requestAnimationFrame((t) => this.renderLoop(t));
+    if (this.schedulerUnsub !== null) return;
+    if (this.ownsScheduler) this.scheduler.start();
+    this.schedulerUnsub = this.scheduler.subscribe('render', (ts, dt) => {
+      this.renderTick(ts, dt);
+    });
   }
 
   stop(): void {
-    if (this.animationId !== null) { cancelAnimationFrame(this.animationId); this.animationId = null; }
+    if (this.schedulerUnsub !== null) {
+      this.schedulerUnsub();
+      this.schedulerUnsub = null;
+    }
+    if (this.ownsScheduler) this.scheduler.stop();
   }
 
   setActivePointsSource(fn: () => ReadonlyArray<StrokePoint>): void { this.getActivePointsFn = fn; }
@@ -352,16 +370,16 @@ export class WebGPURenderer implements IRenderer {
 
   // ── Render loop ───────────────────────────────────
 
-  private renderLoop(timestamp: number): void {
-    const dt = timestamp - this.lastFrameTime;
-    this.lastFrameTime = timestamp;
+  private renderTick(_timestamp: number, dt: number): void {
+    // Teardown guard: scheduler snapshot semantics can deliver one post-
+    // unsubscribe tick (see CanvasRenderer.renderFrame for the same guard).
+    if (this.schedulerUnsub === null) return;
     this.elapsedTime += dt * 0.001; // seconds
     this.activePoints = this.getActivePointsFn?.() ?? [];
 
     if (this.device && this.gpuContext) this.renderFrame(dt);
     this.renderOverlay();
-
-    this.animationId = requestAnimationFrame((t) => this.renderLoop(t));
+    // No rAF re-queue — scheduler drives the next frame.
   }
 
   private renderFrame(_dt: number): void {

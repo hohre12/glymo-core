@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.25.0] - 2026-04-24
+
+**Rendering pipeline v2 — Phase 1: single render-clock scheduler.**
+
+Introduces `RafScheduler` as the sole `requestAnimationFrame` consumer for `@glymo/core`. Every subsystem that used to own its own rAF loop now subscribes to a shared 6-phase lifecycle (`beforeUpdate → update → afterUpdate → beforeRender → render → afterRender`). On a working Glymo instance, the browser sees exactly one rAF user per instance instead of the five measured on `main` (CanvasRenderer main + re-entry, WebGPURenderer, CameraCapture worker + sync fallback, FontMorphAnimator, GIFExporter's one-shot yield).
+
+This is Phase 1 of the rendering-pipeline-v2 refactor — see `docs/plans/rendering-pipeline-v2.md` §4.1 + §6 Phase 1 for the invariants and acceptance criteria driving the design. Additive: existing constructors accept an optional `scheduler` argument; callers that omit it get a per-instance scheduler so stand-alone usage (tests, one-off fixtures) continues to work without migration.
+
+### Added
+- `src/scheduler/RafScheduler.ts` — single-rAF scheduler with the 6-phase lifecycle, start/stop/setActive lifecycle, idempotent subscribe/unsubscribe, snapshot-safe per-phase iteration (subscribe/unsubscribe during a callback is safe), and error isolation (a throwing subscriber logs but cannot break siblings, later phases, or future frames).
+- `src/scheduler/PostTaskBridge.ts` — feature-detected bridge over `scheduler.postTask` (Chromium 115+) with a priority-aware `setTimeout` fallback for Safari 26 / Firefox 130 which do not yet ship postTask. AbortSignal support on both paths.
+- `Glymo.getScheduler(): RafScheduler` — public accessor the UI-side consumer (`@glymo/ui` Phase 5) uses to subscribe its own hooks to the same lifecycle.
+- 32 Vitest cases under `src/scheduler/__tests__/` covering every contract above (RafScheduler: 21, PostTaskBridge: 11).
+
+### Changed
+- `CanvasRenderer` — main 2D render loop (was L91+93+386+387) now subscribes to `'render'`. Constructor accepts optional `scheduler: RafScheduler` as the 3rd arg; falls back to a per-instance scheduler otherwise.
+- `WebGPURenderer` — main WebGPU loop (was L217+L364) migrated identically.
+- `CameraCapture` — both the worker detection loop (was L709+711) and the sync fallback loop (was L735+737) subscribe to `'beforeUpdate'` so sensor input arrives before engine state updates consume it. Constructor accepts optional `scheduler`. The legacy private `cancelAnimationFrame()` method is retained as a name for call-site stability (3 internal callers) — its body now unsubscribes from the scheduler.
+- `FontMorphAnimator` — morph tick (was L123) subscribes to `'update'`; self-unsubscribes on completion / cancel.
+- `GIFExporter.exportGIF(options)` — new optional `options.scheduler` uses the scheduler's `'afterRender'` phase with auto-unsub for frame-yield; bare `requestAnimationFrame` remains as a fallback.
+- `InputManager` — accepts optional `scheduler` in constructor, forwards to every `CameraCapture` it creates.
+- `TextPipelineController` — accepts optional `scheduler` (5th arg), forwards to every `FontMorphAnimator` it creates.
+- `Glymo` — constructs a single `RafScheduler`, calls `start()` on it at construction, injects it into `CanvasRenderer`, `WebGPURenderer` (mode switch), `InputManager`, and `TextPipelineController`. `destroy()` calls `scheduler.stop()` so a disposed instance leaks zero rAF chains.
+- `peerDependencies.three` raised from `>=0.160.0` to `>=0.183.0` to match `@glymo/ui@0.50.1`'s peerDep and the direct dependency `^0.183.2` (docs/plans/rendering-pipeline-v2.md §1.5.4 R-B).
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc wire format: untouched.
+- I2 CanvasEngineHandle: no signature changes in the public imperative surface.
+- I3 CLAUDE.md absolutes (OneEuroFilter params, nearest-neighbor matching, easeOutElastic, no pre-font-load glyph extraction, no drawing-to-font conversion): untouched.
+- I4 MediaArt seam: untouched.
+- I5 strings parity: n/a (no strings added).
+- I6 feature-flag deferrals: untouched.
+- I7 classifier-worker URL: untouched.
+- I8 preserve-the-shape: untouched.
+- I9 test pyramid reinforced — 779/779 green (+32 new).
+- I10 MediaArt ↔ text-mode hologram coexistence: Phase 6 scope, untouched.
+
 ## [0.24.0] - 2026-04-23
 
 **Actually fixes the "가만히 있어도 진동이 느껴진다" hand-tremor complaint.**

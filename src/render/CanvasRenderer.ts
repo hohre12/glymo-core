@@ -4,6 +4,7 @@ import { ParticleSystem } from './ParticleSystem.js';
 import type { MorphAnimator } from '../animate/MorphAnimator.js';
 import type { FontMorphAnimator } from '../text/FontMorphAnimator.js';
 import { PerformanceMonitor } from '../util/PerformanceMonitor.js';
+import { RafScheduler, type SchedulerUnsubscribe } from '../scheduler/RafScheduler.js';
 import type { EventBus } from '../state/EventBus.js';
 import type { IRenderer, RendererType } from './IRenderer.js';
 import type { OverlayText } from '../text/types.js';
@@ -39,8 +40,16 @@ export class CanvasRenderer implements IRenderer {
   private readonly perfMonitor = new PerformanceMonitor();
 
   private eventBus: EventBus | null = null;
-  private animationId: number | null = null;
-  private lastFrameTime = 0;
+  /** Phase 1 (rendering-pipeline-v2): the `requestAnimationFrame` loop is
+   *  delegated to the injected `RafScheduler`. `schedulerUnsub` is the
+   *  teardown handle returned by `scheduler.subscribe('render', …)`; it
+   *  doubles as a running-flag (non-null = active). `ownsScheduler` is
+   *  true when the renderer constructed its own scheduler (no external
+   *  injection) — in that case `start/stop` also drive the scheduler's
+   *  own lifecycle so stand-alone usage still works. */
+  private readonly scheduler: RafScheduler;
+  private readonly ownsScheduler: boolean;
+  private schedulerUnsub: SchedulerUnsubscribe | null = null;
   private degradedEmitted = false;
 
   private completedStrokes: Stroke[] = [];
@@ -69,13 +78,32 @@ export class CanvasRenderer implements IRenderer {
 
   private getActivePointsFn: (() => ReadonlyArray<StrokePoint>) | null = null;
 
-  constructor(canvas: HTMLCanvasElement, dpr: number = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    dpr: number = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
+    scheduler?: RafScheduler,
+  ) {
     this.canvas = canvas;
     this.dpr = dpr;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Failed to get 2D context');
     this.ctx = ctx;
+
+    if (scheduler) {
+      // Shared scheduler (normal path — Glymo wires this). The renderer
+      // subscribes to the 'render' phase and does NOT control the
+      // scheduler's start/stop.
+      this.scheduler = scheduler;
+      this.ownsScheduler = false;
+    } else {
+      // Stand-alone construction (test fixtures, one-off usage): create a
+      // dedicated scheduler and drive its lifecycle from start/stop so the
+      // legacy `new CanvasRenderer(canvas, dpr)` signature continues to
+      // produce a self-contained render loop.
+      this.scheduler = new RafScheduler();
+      this.ownsScheduler = true;
+    }
 
     this.setupCanvas();
   }
@@ -85,20 +113,27 @@ export class CanvasRenderer implements IRenderer {
     this.eventBus = bus;
   }
 
-  /** Start the render loop */
+  /** Start the render loop. Subscribes to the shared `RafScheduler`'s
+   *  `render` phase; idempotent (double-start is a no-op). When this
+   *  renderer owns its scheduler (no injection), this also boots the
+   *  scheduler's rAF chain. */
   start(): void {
-    if (this.animationId !== null) return;
-    if (typeof requestAnimationFrame === 'undefined') return;
-    this.lastFrameTime = performance.now();
-    this.animationId = requestAnimationFrame((t) => this.renderLoop(t));
+    if (this.schedulerUnsub !== null) return;
+    if (this.ownsScheduler) this.scheduler.start();
+    this.schedulerUnsub = this.scheduler.subscribe('render', (ts, dt) => {
+      this.renderFrame(ts, dt);
+    });
   }
 
-  /** Stop the render loop */
+  /** Stop the render loop. Unsubscribes from the scheduler; when this
+   *  renderer owns its scheduler, also stops the scheduler's rAF chain
+   *  so a disposed stand-alone renderer is fully inert. */
   stop(): void {
-    if (this.animationId !== null && typeof cancelAnimationFrame !== 'undefined') {
-      cancelAnimationFrame(this.animationId);
-      this.animationId = null;
+    if (this.schedulerUnsub !== null) {
+      this.schedulerUnsub();
+      this.schedulerUnsub = null;
     }
+    if (this.ownsScheduler) this.scheduler.stop();
   }
 
   /** Set the function that provides active stroke points */
@@ -314,18 +349,14 @@ export class CanvasRenderer implements IRenderer {
 
   // ── Private: Render Loop ────────────────────────────
 
-  private renderLoop(timestamp: number): void {
-    // Teardown guard: rAF callbacks queued in `requestAnimationFrame(... renderLoop)`
-    // can fire AFTER an external `stop()` has run if the host environment
-    // (notably JSDOM in tests) has already drained the cancellation. If
-    // animationId is null we know stop() / dispose has happened — bail out
-    // before touching `this.ctx`, which the test harness may have already
-    // unmounted, throwing a noisy (but harmless) drawing exception.
-    if (this.animationId === null) return;
+  private renderFrame(timestamp: number, dt: number): void {
+    // Teardown guard: the scheduler snapshots subscribers at phase entry,
+    // so a stop() that races with an in-flight phase can still deliver one
+    // callback to an already-unsubscribed renderer. Bail before touching
+    // `this.ctx`, which the host may have unmounted.
+    if (this.schedulerUnsub === null) return;
     this.perfMonitor.startFrame();
 
-    const dt = timestamp - this.lastFrameTime;
-    this.lastFrameTime = timestamp;
     const degraded = this.perfMonitor.isPerformanceDegraded();
 
     this.activePoints = this.getActivePointsFn?.() ?? [];
@@ -382,10 +413,7 @@ export class CanvasRenderer implements IRenderer {
 
     this.perfMonitor.endFrame();
     this.emitDegradedIfNeeded(degraded);
-
-    if (typeof requestAnimationFrame !== 'undefined') {
-      this.animationId = requestAnimationFrame((t) => this.renderLoop(t));
-    }
+    // No rAF re-queue — the shared scheduler's tick drives the next frame.
   }
 
   /**

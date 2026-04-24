@@ -8,6 +8,7 @@ import { InputManager } from './input/InputManager.js';
 import { PipelineEngine } from './pipeline/PipelineEngine.js';
 import type { FinalizedStroke } from './pipeline/PipelineEngine.js';
 import { CanvasRenderer } from './render/CanvasRenderer.js';
+import { RafScheduler } from './scheduler/RafScheduler.js';
 import { WebGPURenderer } from './render/WebGPURenderer.js';
 import type { IRenderer } from './render/IRenderer.js';
 import { EventBus } from './state/EventBus.js';
@@ -91,6 +92,11 @@ export class Glymo {
   private readonly pipeline: PipelineEngine;
   private renderer: IRenderer;
   private readonly stateMachine: SessionStateMachine;
+  /** Phase 1 (rendering-pipeline-v2): single render-clock shared across
+   *  every `@glymo/core` subsystem. Owned by `Glymo`; `@glymo/ui` consumes
+   *  via `getScheduler()` in Phase 5 so UI hooks can subscribe instead of
+   *  calling `requestAnimationFrame` directly. */
+  private readonly scheduler: RafScheduler;
   private webgpuAvailable = false;
 
   private backgroundMode: 'solid' | 'transparent' = 'solid';
@@ -202,8 +208,15 @@ export class Glymo {
     this.bitmapUploader = options?.bitmapUploader ?? null;
     this.bitmapLoader = options?.bitmapLoader ?? null;
     this.selectionManager = new SelectionManager(this.eventBus);
-    this.renderer = new CanvasRenderer(canvas, this.options.pixelRatio);
-    this.inputManager = new InputManager();
+    // Phase 1 (rendering-pipeline-v2): single shared scheduler MUST be
+    // constructed before any subsystem that consumes it, so every
+    // `subscribe` call below hits the same rAF chain. Started eagerly — a
+    // newly-constructed Glymo instance is expected to start dispatching
+    // frames immediately.
+    this.scheduler = new RafScheduler();
+    this.scheduler.start();
+    this.renderer = new CanvasRenderer(canvas, this.options.pixelRatio, this.scheduler);
+    this.inputManager = new InputManager(this.scheduler);
     this.stateMachine = new SessionStateMachine(this.eventBus);
     this.gestureEngine = new GestureEngine((event, data) => {
       this.eventBus.emit(event, data);
@@ -215,7 +228,13 @@ export class Glymo {
       ...(options?.font ? { font: options.font } : {}),
       ...(options?.language ? { language: options.language } : {}),
     };
-    this.textPipeline = new TextPipelineController(textConfig, this.eventBus, this.stateMachine);
+    this.textPipeline = new TextPipelineController(
+      textConfig,
+      this.eventBus,
+      this.stateMachine,
+      this.currentEffect,
+      this.scheduler,
+    );
     this.kineticEngine = new KineticEngine();
 
     this.wireInput();
@@ -1334,7 +1353,7 @@ export class Glymo {
   async setRenderer(mode: RendererMode): Promise<void> {
     this.assertNotDestroyed();
     if (mode === 'canvas2d') { this.replaceRenderer(null); return; }
-    const gpu = new WebGPURenderer(this.canvas, this.options.pixelRatio);
+    const gpu = new WebGPURenderer(this.canvas, this.options.pixelRatio, this.scheduler);
     const ok = await gpu.init();
     if (ok) { this.webgpuAvailable = true; this.replaceRenderer(gpu); }
     else { gpu.destroy(); this.replaceRenderer(null); this.eventBus.emit('renderer:fallback'); }
@@ -1809,6 +1828,20 @@ export class Glymo {
     this.fills = [];
     this.accumulatedStrokes = [];
     this.textPipeline.dispose();
+    // Phase 1: release the shared scheduler's rAF chain. Every subsystem
+    // that subscribed has already unsubscribed via its own `destroy`/`stop`
+    // path; the `scheduler.stop()` here is the final cleanup that keeps a
+    // destroyed Glymo from leaking a running rAF loop.
+    this.scheduler.stop();
+  }
+
+  // ── Scheduler (Phase 5 UI-side consumer entry point) ────────────────────
+  /** Return the shared `RafScheduler` instance so `@glymo/ui` hooks can
+   *  subscribe to the same 6-phase lifecycle the engine uses. Not intended
+   *  for direct external control — callers should subscribe, not
+   *  start/stop. */
+  getScheduler(): RafScheduler {
+    return this.scheduler;
   }
 
   // ── Private ────────────────────────────────────────
@@ -2182,7 +2215,7 @@ export class Glymo {
   private replaceRenderer(newRenderer: IRenderer | null): void {
     const strokes = [...this.strokes];
     this.renderer.destroy();
-    this.renderer = newRenderer ?? new CanvasRenderer(this.canvas, this.options.pixelRatio);
+    this.renderer = newRenderer ?? new CanvasRenderer(this.canvas, this.options.pixelRatio, this.scheduler);
     this.renderer.setEventBus(this.eventBus);
     this.renderer.setEffect(this.currentEffect);
     this.renderer.setBackgroundMode(this.backgroundMode);

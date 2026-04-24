@@ -1,6 +1,7 @@
 import type { RawInputPoint } from '../types.js';
 import { MouseCapture } from './MouseCapture.js';
 import { CameraCapture } from './CameraCapture.js';
+import type { RafScheduler } from '../scheduler/RafScheduler.js';
 
 type PointCallback = (point: RawInputPoint) => void;
 type PenStateCallback = (isDown: boolean) => void;
@@ -22,6 +23,12 @@ export class InputManager {
   private alwaysDrawMode = false;
   private workerUrl: string | null = null;
   private onHandVisibility: ((visible: boolean) => void) | null = null;
+
+  /** Phase 1 (rendering-pipeline-v2): optional shared scheduler — when set,
+   *  every `CameraCapture` created via `attachCamera()` subscribes to it
+   *  instead of owning its own rAF loop. Glymo wires this from its
+   *  `RafScheduler` instance; stand-alone tests leave it null. */
+  constructor(private readonly scheduler?: RafScheduler) {}
 
   /** Set the callback for incoming points */
   setPointCallback(callback: PointCallback): void {
@@ -63,6 +70,7 @@ export class InputManager {
       (isDown) => this.onPenState(isDown),
       (err) => this.onError(err),
       () => this.onSuccess(),
+      this.scheduler,
     );
     // Apply stored settings to new camera instance
     if (this.workerUrl) {

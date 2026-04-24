@@ -1,6 +1,7 @@
 // ── GIF Export ───────────────────────────────────────
 
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
+import type { RafScheduler } from '../scheduler/RafScheduler.js';
 
 // ── Constants ───────────────────────────────────────
 
@@ -25,6 +26,16 @@ export interface GIFExportOptions {
   onProgress?: (pct: number) => void;
   /** If provided, called before each frame capture to advance animation */
   replay?: ReplayFn;
+  /**
+   * Phase 1 (rendering-pipeline-v2): when present, frame-yield between
+   * captures uses `scheduler.subscribe('afterRender', …)` + one-shot
+   * auto-unsub instead of a bare `requestAnimationFrame`. This keeps the
+   * exporter aligned with the single-rAF invariant in §4.1 — a recording
+   * run no longer opens a second rAF chain racing with the master render
+   * clock. Falls back to `requestAnimationFrame` when absent so the module
+   * stays usable in stand-alone tests and legacy call-sites.
+   */
+  scheduler?: RafScheduler;
 }
 
 // ── Main Export Function ────────────────────────────
@@ -53,6 +64,7 @@ export function exportGIF(
   const maxFrames = options?.maxFrames ?? GIF_MAX_FRAMES;
   const onProgress = options?.onProgress;
   const replay = options?.replay;
+  const scheduler = options?.scheduler;
 
   const frameCount = Math.min(
     Math.floor((durationMs / 1000) * fps),
@@ -60,7 +72,7 @@ export function exportGIF(
   );
   const delayMs = Math.round(1000 / fps);
 
-  return encodeFrames(canvas, ctx, frameCount, delayMs, onProgress, replay);
+  return encodeFrames(canvas, ctx, frameCount, delayMs, onProgress, replay, scheduler);
 }
 
 // ── Encoding ────────────────────────────────────────
@@ -72,6 +84,7 @@ async function encodeFrames(
   delayMs: number,
   onProgress?: (pct: number) => void,
   replay?: ReplayFn,
+  scheduler?: RafScheduler,
 ): Promise<Blob> {
   const { width, height } = canvas;
   const encoder = GIFEncoder();
@@ -83,7 +96,7 @@ async function encodeFrames(
       } else {
         // Wait for the next render frame so the RAF-based render loop
         // produces a new canvas state (particles, morphing, etc.)
-        await waitForFrame();
+        await waitForFrame(scheduler);
       }
 
       const imageData = ctx.getImageData(0, 0, width, height);
@@ -117,8 +130,21 @@ async function encodeFrames(
   return blob;
 }
 
-/** Wait for the next animation frame so the render loop updates the canvas. */
-function waitForFrame(): Promise<void> {
+/** Wait for the next animation frame so the render loop updates the canvas.
+ *  When a `RafScheduler` is provided, subscribe once to the `afterRender`
+ *  phase (post-compositing, so the captured frame reflects the completed
+ *  render) and auto-unsub after resolution — keeps this export on the
+ *  single-rAF invariant. Falls back to a raw `requestAnimationFrame` when
+ *  the caller did not pass a scheduler (stand-alone tests, legacy paths). */
+function waitForFrame(scheduler?: RafScheduler): Promise<void> {
+  if (scheduler) {
+    return new Promise<void>((resolve) => {
+      const unsub = scheduler.subscribe('afterRender', () => {
+        unsub();
+        resolve();
+      });
+    });
+  }
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
