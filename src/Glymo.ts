@@ -1493,7 +1493,14 @@ export class Glymo {
     this.assertNotDestroyed();
     this.stateMachine.transition('export_start');
     try {
-      const blob = await exportGIFImpl(this.canvas, options);
+      // Phase 1 (rendering-pipeline-v2): inject the engine's scheduler so
+      // the exporter yields through our single rAF chain instead of
+      // provisioning its own parallel one. Caller-provided `scheduler` in
+      // options wins (explicit override — useful for benchmarks).
+      const blob = await exportGIFImpl(this.canvas, {
+        ...options,
+        scheduler: options?.scheduler ?? this.scheduler,
+      });
       this.stateMachine.transition('export_complete');
       return blob;
     } catch (err) {

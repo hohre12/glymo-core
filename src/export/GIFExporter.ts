@@ -1,7 +1,7 @@
 // ── GIF Export ───────────────────────────────────────
 
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
-import type { RafScheduler } from '../scheduler/RafScheduler.js';
+import { RafScheduler } from '../scheduler/RafScheduler.js';
 
 // ── Constants ───────────────────────────────────────
 
@@ -27,13 +27,17 @@ export interface GIFExportOptions {
   /** If provided, called before each frame capture to advance animation */
   replay?: ReplayFn;
   /**
-   * Phase 1 (rendering-pipeline-v2): when present, frame-yield between
-   * captures uses `scheduler.subscribe('afterRender', …)` + one-shot
-   * auto-unsub instead of a bare `requestAnimationFrame`. This keeps the
-   * exporter aligned with the single-rAF invariant in §4.1 — a recording
-   * run no longer opens a second rAF chain racing with the master render
-   * clock. Falls back to `requestAnimationFrame` when absent so the module
-   * stays usable in stand-alone tests and legacy call-sites.
+   * Phase 1 (rendering-pipeline-v2): frame-yield between captures uses
+   * `scheduler.subscribe('afterRender', …)` with one-shot auto-unsub,
+   * never a bare `requestAnimationFrame`. This keeps the exporter aligned
+   * with the single-rAF invariant (§4.1) — a recording run no longer
+   * opens a second rAF chain racing with the master render clock.
+   *
+   * When `scheduler` is omitted (stand-alone tests, bench scripts), the
+   * exporter provisions a private local `RafScheduler` for the duration
+   * of the export and stops it on completion. Callers that already have
+   * a Glymo instance SHOULD pass `glymo.getScheduler()` so the yield
+   * points align with the engine's per-frame timing.
    */
   scheduler?: RafScheduler;
 }
@@ -89,6 +93,16 @@ async function encodeFrames(
   const { width, height } = canvas;
   const encoder = GIFEncoder();
 
+  // Phase 1 (rendering-pipeline-v2): every frame-yield goes through a
+  // `RafScheduler` — no bare `requestAnimationFrame` survives in
+  // `@glymo/core`. When the caller (Glymo) passes its instance, we reuse
+  // it; when the caller is stand-alone (test fixtures, bench scripts), we
+  // provision a local scheduler for the export's lifetime so the exporter
+  // stays self-contained without leaking a running rAF chain.
+  const ownedScheduler = !scheduler ? new RafScheduler() : null;
+  const activeScheduler = scheduler ?? ownedScheduler!;
+  if (ownedScheduler) ownedScheduler.start();
+
   try {
     for (let i = 0; i < frameCount; i++) {
       if (replay) {
@@ -96,7 +110,7 @@ async function encodeFrames(
       } else {
         // Wait for the next render frame so the RAF-based render loop
         // produces a new canvas state (particles, morphing, etc.)
-        await waitForFrame(scheduler);
+        await waitForFrame(activeScheduler);
       }
 
       const imageData = ctx.getImageData(0, 0, width, height);
@@ -120,6 +134,8 @@ async function encodeFrames(
   } catch (err) {
     try { encoder.finish(); } catch { /* best-effort cleanup */ }
     throw err;
+  } finally {
+    if (ownedScheduler) ownedScheduler.stop();
   }
 
   const bytes = encoder.bytes();
@@ -131,21 +147,17 @@ async function encodeFrames(
 }
 
 /** Wait for the next animation frame so the render loop updates the canvas.
- *  When a `RafScheduler` is provided, subscribe once to the `afterRender`
- *  phase (post-compositing, so the captured frame reflects the completed
- *  render) and auto-unsub after resolution — keeps this export on the
- *  single-rAF invariant. Falls back to a raw `requestAnimationFrame` when
- *  the caller did not pass a scheduler (stand-alone tests, legacy paths). */
-function waitForFrame(scheduler?: RafScheduler): Promise<void> {
-  if (scheduler) {
-    return new Promise<void>((resolve) => {
-      const unsub = scheduler.subscribe('afterRender', () => {
-        unsub();
-        resolve();
-      });
+ *  Subscribes once to the scheduler's `afterRender` phase (post-compositing,
+ *  so the captured frame reflects the completed render) and auto-unsubs
+ *  after resolution — keeps this export on the single-rAF invariant with
+ *  zero bare `requestAnimationFrame` calls surviving in `@glymo/core`. */
+function waitForFrame(scheduler: RafScheduler): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const unsub = scheduler.subscribe('afterRender', () => {
+      unsub();
+      resolve();
     });
-  }
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  });
 }
 
 // ── Validation ──────────────────────────────────────
