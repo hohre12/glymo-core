@@ -142,6 +142,8 @@ export type {
   GestureCallback,
 } from './gesture/types.js';
 export { HandStateImpl } from './gesture/HandStateImpl.js';
+export { HandStatePool, DEFAULT_HAND_STATE_POOL_CAP } from './gesture/HandStatePool.js';
+export type { HandStatePoolOptions } from './gesture/HandStatePool.js';
 export { GestureEngine } from './gesture/GestureEngine.js';
 export { BUILTIN_GESTURES } from './gesture/builtins.js';
 export {

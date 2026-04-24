@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.25.2] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 3: HandState pool + Object.freeze removal.**
+
+Third artefact of the rendering-pipeline-v2 refactor (see `docs/plans/rendering-pipeline-v2.md` §6 Phase 3). The pre-Phase-3 `HandStateImpl` constructor froze a shallow spread (`Object.freeze([...landmarks])`) on every call. `useGestureDispatcher` invoked `new HandStateImpl(landmarks)` up to 6 times per landmark event — once per gesture branch (ERASER / MOVE / MAGIC / SELECT / SELECT-text / FILL). That was ~21 × 6 = 126 point-object allocations per tick's worst case, on top of the spread + freeze overhead, contributing to the minor-GC churn §1 defect #4 identified.
+
+Additive. Every pre-Phase-3 consumer calling `new HandStateImpl(landmarks)` keeps working bit-for-bit — the constructor still takes the same arg shape, stores the reference, computes lazily-cached scores. The new pool is an opt-in performance path.
+
+### Added
+- `src/gesture/HandStatePool.ts` — bounded pool of `HandStateImpl` instances with `acquire(landmarks)` / `release(state)` / `resetFrame()` API. Cap is configurable (`DEFAULT_HAND_STATE_POOL_CAP = 4`). Pool-exceeding acquires still return a functional state (allocates fresh) but the over-cap instance is dropped on release so adversarial bursts cannot balloon the pool.
+- `HandStateImpl._reset(landmarks)` internal pool hook — reassigns the backing landmark reference and invalidates the per-instance `_scoreCache`. Marked `@internal` so external callers know it is pool-private.
+- 13 Vitest cases in `src/gesture/__tests__/HandStatePool.test.ts`: identity preservation across acquire/release, functional parity with fresh `HandStateImpl`, distinct identity for concurrent acquires, silent no-op on foreign / double release, size-cap ceiling, `resetFrame` lifecycle, zero-allocation after warmup (both 1-instance and 2-instance steady state), and cache-reset correctness on reuse.
+- 16 Vitest cases in `src/gesture/__tests__/HandStateImpl.test.ts` — golden-lock on the pre-Phase-3 numerical behaviour of `fingerScore`, `extended`, `folded`, `pinchDistance`, the safe-fallback path on truncated input, and the `ReadonlyArray` type contract. Pins Phase 0's numerics so the refactor cannot silently shift finger-score arithmetic.
+
+### Changed
+- `HandStateImpl` constructor no longer freezes the input. The pre-Phase-3 behaviour (`Object.freeze([...landmarks])`) is gone; the backing slot holds the raw reference. The public `landmarks` accessor remains `ReadonlyArray`-typed so consumers still see the read-only contract at the type level. JSDoc documents the new convention: "Callers MUST treat the landmark array as immutable". Engine-side mutation is a bug the runtime no longer catches, but the `HandStateImpl.test.ts` type-level gate surfaces any misuse at build time.
+- `src/index.ts` exports `HandStatePool`, `DEFAULT_HAND_STATE_POOL_CAP`, and `HandStatePoolOptions` alongside the pre-existing `HandStateImpl`.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched (HandStatePool is additive, new named export).
+- I3 CLAUDE.md absolutes (OneEuroFilter params, nearest-neighbor matching, easeOutElastic): untouched — gesture math is textually unchanged; the golden-lock tests pin it.
+- I4 MediaArt seam: untouched.
+- I5 strings parity: n/a.
+- I6 feature-flag deferrals: untouched.
+- I7 classifier-worker URL: untouched.
+- I8 preserve-the-shape: n/a (gesture layer, not stroke rendering).
+- I9 test pyramid reinforced — 829/829 core tests green (was 800 — +29 new: 16 golden-lock + 13 pool).
+- I10 MediaArt ↔ text-mode hologram coexistence: Phase 6 scope, untouched.
+
 ## [0.25.1] - 2026-04-24
 
 **Rendering pipeline v2 — Phase 2: StrokeAnimator zero-alloc hot path.**
