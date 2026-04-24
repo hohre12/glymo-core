@@ -37,40 +37,16 @@ Thank you for your interest in contributing to Glymo! We welcome contributions o
 
 ## Project Structure
 
-```
-src/
-├── Glymo.ts              # Main class (Facade)
-├── types.ts               # Core type definitions
-├── index.ts               # Public API exports
-├── pipeline/              # 6-stage processing pipeline
-│   └── stages/            #   Capture, Stabilize, Pressure, Segment, Smooth
-├── render/                # Canvas 2D & WebGPU renderers
-│   ├── CanvasRenderer.ts  #   Canvas 2D with effect presets
-│   ├── WebGPURenderer.ts  #   WebGPU compute shader renderer
-│   ├── ParticleSystem.ts  #   GPU particle effects
-│   └── StrokeRenderer.ts  #   Raw input visualization
-├── input/                 # Input sources
-│   ├── MouseCapture.ts    #   Mouse/touch via PointerEvent
-│   ├── CameraCapture.ts   #   Hand tracking via MediaPipe
-│   ├── HandVisualizer.ts  #   Artistic hand rendering
-│   └── hand-styles/       #   5 hand rendering styles
-├── gesture/               # Gesture recognition DSL
-├── filter/                # OneEuroFilter (pointer stabilization)
-├── state/                 # EventBus, SessionStateMachine
-├── animate/               # MorphAnimator
-├── text/                  # Text recognition & typography
-│   ├── HandwritingRecognizer.ts   # Google Input Tools API
-│   ├── CascadingRecognizer.ts     # Multi-strategy fallback
-│   ├── GlyphExtractor.ts         # Glyph path extraction
-│   ├── GlyphCache.ts             # Extracted glyph caching
-│   ├── FontMorphAnimator.ts      # Stroke-to-font morphing
-│   ├── KineticEngine.ts          # Kinetic typography
-│   └── PretextLayout.ts          # Text layout integration
-├── export/                # PNG, GIF exporters
-└── util/                  # Math utilities, PerformanceMonitor
+The full module map lives in [docs/architecture.md](./docs/architecture.md#module-map) — single source of truth so a directory rename only updates one file. Skim that first if you're new to the codebase.
 
-tests/                     # Vitest test files (32 test suites)
-```
+Per-area deep dives:
+
+- [docs/classifier.md](./docs/classifier.md) — `@glymo/core/classifier` subpath (ONNX inference)
+- [docs/hologram.md](./docs/hologram.md) — `Hologram3DRenderer` + Media Art polymorphic sources
+- [docs/animation.md](./docs/animation.md) — `StrokeAnimator` vs `MorphAnimator`
+- [docs/session-doc.md](./docs/session-doc.md) — `SessionDoc` wire format + persistence
+
+Tests live in `tests/` (Vitest, jsdom env, currently 57 test suites). Add new tests next to whatever module you're touching — naming convention is `<ModuleName>.test.ts`.
 
 ## Pull Request Process
 

@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">@glymo/core</h1>
   <p align="center"><strong>Hand-powered creative toolkit for the browser</strong></p>
-  <p align="center">Hand tracking + artistic effects + gesture control — in one library.</p>
+  <p align="center">Hand tracking, drawing pipeline, gesture DSL, ONNX recognition, and a WebGPU hologram — all in one TypeScript library.</p>
 </p>
 
 <p align="center">
@@ -12,10 +12,9 @@
 
 ---
 
-Turn any webcam into a creative canvas. `@glymo/core` combines MediaPipe hand tracking, a 6-stage drawing pipeline, artistic hand rendering, and a gesture DSL into a single TypeScript library.
-
 ```typescript
-// One line to start
+import { Glymo } from '@glymo/core';
+
 const glymo = await Glymo.create(canvas, {
   camera: true,
   effect: 'neon',
@@ -23,18 +22,7 @@ const glymo = await Glymo.create(canvas, {
 });
 ```
 
-## What makes this different
-
-Most hand-tracking libraries give you raw landmarks. Most drawing libraries give you strokes. **@glymo/core gives you both — plus everything in between.**
-
-| Feature | Raw MediaPipe | Canvas libs | @glymo/core |
-|---------|:---:|:---:|:---:|
-| Hand landmark tracking | Yes | — | Yes |
-| Artistic hand rendering (5 styles) | — | — | Yes |
-| Gesture detection DSL | — | — | Yes |
-| Smoothing + pressure pipeline | — | Some | Yes |
-| Air-writing → text recognition | — | — | Yes |
-| One-line camera setup | — | — | Yes |
+That's the hello-world. Read on for what else is inside.
 
 ## Install
 
@@ -42,142 +30,53 @@ Most hand-tracking libraries give you raw landmarks. Most drawing libraries give
 npm install @glymo/core
 ```
 
-## Core Features
+Optional peer dependencies — install only the ones you actually use:
 
-### 1. Gesture DSL
+| Module | Peer dependency | Used by |
+|--------|-----------------|---------|
+| Camera + hand tracking | `@mediapipe/tasks-vision >= 0.10` | `Glymo.create({ camera: true })`, `HandVisualizer` |
+| Hologram 3D | `three >= 0.160` | `Hologram3DRenderer` |
+| ONNX classifier | `onnxruntime-web ^1.24` | `@glymo/core/classifier` subpath |
+| Tesseract OCR fallback | `tesseract.js ^5.0` | Text-mode fallback recogniser |
 
-Define hand gestures with a fluent, readable API. No raw landmark math.
+## What's inside
 
-```typescript
-import { GestureEngine, HandStateImpl } from '@glymo/core';
+| Area | Highlights | Deep dive |
+|------|-----------|-----------|
+| **6-stage drawing pipeline** | Capture → Stabilize → Pressure → Segment → Smooth → Effect. OneEuroFilter stabilisation, velocity-driven pressure taper, Chaikin smoothing. | [docs/architecture.md](./docs/architecture.md) |
+| **Renderers** | Canvas 2D + WebGPU with auto-fallback, runtime-extensible effect registry, fill tool, layered compositor. | [docs/architecture.md](./docs/architecture.md#rendering-modes) |
+| **Hand input** | MediaPipe-driven `CameraCapture`, mouse/touch via `MouseCapture`, 5 artistic hand-rendering styles (`neon-skeleton` / `crystal` / `flame` / `aurora` / `particle-cloud`). | [docs/architecture.md](./docs/architecture.md#extension-points) |
+| **Gesture DSL** | `GestureEngine` + 6 built-in gestures (pinch / fist / point / open-palm / peace-sign / thumbs-up); register your own with a `(hand) => boolean` detector. | [docs/architecture.md](./docs/architecture.md#extension-points) |
+| **Text mode** | `CascadingRecognizer` — instant per-stroke + context re-recognition with anti-cycling. Glyph extraction + kinetic typography (`KineticEngine`). | [docs/architecture.md](./docs/architecture.md#public-api-surface) |
+| **ONNX classifier** | Separate `@glymo/core/classifier` subpath. 347-class drawing recogniser + TYPE router (text / drawing / symbol). IndexedDB model cache, hysteresis stabiliser. | [docs/classifier.md](./docs/classifier.md) |
+| **Hologram 3D + Media Art** | `Hologram3DRenderer` (Three.js + WebGPU) — multi-mesh scene with bloom, polymorphic mesh sources (`gltf` / `gltf-pbr` / `procedural-planet`). | [docs/hologram.md](./docs/hologram.md) |
+| **Per-stroke animations** | `StrokeAnimator` with 23 built-in types (locomotion + modulation + legacy), composable per-channel. | [docs/animation.md](./docs/animation.md) |
+| **Session round-trip** | `exportSession()` / `loadSession()` — strokes, objects, fills, animations, characters, media-art mesh metadata. | [docs/session-doc.md](./docs/session-doc.md) |
+| **Diagnostics** | Opt-in `DiagBus` for per-stage timing + drop accounting (text-mode debugging). | [docs/architecture.md](./docs/architecture.md#diagnostics) |
 
-const engine = new GestureEngine();
-
-// Built-in gestures (6 included)
-// pinch, fist, point, open-palm, peace-sign, thumbs-up
-
-// Define your own
-engine.define('rock-on', (hand) =>
-  hand.extended('index', 'pinky') &&
-  hand.folded('middle', 'ring')
-);
-
-// Listen
-engine.on('gesture:rock-on', () => console.log('Rock on!'));
-engine.on('gesture:rock-on:end', () => console.log('Stopped'));
-```
-
-**HandStateImpl** wraps raw landmarks into a chainable API:
-
-```typescript
-const hand = new HandStateImpl(landmarks);
-
-hand.extended('index')              // true if index finger is extended
-hand.folded('middle', 'ring')       // true if both are folded
-hand.pinchDistance()                 // normalized distance between thumb and index
-hand.score('thumb')                 // 0-1 extension score
-```
-
-2-frame debounce prevents false triggers. Custom gestures are first-class citizens alongside built-ins.
-
-### 2. Hand as Art — 5 Artistic Styles
-
-Turn the hand skeleton into a visual element, not just a debug overlay.
-
-```typescript
-import { Glymo } from '@glymo/core';
-
-const glymo = await Glymo.create(canvas, {
-  camera: true,
-  handStyle: 'flame', // 'neon-skeleton' | 'crystal' | 'flame' | 'aurora' | 'particle-cloud'
-});
-
-// Change at runtime
-glymo.setHandStyle('aurora');
-```
-
-| Style | Visual |
-|-------|--------|
-| `neon-skeleton` | Classic neon wireframe with glow |
-| `crystal` | Ice/glass shards with shimmer and point-light flares |
-| `flame` | CPU particle fire rising from fingertips |
-| `aurora` | HSL-shifting ribbons with screen compositing |
-| `particle-cloud` | Brownian-motion particle swarm following the hand |
-
-Each style implements `HandStyleBase` — extend it to create your own.
-
-### 3. Cascading Text Recognition
-
-Two-layer recognition pipeline that starts fast and self-corrects.
-
-```typescript
-import { CascadingRecognizer } from '@glymo/core';
-
-const recognizer = new CascadingRecognizer({
-  onChar(char) {
-    // Net 1: instant per-stroke recognition (~200ms)
-    // confidence: 0.6
-    console.log(`Recognized: ${char.char} at (${char.x}, ${char.y})`);
-  },
-  onCorrection(correction) {
-    // Net 2: full-context re-recognition, fires after each Net 1
-    // confidence: 0.95
-    console.log(`Corrected: ${correction.oldChar} → ${correction.newChar}`);
-  },
-});
-
-// Feed strokes as they complete
-glymo.on('stroke:complete', ({ stroke, bbox }) => {
-  recognizer.feedStroke(stroke.raw, bbox, devicePixelRatio);
-});
-```
-
-**How it works:**
-- **Net 1 (instant):** Each stroke recognized independently → character appears immediately
-- **Net 2 (context):** All strokes re-sent together → context improves accuracy → mismatches corrected
-- Anti-cycling protection prevents correction loops after deletions
-- Rolling height normalization for consistent font sizing
-
-### 4. One-Line Camera Canvas
-
-`Glymo.create()` handles MediaPipe loading, camera permissions, hand tracking, and drawing setup.
-
-```typescript
-const glymo = await Glymo.create(canvas, {
-  camera: true,
-  effect: 'aurora',
-  handStyle: 'crystal',
-  twoHands: true,
-  alwaysDraw: true,             // draw without pinch (text mode)
-  instantComplete: true,         // no morph delay
-  transparentBg: true,           // camera feed shows through
-  onGesture: {
-    fist: () => console.log('Fist detected'),
-    'peace-sign': () => glymo.setHandStyle('neon-skeleton'),
-  },
-  onReady: () => console.log('Camera active'),
-  onError: (err) => console.error(err),
-});
-```
-
-## 6-Stage Pipeline
-
-Every stroke flows through:
+## The 6-stage pipeline at a glance
 
 ```
-Capture → Stabilize → Pressure → Segment → Smooth → Effect
+input ──► Capture ──► Stabilize ──► Pressure ──► Segment ──► Smooth ──► Effect ──► canvas
+            (per point — real-time)              (accumulator)   (batch on penUp)   (paint time)
 ```
 
-| Stage | What It Does |
-|-------|-------------|
-| **Capture** | Webcam hand tracking (MediaPipe) or mouse/touch input |
-| **Stabilize** | OneEuroFilter removes jitter while preserving responsiveness |
-| **Pressure** | Velocity → pressure conversion (slow = thick, fast = thin) |
-| **Segment** | Stroke separation via pinch/pen-up detection |
-| **Smooth** | Chaikin's corner cutting (4 iterations) |
-| **Effect** | Glow, gradient, particles, variable-width rendering |
+- **Capture**: Wraps a raw input point into a typed `StrokePoint`.
+- **Stabilize**: OneEuroFilter — removes jitter while preserving responsiveness. Source-aware mouse/camera presets.
+- **Pressure**: Velocity → pressure (slow = thick, fast = thin) + per-stroke taper.
+- **Segment**: Buffers points until `penUp()`. Drops short strokes.
+- **Smooth**: Chaikin's corner cutting (4 iterations).
+- **Effect**: Glow, gradient, particles, variable-width — applied by the renderer at paint time.
 
-## Effect Presets
+## Subpackages
+
+| Subpath | Purpose |
+|---------|---------|
+| `@glymo/core` | Main library — everything in the table above except the classifier. |
+| `@glymo/core/classifier` | ONNX inference (drawing / text / symbol). Lazy-loadable — apps that don't need ML don't pay the bundle. |
+| `@glymo/core/classifier/classifier.worker.js` | Worker entry the client spawns at runtime. |
+
+## Built-in effect presets
 
 | Preset | Style |
 |--------|-------|
@@ -186,69 +85,27 @@ Capture → Stabilize → Pressure → Segment → Smooth → Effect
 | `gold` | Metallic shimmer, warm particles |
 | `aurora` | Pastel gradient flow |
 | `fire` | Hot gradient, rising sparks |
+| `liquid` / `hologram` / `bloom` / `dissolve` / `gpu-particles` | WebGPU-only — renderer auto-falls back to Canvas 2D when WebGPU is unavailable, emitting `renderer:fallback` |
 
-## API Reference
+Register your own with `registerEffect(id, definition)` — see [docs/architecture.md#extension-points](./docs/architecture.md#extension-points).
 
-### Glymo
-
-```typescript
-const glymo = new Glymo(canvas, { effect: 'neon', maxStrokes: 50 });
-
-glymo.bindCamera()                    // Start webcam hand tracking
-glymo.bindMouse()                     // Start mouse/touch input
-glymo.setHandStyle('flame')           // Change hand visualization
-glymo.gesture('custom', detectorFn)   // Register custom gesture
-glymo.getGestureEngine()              // Direct GestureEngine access
-glymo.on('stroke:complete', handler)  // Listen to events
-glymo.on('gesture:fist', handler)     // Listen to gesture events
-glymo.exportPNG()                     // Export as PNG blob
-glymo.clear()                         // Clear all strokes
-glymo.destroy()                       // Cleanup
-```
-
-### GestureEngine
-
-```typescript
-const engine = new GestureEngine();
-
-engine.define(name, detectorFn)       // Register gesture
-engine.update(landmarks, secondHand?) // Feed landmarks (called per frame)
-engine.on(event, callback)            // Listen to gesture events
-```
-
-### HandStateImpl
-
-```typescript
-const hand = new HandStateImpl(landmarks);
-
-hand.extended(...fingers)     // Are these fingers extended?
-hand.folded(...fingers)       // Are these fingers folded?
-hand.score(finger)            // 0-1 extension score
-hand.pinchDistance()          // Thumb-index normalized distance
-hand.landmarks                // Raw landmark array (readonly)
-```
-
-### CascadingRecognizer
-
-```typescript
-const rec = new CascadingRecognizer(options);
-
-rec.feedStroke(raw, bbox, dpr)  // Feed completed stroke
-rec.removeChar(id)              // Remove character (disables Net 2)
-rec.undo()                      // Remove last character
-rec.clear()                     // Reset all state
-rec.destroy()                   // Cleanup
-```
-
-## Browser Support
+## Browser support
 
 - Chrome 90+ (recommended)
 - Edge 90+
 - Safari 16.4+
 - Firefox 100+
 
-WebGPU features require Chrome 113+ or Edge 113+.
+WebGPU features (`gpu-particles` preset, `Hologram3DRenderer`) require Chrome 113+ or Edge 113+. `Hologram3DRenderer.ready` resolves `false` and emits `renderer:fallback` on unsupported browsers.
+
+## Examples
+
+Working HTML demos live under [`examples/`](./examples). Each is a single file you can open in a browser without a build step.
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) © Glymo contributors
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, and [CHANGELOG.md](./CHANGELOG.md) for the version history.
