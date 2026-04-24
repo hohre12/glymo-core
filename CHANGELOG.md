@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.25.1] - 2026-04-24
+
+**Rendering pipeline v2 — Phase 2: StrokeAnimator zero-alloc hot path.**
+
+Second artefact of the rendering-pipeline-v2 refactor (see `docs/plans/rendering-pipeline-v2.md` §6 Phase 2). Phase 0 attribution pinned `StrokeAnimator.getTransform` as the top-1 JS frame inside 591 slow (≥16 ms) `FireAnimationFrame` handlers in the hologram scenario — this release rebuilds the hot path so a single-frame render of an animated stroke allocates **zero** `AnimationTransform` objects once the caller holds a pre-allocated buffer.
+
+Additive. Every pre-Phase-2 consumer that calls `getTransform(strokeId, now)` keeps working bit-for-bit (same return shape, same numerical output); the new overload `getTransform(strokeId, now, out): boolean` is a strict opt-in on top.
+
+### Added
+- `StrokeAnimator.prototype.getTransform(strokeId, now, out)` overload — writes the composed transform into `out` in place and returns `true` on match, `false` otherwise. Zero object allocation per call.
+- Internal `strokeIndex: Map<strokeId, Set<animId>>` — maintained across `addAnimation`, `removeAnimation`, `removeByStrokeId`, `clear`, `restore`, AND the in-line purge inside `getTransform` itself. `getTransform` now visits only the animations targeting the queried stroke rather than scanning every registered animation with `.includes(strokeId)`. Benchmark: 10,000 unrelated registered animations → single `getTransform` completes in well under 0.5 ms (was linear in total animation count).
+- Internal `transformBuffer` — module-scoped `AnimationTransform` passed into the refactored `computeAnimationTransform(params, t, elapsed, out)`. The switch-case body keeps the parameter name `identity` so the per-type animation math stays textually unchanged (the primitive-amplitude regression tests are locks on those numerics).
+- Internal `completedIdsBuffer: string[]` — class-field ids buffer, drained via `.length = 0` instead of allocating a new array per call.
+- 7 new Vitest cases in `src/animation/__tests__/StrokeAnimator.zero-alloc.test.ts`: the out-param no-match contract, the out-param match contract, legacy ↔ new signature parity, zero-allocation across 1000 calls (same-identity buffer assertion), strokeIndex O(1) under 10k-animation churn, reverse-index consistency under `removeByStrokeId`, and a 1000-case deterministic pseudo-random property test that confirms the old and new signatures produce numerically identical output across every animation type.
+
+### Changed
+- `computeAnimationTransform` signature: returns `void`, accepts an `identity: AnimationTransform` out-param. All 18 switch cases write in place.
+- `renderCompletedStrokes(…)` now takes two additional args (8th + 9th): `transformPool: Map<string, AnimationTransform>` and `activeAnimatedIds: Set<string>`, both reused across every frame by the caller. The per-frame `Map<string, AnimationTransform>` allocation + per-animated-stroke `AnimationTransform` allocation in the old body are gone.
+- `renderFills(…)` now takes a `transformBuffer: AnimationTransform` 5th arg — a single reusable scratch shared across every fill in the render pass.
+- `CanvasRenderer` owns the three new buffers as readonly fields (`transformPool`, `activeAnimatedIds`, `fillTransformBuffer`) and threads them into the layer calls.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched (no wire format change).
+- I2 CanvasEngineHandle: untouched (no public imperative API change).
+- I3 CLAUDE.md absolutes: untouched (OneEuroFilter params, nearest-neighbor matching, easeOutElastic, etc. — the animation math is textually unchanged, locked by the primitive-amplitude tests).
+- I4 MediaArt seam: untouched.
+- I5 strings parity: n/a.
+- I6 feature-flag deferrals: untouched.
+- I7 classifier-worker URL: untouched.
+- I8 preserve-the-shape: `StrokeAnimator` is per-stroke composition; not rendering the drawn shape itself.
+- I9 test pyramid reinforced — 800/800 green (was 793 — +7 new from zero-alloc suite).
+- I10 MediaArt ↔ text-mode hologram coexistence: Phase 6 scope, untouched.
+
 ## [0.25.0] - 2026-04-24
 
 **Rendering pipeline v2 — Phase 1: single render-clock scheduler.**

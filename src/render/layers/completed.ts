@@ -15,6 +15,26 @@ function getOverrides(stroke: Stroke): StrokeOverrides | undefined {
   return { customColor: stroke.customColor, customWidth: stroke.customWidth };
 }
 
+/** Phase 2 of rendering-pipeline-v2: per-frame per-stroke
+ *  `AnimationTransform` storage. CanvasRenderer owns these two
+ *  structures and passes them in each frame — the layer function reuses
+ *  the existing entries instead of allocating a fresh `Map` + fresh
+ *  `AnimationTransform` object per animated stroke per frame, which was
+ *  the dominant source of minor-GC churn under the Phase 0 hologram
+ *  scenario (§2 reports 26 minor GCs in a 15 s trace). */
+export type StrokeTransformPool = Map<string, AnimationTransform>;
+
+function createTransformBuffer(): AnimationTransform {
+  return {
+    translateX: 0,
+    translateY: 0,
+    scale: 1,
+    rotation: 0,
+    opacity: 1,
+    glowIntensity: 1,
+  };
+}
+
 /**
  * Re-render completed strokes into the offscreen cache when dirty,
  * then blit the cached bitmap onto the main canvas — O(1) per frame.
@@ -35,25 +55,40 @@ export function renderCompletedStrokes(
   cache: OffscreenCanvas | null,
   cacheCtx: OffscreenCanvasRenderingContext2D | null,
   dirty: boolean,
-  animator?: StrokeAnimator | null,
-  objectStore?: ObjectStore | null,
+  animator: StrokeAnimator | null | undefined,
+  objectStore: ObjectStore | null | undefined,
+  /** Phase 2: frame-persistent `strokeId → AnimationTransform` pool. Reused
+   *  across every frame; entries accrete on new animated strokes and are
+   *  left in place afterwards so steady-state allocation is zero. */
+  transformPool: StrokeTransformPool,
+  /** Phase 2: reused per-frame set used as "which strokes are animated
+   *  this frame". `.clear()` and re-populate — no Set reallocation. */
+  activeAnimatedIds: Set<string>,
 ): boolean {
   const now = performance.now();
   const hasAnimator = animator != null && animator.hasAnimations();
 
-  // Compute transforms ONCE per stroke, cache results
-  const transformCache = new Map<string, AnimationTransform>();
+  // Phase 2: reuse the pool's entries in place. `activeAnimatedIds` tracks
+  // which strokes got a transform THIS frame so downstream consumers know
+  // which pool entries are fresh. No per-frame Map / AnimationTransform
+  // allocation once the pool stabilises.
+  activeAnimatedIds.clear();
   if (hasAnimator) {
     for (const stroke of strokes) {
-      const transform = animator!.getTransform(stroke.id, now);
-      if (transform) transformCache.set(stroke.id, transform);
+      let buf = transformPool.get(stroke.id);
+      if (!buf) {
+        buf = createTransformBuffer();
+        transformPool.set(stroke.id, buf);
+      }
+      const ok = animator!.getTransform(stroke.id, now, buf);
+      if (ok) activeAnimatedIds.add(stroke.id);
     }
   }
 
-  const hasAnimated = transformCache.size > 0;
+  const hasAnimated = activeAnimatedIds.size > 0;
 
   const staticStrokes = hasAnimated
-    ? strokes.filter((s) => !transformCache.has(s.id))
+    ? strokes.filter((s) => !activeAnimatedIds.has(s.id))
     : strokes;
 
   // When dirty, or when the set of static strokes changed due to animations,
@@ -79,10 +114,11 @@ export function renderCompletedStrokes(
     ctx.drawImage(cache, 0, 0);
   }
 
-  // Render animated strokes directly with cached transforms
+  // Render animated strokes directly with pooled transforms (Phase 2)
   if (hasAnimated) {
     for (const stroke of strokes) {
-      const transform = transformCache.get(stroke.id);
+      if (!activeAnimatedIds.has(stroke.id)) continue;
+      const transform = transformPool.get(stroke.id);
       if (!transform) continue;
       if (stroke.smoothed.length < 2) continue;
       const obj = objectStore?.getObjectByStrokeId(stroke.id);

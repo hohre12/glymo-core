@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { StrokeAnimator } from '../src/animation/StrokeAnimator.js';
+import type { AnimationTransform } from '../src/animation/types.js';
 
 const STROKE_ID = 'stroke-0';
 
@@ -29,10 +30,15 @@ function transformAt(
   animator: StrokeAnimator,
   normalizedPhase: number, // 0..1 within the first cycle
   durationMs: number,
-): ReturnType<StrokeAnimator['getTransform']> {
+): AnimationTransform | null {
   // `getTransform` uses performance.now() internally; we mock it.
   const startedAt = 1_000; // arbitrary base
   vi.spyOn(performance, 'now').mockReturnValue(startedAt + durationMs * normalizedPhase);
+  // Phase 2 of rendering-pipeline-v2 added a `getTransform(..., out)`
+  // overload returning `boolean`. The legacy 2-arg shape still returns
+  // `AnimationTransform | null` bit-identical to pre-Phase-2; declaring
+  // the return type explicitly here pins us to that overload and stops
+  // `ReturnType<>` from resolving to the last overload's `boolean`.
   return animator.getTransform(STROKE_ID, startedAt + durationMs * normalizedPhase);
 }
 

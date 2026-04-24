@@ -112,6 +112,8 @@ describe('renderCompletedStrokes: static-cache path skips mesh-applied strokes',
       /*dirty*/ true,
       null,
       store,
+      new Map(),
+      new Set(),
     );
 
     // Both strokes have 2 points → renderGlowPass + renderMainStroke call beginPath.
@@ -169,6 +171,8 @@ describe('renderCompletedStrokes: animated path skips mesh-applied strokes', () 
       false,
       animator,
       store,
+      new Map(),
+      new Set(),
     );
 
     // We verify the guard's effect directly rather than via ctx.save count,
@@ -207,7 +211,9 @@ describe('renderFills: skips mesh-applied fills', () => {
 
     const ctx = makeFakeCtx();
 
-    renderFills(ctx, [f1, f2], store, null);
+    renderFills(ctx, [f1, f2], store, null, {
+      translateX: 0, translateY: 0, scale: 1, rotation: 0, opacity: 1, glowIntensity: 1,
+    });
 
     // Only f2 should be drawn
     const drawImageCalls = (ctx.drawImage as ReturnType<typeof vi.fn>).mock.calls.length;
@@ -228,7 +234,7 @@ describe('renderCompletedStrokes: null objectStore — guard is a no-op', () => 
     const cache = makeFakeCache();
     const ctx = makeFakeCtx();
 
-    renderCompletedStrokes(ctx, [s1, s2], cache, cacheCtx, true, null, null);
+    renderCompletedStrokes(ctx, [s1, s2], cache, cacheCtx, true, null, null, new Map(), new Set());
 
     // Both strokes drawn: each produces 2 beginPath calls (glow + main).
     const beginPathCalls = (cacheCtx.beginPath as ReturnType<typeof vi.fn>).mock.calls.length;
@@ -249,7 +255,7 @@ describe('renderFills and renderCompletedStrokes: sanity — renders all when no
     const cache = makeFakeCache();
     const ctx = makeFakeCtx();
 
-    renderCompletedStrokes(ctx, [s1, s2], cache, cacheCtx, true, null, store);
+    renderCompletedStrokes(ctx, [s1, s2], cache, cacheCtx, true, null, store, new Map(), new Set());
 
     // Both strokes drawn: s1 and s2 each produce 2 beginPath calls (glow + main).
     const beginPathCalls = (cacheCtx.beginPath as ReturnType<typeof vi.fn>).mock.calls.length;
@@ -268,7 +274,9 @@ describe('renderFills and renderCompletedStrokes: sanity — renders all when no
     store.addFillToObject(obj2.id, 'f2');
 
     const ctx = makeFakeCtx();
-    renderFills(ctx, [f1, f2], store, null);
+    renderFills(ctx, [f1, f2], store, null, {
+      translateX: 0, translateY: 0, scale: 1, rotation: 0, opacity: 1, glowIntensity: 1,
+    });
 
     const drawImageCalls = (ctx.drawImage as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(drawImageCalls).toBe(2);

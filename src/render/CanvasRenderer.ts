@@ -9,6 +9,7 @@ import type { EventBus } from '../state/EventBus.js';
 import type { IRenderer, RendererType } from './IRenderer.js';
 import type { OverlayText } from '../text/types.js';
 import type { StrokeAnimator } from '../animation/StrokeAnimator.js';
+import type { AnimationTransform } from '../animation/types.js';
 import type { ObjectStore } from '../store/ObjectStore.js';
 
 import { renderBackground } from './layers/background.js';
@@ -77,6 +78,22 @@ export class CanvasRenderer implements IRenderer {
   private selectionManager: SelectionManager | null = null;
 
   private getActivePointsFn: (() => ReadonlyArray<StrokePoint>) | null = null;
+
+  /** Phase 2 (rendering-pipeline-v2): frame-persistent storage for the
+   *  completed-stroke layer's per-stroke `AnimationTransform`s. Reused
+   *  across every frame; zero per-frame allocation once populated. */
+  private readonly transformPool: Map<string, AnimationTransform> = new Map();
+  private readonly activeAnimatedIds: Set<string> = new Set();
+  /** Phase 2: single reusable buffer for the fill layer (one
+   *  `getTransform` call per fill is enough — no need for a pool). */
+  private readonly fillTransformBuffer: AnimationTransform = {
+    translateX: 0,
+    translateY: 0,
+    scale: 1,
+    rotation: 0,
+    opacity: 1,
+    glowIntensity: 1,
+  };
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -365,7 +382,13 @@ export class CanvasRenderer implements IRenderer {
     renderBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundMode, this.backgroundColor);
 
     // Layer 5 — Fills (below strokes, with object animation transforms)
-    renderFills(this.ctx, this.fills, this.objectStore, this.strokeAnimator);
+    renderFills(
+      this.ctx,
+      this.fills,
+      this.objectStore,
+      this.strokeAnimator,
+      this.fillTransformBuffer,
+    );
 
     // Layer 10 — Completed strokes (offscreen cache + animation transforms)
     this.completedCacheDirty = renderCompletedStrokes(
@@ -376,6 +399,8 @@ export class CanvasRenderer implements IRenderer {
       this.completedCacheDirty,
       this.strokeAnimator,
       this.objectStore,
+      this.transformPool,
+      this.activeAnimatedIds,
     );
 
     // Layer 15 — Selection highlights (marching ants)

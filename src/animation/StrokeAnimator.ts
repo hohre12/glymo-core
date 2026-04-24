@@ -54,9 +54,47 @@ function lerp(a: number, b: number, f: number): number {
 /**
  * StrokeAnimator manages active animations and computes per-frame
  * AnimationTransform for each animated stroke.
+ *
+ * Phase 2 of rendering-pipeline-v2 (docs/plans/rendering-pipeline-v2.md §6
+ * Phase 2) collapses this class's hot path to zero-allocation under the
+ * out-param overload. The three machinery pieces:
+ *
+ *   1. `strokeIndex: Map<strokeId, Set<animId>>` — reverse index maintained
+ *      in `addAnimation` / `removeAnimation` / `removeByStrokeId` + on-the-
+ *      fly completed-animation purge. Lets `getTransform(strokeId, …)`
+ *      visit ONLY the animations targeting `strokeId` instead of scanning
+ *      every registered animation with `.includes()`.
+ *
+ *   2. `transformBuffer` — module-scoped scratch `AnimationTransform`
+ *      passed into `computeAnimationTransform(params, t, elapsed, out)`
+ *      so the per-call computation writes in place instead of returning a
+ *      fresh object.
+ *
+ *   3. `completedIdsBuffer` — class field drained via `.length = 0` so the
+ *      per-frame temporary no longer allocates.
+ *
+ * Callers that opt into the out-param overload
+ * (`getTransform(strokeId, now, out): boolean`) get the full zero-alloc
+ * hot path; callers holding the legacy `getTransform(strokeId, now)`
+ * signature continue to receive a freshly allocated `AnimationTransform`
+ * object (or `null`). The legacy signature is retained verbatim so every
+ * pre-Phase-2 test and consumer keeps working bit-identically.
  */
 export class StrokeAnimator {
   private animations = new Map<string, StrokeAnimation>();
+  /** Phase 2: `strokeId → Set<animId>` reverse index. */
+  private strokeIndex = new Map<string, Set<string>>();
+  /** Phase 2: pre-allocated buffer for `computeAnimationTransform`. */
+  private readonly transformBuffer: AnimationTransform = {
+    translateX: 0,
+    translateY: 0,
+    scale: 1,
+    rotation: 0,
+    opacity: 1,
+    glowIntensity: 1,
+  };
+  /** Phase 2: class-field ids buffer drained via `.length = 0`. */
+  private readonly completedIdsBuffer: string[] = [];
   private nextId = 0;
 
   /**
@@ -72,33 +110,90 @@ export class StrokeAnimator {
       active: true,
     };
     this.animations.set(id, animation);
+    // Phase 2: reverse index so `getTransform(strokeId, …)` is O(1) on
+    // strokeId + O(K) on matching animations, instead of O(A × K) scanning
+    // every animation with `.includes(strokeId)`.
+    for (const sid of strokeIds) {
+      let set = this.strokeIndex.get(sid);
+      if (!set) {
+        set = new Set();
+        this.strokeIndex.set(sid, set);
+      }
+      set.add(id);
+    }
     return id;
   }
 
   /** Remove a specific animation by ID */
   removeAnimation(animationId: string): void {
+    const anim = this.animations.get(animationId);
+    if (anim) {
+      // Phase 2: detach from strokeIndex entries for every stroke this
+      // animation was targeting. Empty sets collapse so `getTransform`'s
+      // "no match" path stays O(1).
+      for (const sid of anim.strokeIds) {
+        const set = this.strokeIndex.get(sid);
+        if (set) {
+          set.delete(animationId);
+          if (set.size === 0) this.strokeIndex.delete(sid);
+        }
+      }
+    }
     this.animations.delete(animationId);
   }
 
   /** Remove all animations targeting a specific stroke ID */
   removeByStrokeId(strokeId: string): void {
-    for (const [id, anim] of this.animations) {
+    // Phase 2: walk through strokeIndex instead of scanning every
+    // animation — keeps this path O(#anims-on-stroke), not O(total).
+    const animIds = this.strokeIndex.get(strokeId);
+    if (!animIds || animIds.size === 0) return;
+    // Snapshot to avoid mutating the set we're iterating.
+    const ids = Array.from(animIds);
+    for (const animId of ids) {
+      const anim = this.animations.get(animId);
+      if (!anim) continue;
       const idx = anim.strokeIds.indexOf(strokeId);
-      if (idx !== -1) {
-        anim.strokeIds.splice(idx, 1);
-        if (anim.strokeIds.length === 0) {
-          this.animations.delete(id);
-        }
+      if (idx !== -1) anim.strokeIds.splice(idx, 1);
+      if (anim.strokeIds.length === 0) {
+        this.animations.delete(animId);
       }
     }
+    // The reverse index entry for this strokeId is entirely gone.
+    // Entries for other strokeIds (if the animation targeted multiple)
+    // still correctly reference the surviving animation.
+    this.strokeIndex.delete(strokeId);
   }
 
   /**
    * Compute the current transform for a stroke at the given timestamp.
-   * Returns null if the stroke has no active animation.
-   * When multiple animations target the same stroke, transforms are composed additively.
+   * When multiple animations target the same stroke, transforms are
+   * composed additively for translation/rotation and multiplicatively
+   * for scale/opacity/brightness.
+   *
+   * Two signatures (Phase 2 additive overload):
+   *
+   *   `getTransform(strokeId, now)` — legacy shape; returns a freshly
+   *   allocated `AnimationTransform | null`. Preserved bit-for-bit so
+   *   every pre-Phase-2 consumer keeps working without migration.
+   *
+   *   `getTransform(strokeId, now, out)` — hot-path shape; writes the
+   *   composed transform into `out` in place and returns `true` when a
+   *   match is found, `false` otherwise. Zero object allocation per
+   *   call once the caller pre-allocates `out`.
    */
-  getTransform(strokeId: string, now: number): AnimationTransform | null {
+  getTransform(strokeId: string, now: number): AnimationTransform | null;
+  getTransform(strokeId: string, now: number, out: AnimationTransform): boolean;
+  getTransform(
+    strokeId: string,
+    now: number,
+    out?: AnimationTransform,
+  ): AnimationTransform | null | boolean {
+    const animIds = this.strokeIndex.get(strokeId);
+    if (!animIds || animIds.size === 0) {
+      return out !== undefined ? false : null;
+    }
+
     let hasMatch = false;
     let tx = 0;
     let ty = 0;
@@ -106,11 +201,11 @@ export class StrokeAnimator {
     let rotation = 0;
     let opacity = 1;
     let glowIntensity = 1;
-    const completedIds: string[] = [];
+    const buf = this.transformBuffer;
 
-    for (const [animId, anim] of this.animations) {
-      if (!anim.active) continue;
-      if (!anim.strokeIds.includes(strokeId)) continue;
+    for (const animId of animIds) {
+      const anim = this.animations.get(animId);
+      if (!anim || !anim.active) continue;
 
       const delay = anim.params.delay ?? 0;
       const elapsed = now - anim.startTime - delay;
@@ -129,28 +224,52 @@ export class StrokeAnimator {
         t = Math.min(elapsed / duration, 1);
         if (t >= 1) {
           anim.active = false;
-          completedIds.push(animId);
+          this.completedIdsBuffer.push(animId);
         }
       }
 
-      const transform = this.computeAnimationTransform(anim.params, t, elapsed);
+      this.computeAnimationTransform(anim.params, t, elapsed, buf);
 
       // Compose: additive translation, multiplicative scale/opacity/brightness, additive rotation
-      tx += transform.translateX;
-      ty += transform.translateY;
-      scale *= transform.scale;
-      rotation += transform.rotation;
-      opacity *= transform.opacity;
-      glowIntensity *= transform.glowIntensity;
+      tx += buf.translateX;
+      ty += buf.translateY;
+      scale *= buf.scale;
+      rotation += buf.rotation;
+      opacity *= buf.opacity;
+      glowIntensity *= buf.glowIntensity;
     }
 
     // Purge completed non-repeating animations to prevent memory leaks
-    for (const id of completedIds) {
-      this.animations.delete(id);
+    // AND keep the reverse index consistent so a later getTransform on the
+    // same stroke doesn't spend time revisiting a corpse entry.
+    if (this.completedIdsBuffer.length > 0) {
+      for (const id of this.completedIdsBuffer) {
+        const anim = this.animations.get(id);
+        if (anim) {
+          for (const sid of anim.strokeIds) {
+            const set = this.strokeIndex.get(sid);
+            if (set) {
+              set.delete(id);
+              if (set.size === 0) this.strokeIndex.delete(sid);
+            }
+          }
+          this.animations.delete(id);
+        }
+      }
+      this.completedIdsBuffer.length = 0;
     }
 
-    if (!hasMatch) return null;
+    if (!hasMatch) return out !== undefined ? false : null;
 
+    if (out !== undefined) {
+      out.translateX = tx;
+      out.translateY = ty;
+      out.scale = scale;
+      out.rotation = rotation;
+      out.opacity = opacity;
+      out.glowIntensity = glowIntensity;
+      return true;
+    }
     return { translateX: tx, translateY: ty, scale, rotation, opacity, glowIntensity };
   }
 
@@ -191,6 +310,8 @@ export class StrokeAnimator {
   /** Remove all animations */
   clear(): void {
     this.animations.clear();
+    this.strokeIndex.clear();
+    this.completedIdsBuffer.length = 0;
   }
 
   /**
@@ -216,7 +337,10 @@ export class StrokeAnimator {
    * `startTime` set to the current `performance.now()`.
    */
   restore(entries: Array<{ strokeIds: string[]; params: AnimationParams }>): void {
-    this.animations.clear();
+    // Phase 2: reuse `clear()` so the reverse index is cleared too. A bare
+    // `this.animations.clear()` would leave the index pointing at stale
+    // animIds, producing silent misses on the next getTransform.
+    this.clear();
     for (const entry of entries) {
       this.addAnimation(entry.strokeIds, entry.params);
     }
@@ -224,19 +348,26 @@ export class StrokeAnimator {
 
   // ── Private: Animation Calculations ─────────────────
 
+  /** Phase 2: writes the per-animation transform in place into `identity`.
+   *  Every switch case that previously allocated an `identity` object at
+   *  the top of the function now reuses the caller-provided buffer. The
+   *  parameter name `identity` is preserved so the body of every switch
+   *  case stays textually unchanged, minimising diff surface for the
+   *  per-type animation math (which is locked by the primitive-amplitude
+   *  regression tests). */
   private computeAnimationTransform(
     params: AnimationParams,
     t: number,
     elapsed: number,
-  ): AnimationTransform {
-    const identity: AnimationTransform = {
-      translateX: 0,
-      translateY: 0,
-      scale: 1,
-      rotation: 0,
-      opacity: 1,
-      glowIntensity: 1,
-    };
+    identity: AnimationTransform,
+  ): void {
+    // In-place reset — starts every call from the neutral transform.
+    identity.translateX = 0;
+    identity.translateY = 0;
+    identity.scale = 1;
+    identity.rotation = 0;
+    identity.opacity = 1;
+    identity.glowIntensity = 1;
 
     const amplitude = params.amplitude ?? DEFAULT_AMPLITUDE[params.type] ?? 0;
 
@@ -496,8 +627,7 @@ export class StrokeAnimator {
         break;
       }
     }
-
-    return identity;
+    // In-place write — no return value, the caller owns the buffer.
   }
 
   /**
