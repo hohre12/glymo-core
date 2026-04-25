@@ -61,6 +61,19 @@ export interface CanvasMirrorLayerInit {
   name: string;
   z: number;
   logName: string;
+  /**
+   * Phase 6 6b-6f — synchronous callback fired from `render()` BEFORE
+   * the texture is marked dirty for the GPU upload. Lets the consumer
+   * push a fresh frame into the source canvas exactly once per
+   * SceneGraph tick (e.g. driving `Hologram3DRenderer.renderFrame()`
+   * for `Hologram3DLayer`). Mirrors the legacy Compositor's
+   * `beforeRead` hook.
+   *
+   * Optional. When omitted, render() is a pure
+   * `texture.needsUpdate = true` — the source canvas's own renderer
+   * is responsible for keeping pixels current.
+   */
+  beforeRender?: () => void;
 }
 
 /**
@@ -78,6 +91,7 @@ export class CanvasMirrorLayer implements Layer {
   protected readonly source: HTMLCanvasElement;
   protected readonly z: number;
   protected readonly logName: string;
+  protected readonly beforeRenderCallback: (() => void) | null;
 
   // ── Internal state (lazily allocated in init) ───────────────────────────
 
@@ -103,6 +117,7 @@ export class CanvasMirrorLayer implements Layer {
     this.name = opts.name;
     this.z = opts.z;
     this.logName = opts.logName;
+    this.beforeRenderCallback = opts.beforeRender ?? null;
   }
 
   // ── Layer lifecycle ─────────────────────────────────────────────────────
@@ -154,11 +169,29 @@ export class CanvasMirrorLayer implements Layer {
   }
 
   /** Per-frame: invalidate the texture so the GPU re-uploads the source
-   *  canvas's latest pixels. Allocation-free (Phase 2 invariant). */
+   *  canvas's latest pixels. Allocation-free (Phase 2 invariant).
+   *  When `beforeRender` was supplied, fires it FIRST so the source
+   *  canvas can be repainted before the upload. */
   render(_deltaMs: number): void {
     if (!this.initialized || this.disposed) return;
     if (!this.texture) return;
+    if (this.beforeRenderCallback) {
+      try {
+        this.beforeRenderCallback();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error(`[${this.logName}] beforeRender threw:`, e);
+      }
+    }
     this.texture.needsUpdate = true;
+  }
+
+  /** Phase 6 6b-6d — toggle visibility without unmounting. Mirrors the
+   *  legacy `Compositor.setLayerVisible(id, bool)` surface. */
+  setVisible(visible: boolean): void {
+    if (!this.initialized || this.disposed) return;
+    if (!this.mesh) return;
+    this.mesh.visible = visible;
   }
 
   /** Re-sized viewport: rebuild the quad geometry. PlaneGeometry has no

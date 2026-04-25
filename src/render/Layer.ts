@@ -86,4 +86,21 @@ export interface Layer {
   /** Release every resource the Layer allocated. Idempotent — calling
    *  `dispose` twice is a no-op on the second call. */
   dispose(): void;
+
+  /**
+   * Toggle the layer's visibility without unmounting it. Phase 6 6b-6d
+   * — replaces the legacy `Compositor.setLayerVisible(id, bool)`
+   * surface that callers like `useHologramController.ts:300-303` (hide
+   * 2D overlay during hologram lift to avoid double-image) and the
+   * `showSkeleton` settings toggle relied on.
+   *
+   * Implementations MUST flip the underlying scene primitive's
+   * `visible` field synchronously (no animation). When `false`, the
+   * Three.js renderer skips drawing the layer's mesh entirely; on
+   * the next frame it returns to its previous visibility level.
+   *
+   * Default `true` after `init()` returns. Calling before `init()` or
+   * after `dispose()` is a silent no-op.
+   */
+  setVisible(visible: boolean): void;
 }

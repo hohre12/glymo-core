@@ -25,6 +25,20 @@ export {
 // these as not part of the supported public surface.
 export type { Layer, LayerInitContext } from './Layer.js';
 
+// Phase 6 Batch A — shared constants (layer names, Z stack, video
+// preprocess defaults). Single source of truth; subclasses pull from
+// here instead of hard-coding their own defaults. See
+// `./constants.ts` module header for the full rationale.
+export {
+  LAYER_NAMES,
+  LAYER_Z,
+  LAYER_LOG_NAMES,
+  LAYER_DEFAULTS,
+  LAYER_RENDER_ORDER,
+  VIDEO_LAYER_DEFAULTS,
+  type LayerName,
+} from './constants.js';
+
 // ── Concrete layers (Phase 6 sub-slices 6a-2…6a-6) ────────────────────────
 // Concrete `Layer` implementations live under `./layers/` and re-export
 // from this barrel so consumers `import { StrokeLayer, … } from
@@ -70,3 +84,7 @@ export {
   WatermarkLayer,
   type WatermarkLayerOptions,
 } from './layers/WatermarkLayer.js';
+export {
+  PostProcessLayer,
+  type PostProcessLayerOptions,
+} from './layers/PostProcessLayer.js';

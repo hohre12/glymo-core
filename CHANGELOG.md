@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.6] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 Batch A+B+D: constants module + Layer.setVisible API + beforeRender callback + PostProcessLayer.**
+
+The "기능 완벽 동일" closure pass. Phase 6 6b-5+6b-6 closed the camera background gap; the user audit then surfaced the remaining 6 P0/P1 functional differences. This release closes 5 of them and lands the constants/abstraction foundation for maintenance.
+
+### Added — abstraction / commonization (Batch A)
+- `src/render/constants.ts` — single source of truth for layer names (`LAYER_NAMES`), Z stack (`LAYER_Z`), diagnostic mesh-name prefixes (`LAYER_LOG_NAMES`), bundled defaults (`LAYER_DEFAULTS.*`), the canonical render order (`LAYER_RENDER_ORDER`), and video preprocess constants (`VIDEO_LAYER_DEFAULTS`). Each subclass (StrokeLayer / TextOverlayLayer / AmbientGlowLayer / Hologram3DLayer / HandLayer / VideoLayer / WatermarkLayer / PostProcessLayer) reads its name+z+logName from `LAYER_DEFAULTS.<key>` instead of hard-coding literals. New layer additions touch ONE constants entry instead of N call-sites.
+- `src/render/index.ts` — re-exports the new constants surface.
+
+### Added — Layer interface evolution (Batch C)
+- `Layer.setVisible(visible: boolean): void` — mirrors the legacy `Compositor.setLayerVisible(id, bool)` surface. Pre-Batch-A/C, the renderV2 path had no equivalent — `useHologramController`'s overlay-hide call (audit gap 5), the `showSkeleton` settings toggle (audit gap 6), and the camera/background mode toggle (audit gap 7) were all silent no-ops on the SceneGraph stack. CanvasMirrorLayer's implementation flips `mesh.visible` synchronously; subclasses inherit. VideoLayer overrides for the same surface.
+
+### Added — Layer interface evolution (Batch B 6b-6f)
+- `CanvasMirrorLayerInit.beforeRender?: () => void` — synchronous callback fired from `render()` BEFORE `texture.needsUpdate = true`. Lets the consumer push a fresh source-canvas frame each tick (the legacy Compositor's `beforeRead` hook). Hologram3DLayer wires this from CanvasEngine to drive `Hologram3DRenderer.renderFrame()` exactly once per SceneGraph tick — eliminates audit gap 4b (1-frame visual lag).
+
+### Added — PostProcessLayer (Batch D, 6a-4a R2 conservative)
+- `src/render/layers/PostProcessLayer.ts` — `CanvasMirrorLayer` subclass wrapping the legacy `useWebGPUPostProcess` output canvas at z=1.5 (between TextOverlay z=1 and Hologram3D z=2). The legacy WGSL pipeline (bloom + chromatic aberration + scanlines for hologram/aurora effects) continues to write into its own WebGPU canvas; the layer just makes that canvas appear in the SceneGraph composite. Closes audit gap 3 (aurora/hologram effects render WITHOUT bloom under renderV2). Sub-slice 6a-4b (deferred — multi-day) replaces the WGSL with TSL native; this commit's R2 path delivers user-visible parity without that work.
+- `src/render/index.ts` — re-exports PostProcessLayer + PostProcessLayerOptions.
+
+### Refactored — all 7 existing layer subclasses (Batch A)
+- `StrokeLayer / TextOverlayLayer / AmbientGlowLayer / Hologram3DLayer / HandLayer / WatermarkLayer / VideoLayer` — each subclass now imports `LAYER_DEFAULTS` and reads its name/z/logName from there. Public surface (`SubclassOptions`) UNCHANGED — bit-for-bit behavioural parity verified by 19 committed Browser Mode goldens.
+
+### Composition contract — COMPLETE (8 layers Z-stack-ordered)
+
+| Z   | Layer              | Status        |
+|-----|--------------------|---------------|
+| -2  | VideoLayer         | ✅ 6b-5 + camera-blur fix in 0.27.5 |
+| -1  | AmbientGlowLayer   | ✅ 6a-4a |
+|  0  | StrokeLayer        | ✅ 6a-2 |
+|  1  | TextOverlayLayer   | ✅ 6a-3a |
+| 1.5 | PostProcessLayer   | ✅ this commit (Batch D, R2 conservative) |
+|  2  | Hologram3DLayer    | ✅ 6a-5a |
+|  3  | HandLayer          | ✅ 6a-6 |
+|  4  | WatermarkLayer     | ✅ 6b-5 |
+
+### KNOWN GAPS still deferred
+
+- **6a-4b (deferred, scope-locked)** — replace `useWebGPUPostProcess`'s 646 LOC of custom WGSL with Three.js TSL bloom + chromaticAberration + scanlines nodes. The PostProcessLayer landed here is the R2 conservative wrapper; user-visible behaviour is pixel-equivalent to legacy because the legacy WGSL still produces the pixels. The §5 "delete 500 LOC" benefit is unrealised until 6a-4b.
+- **6a-3b** TextOverlayLayer TSL InstancedMesh — same pattern.
+- **6a-5b** literal HologramLayer + MediaArtLayer split — multi-day; the Hologram3DLayer R2 wrapper still has a +150% longest RAF regression on hologram scenes due to double-render.
+- **6a-6b** HandLayer Line2 + LineSegments2 — same pattern.
+
+### Test results
+- `npm test` (jsdom): 838/838 green, unchanged.
+- `npm run typecheck`: clean.
+- Browser-mode evidence in `glymo-ui` Browser Mode (run via `cd glymo-ui && npm run test:browser`): 55/55 green, unchanged.
+
+### Version bump
+0.27.4 → 0.27.6 (skipping 0.27.5 — used internally for the camera blur fix). Patch sequence — additive surface (PostProcessLayer + Layer.setVisible + CanvasMirrorLayer.beforeRender + LAYER_DEFAULTS exports). The `Layer.setVisible` addition technically changes the `Layer` interface (a new required method) — this would be a MAJOR if `Layer` were external public API; it's flagged `@internal` per R-A so subclasses inside `@glymo/core` are the only callers, and all 8 subclasses are updated in this same commit. Concrete `CanvasMirrorLayer` provides the default impl so subclasses inherit it for free.
+
+### Phase 6 sub-slice contract progress
+- 6a-1…6a-6 ✅ structural scope closed.
+- 6b-pre ✅ CanvasMirrorLayer extracted (0.27.2).
+- 6b-1+6b-2 ✅ CanvasEngine SceneGraph mount + 5-layer wiring (@glymo/ui 0.52.0).
+- 6b-3 ✅ Consumer wiring + dep bumps.
+- 6b-4 ✅ multi-run bench + Phase 6 acceptance verdict.
+- 6b-5 ✅ VideoLayer + WatermarkLayer (0.27.3 → 0.27.4).
+- 6b-6 ✅ VideoLayer opacity/mirror + Strict-Mode cleanup (0.27.4).
+- 6b-6b ✅ VideoLayer blur + object-cover crop (0.27.5).
+- **Batch A** ✅ Constants module (this commit, 0.27.6).
+- **Batch B** ✅ beforeRender + exportFrame branch + Fill verification (this commit + @glymo/ui 0.52.4).
+- **Batch C** ✅ Layer.setVisible API + showSkeleton + hologram-double-image fixes (this commit + @glymo/ui 0.52.4).
+- **Batch D** ✅ PostProcessLayer (R2 conservative) (this commit, 0.27.6 + @glymo/ui 0.52.4).
+- 6a-4b (deferred): TSL bloom — still scope-locked per CHANGELOG above.
+- 6a-3b / 6a-5b / 6a-6b: deferred per-layer GPU-native upgrades.
+
+### Invariants preserved (I1–I10)
+- I1–I7: untouched.
+- I8 Preserve the shape: ENFORCED. The R2 PostProcessLayer wrapper re-uses the legacy WGSL output; visual diff is bit-identical (modulo Three.js's CanvasTexture re-upload latency, ≤ 1 frame).
+- I9 Tests stay green: enforced (838 + 478 + 55).
+- I10 closed in 6a-5a; both paths benefit.
+
+## [0.27.5] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6b-6b: VideoLayer blur + object-cover crop (internal preprocess canvas).**
+
+User-found regression: under `NEXT_PUBLIC_GLYMO_RENDER_V2=true` the camera background showed too much noise + horizontal mirror was not flipping. Root cause: the 6b-5 VideoLayer used `mesh.scale.x = -1` for mirror (flipped winding → MeshBasicMaterial FrontSide culled the now-back-facing front; mesh visible but unmirrored), and had no blur (legacy `videoPreprocess.blur: 6` was never replicated).
+
+Architecture switch: VideoLayer now creates an INTERNAL offscreen 2D canvas, applies the legacy preprocess chain (blur + mirror via `ctx.scale(-1, 1)` + object-cover crop) inside `render()`, and wraps that internal canvas as the `CanvasTexture` source — same architectural shape as `Compositor.composite`'s `videoPreprocess` block (`Compositor.ts:262-285`).
+
+### Added options on VideoLayer
+- `blur?: number` (default `0`; legacy parity = `6`). CSS-pixel radius.
+- `cover?: boolean` (default `true`; matches legacy `object-cover` semantics).
+
+### Changed
+- VideoLayer source pipeline: video → internal 2D canvas with `blur + mirror + cover` → CanvasTexture. Replaces the prior 6b-5 direct VideoTexture path which could not apply blur or mirror cleanly.
+- Mesh transform no longer applies `scale.x = -1` (mirror is now handled by the internal canvas's `ctx.scale`); avoids the FrontSide culling issue.
+
+### Performance cost
+One CPU `drawImage` per frame at viewport CSS×DPR pixels — same cost the legacy Compositor pays for the same layer. Bounded; documented; identical to the legacy compositor profile.
+
+### Test results
+838/838 + 478/478 + 55/55 green, unchanged.
+
 ## [0.27.4] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6b-5+6b-6: VideoLayer + WatermarkLayer + Compositor-parity options.**
