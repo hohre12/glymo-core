@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.25.3] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 4: CameraCapture worker-path hardening.**
+
+Fourth artefact of the rendering-pipeline-v2 refactor (see `docs/plans/rendering-pipeline-v2.md` §6 Phase 4). Eliminates the user-visible 5.4–6.3 s "camera on" freeze measured in `app/camera-hand` across Phase 0–3 by removing two pre-Phase-4 mechanisms whose combined effect was the freeze:
+
+  1. The `private static async shouldPreferSync()` heuristic that consulted WebGPU adapter info to force sync MediaPipe init on M1/M2/M1 Pro/M2 Pro unified-GPU machines. Empirical evidence (Phase 0–3 multi-run reports) was that worker mode runs correctly on every Apple Silicon tier when `mediapipe-vision.js` is present; the heuristic was the dominant cause of the freeze it was nominally protecting against.
+
+  2. The 10-second `workerInitTimeout` fallback that fired when the worker silently hung during `importScripts('/mediapipe-vision.js')`. The worker now posts `{type: 'error', phase: 'import'}` from a try/catch around the import so the parent's existing `handleWorkerMessage('error')` branch triggers the sync fallback synchronously — well within 100 ms instead of waiting 10 seconds.
+
+### Changed
+- `src/input/CameraCapture.ts` — `initAsync` no longer calls `shouldPreferSync()`. Worker mode is the default on every device; sync mode is reachable only as a feature-detect fallback from `tryCreateWorker()` returning false (CSP / blob URL blocked) or from the worker `error` message.
+- `src/input/CameraCapture.ts` — the `setTimeout(..., 10_000)` worker-init fallback timer is gone. The `workerInitTimeout` field is retained as a `null`-guarded no-op for call-site stability (the two `if (this.workerInitTimeout) clearTimeout(...)` guards in the message handlers short-circuit harmlessly).
+- `src/input/CameraCapture.ts` — `shouldPreferSync` static method REMOVED. `localStorage['glymo-mp-mode']` is no longer read or written by `@glymo/core`. Consumer apps that set this key for testing will see it ignored on next install; the cache key may be cleaned up by a separate consumer-side commit.
+
+### Added
+- `src/input/__tests__/CameraCapture.worker-fallback.test.ts` — 5 Vitest cases covering the worker-error handshake (synchronous `initMediaPipeSync` invocation, sub-100-ms wall-time budget, `active=false` short-circuit), the workerInitTimeout removal (field starts `null` and stays `null` post-init), and the heuristic removal (`shouldPreferSync` is undefined on the class).
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched.
+- I3 CLAUDE.md absolutes: untouched (gesture / smoothing math is gesture-side, not affected by this change).
+- I4 MediaArt seam: untouched.
+- I5 strings parity: n/a.
+- I6 feature-flag deferrals: untouched.
+- I7 classifier-worker URL: untouched.
+- I8 preserve-the-shape: n/a.
+- I9 test pyramid reinforced — 834/834 core tests green (was 829 — +5 new).
+- I10 MediaArt ↔ text-mode hologram coexistence: Phase 6 scope, untouched.
+
+### Worker-side asset (consumer apps)
+The `mediapipe-worker.mjs` file under each consumer app's `public/` is updated to wrap `importScripts('/mediapipe-vision.js')` in a try/catch that posts `{type: 'error', phase: 'import'}` on failure — paired commits in `glymo-app` and `glymo-landing` ship the new worker file plus a `scripts/check-mediapipe-assets.ts` local guard that refuses commits if either asset is missing. Both apps' `.husky/pre-commit` hooks invoke the guard.
+
 ## [0.25.2] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 3: HandState pool + Object.freeze removal.**

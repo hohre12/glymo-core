@@ -174,6 +174,14 @@ export class CameraCapture implements InputCapture {
   private worker: Worker | null = null;
   private workerBusy = false;
   private workerReady = false;
+  /** Phase 4 (rendering-pipeline-v2): the pre-Phase-4 flow set a 10-second
+   *  fallback timer here as a safety net for silent worker hangs during
+   *  `importScripts`. The worker now posts `{type: 'error', phase: 'import'}`
+   *  on import failure so the parent sees the problem within milliseconds.
+   *  The field is retained as `null` for call-site stability — the two
+   *  remaining `if (this.workerInitTimeout) clearTimeout(...)` guards
+   *  short-circuit harmlessly. A future cleanup pass may delete the field
+   *  entirely once no in-flight branch can reach it. */
   private workerInitTimeout: ReturnType<typeof setTimeout> | null = null;
   /** External worker URL — when set, uses a same-origin module worker instead of inline Blob */
   private externalWorkerUrl: string | null = null;
@@ -401,79 +409,32 @@ export class CameraCapture implements InputCapture {
     await this.startCamera();
     if (!this.active) return;
 
-    // Detect GPU type to choose optimal mode upfront (avoid double init)
-    const preferSync = await CameraCapture.shouldPreferSync();
-    if (!this.active) return;
-
-    if (preferSync) {
-      await this.initMediaPipeSync();
-      return;
-    }
-
-    // Try Worker path: MediaPipe runs off main thread
+    // Phase 4 (rendering-pipeline-v2): the pre-Phase-4 flow consulted a
+    // `shouldPreferSync()` WebGPU-adapter heuristic to force sync mode on
+    // M1/M2/M1 Pro/M2 Pro unified-GPU machines, plus a 10-second
+    // `workerInitTimeout` fallback in case the worker silently hung
+    // during `importScripts('/mediapipe-vision.js')`. Both are gone:
+    //   - the heuristic was the dominant cause of the ~5.4–6.3 s
+    //     longest-RAF handler measured in `app/camera-hand` on M1 Pro
+    //     production builds (Phase 0–3 bench reports), and the empirical
+    //     evidence against it was that worker mode runs correctly on
+    //     every Apple-Silicon tier when the assets are present;
+    //   - the 10-second timeout is replaced by the worker's explicit
+    //     `{type: 'error', phase: 'import'}` handshake on importScripts
+    //     failure (mediapipe-worker.mjs), which `handleWorkerMessage`
+    //     already routes to `initMediaPipeSync` synchronously.
+    // The sync MediaPipe path remains as a feature-detect fallback
+    // reachable from `tryCreateWorker()` returning false (CSP / blob
+    // URL blocked) or from the worker `error` message.
     if (this.tryCreateWorker()) {
       // Worker is loading MediaPipe asynchronously.
-      // handleWorkerMessage('ready') will start the detection loop + call onSuccess.
-      // Timeout fallback: if Worker doesn't become ready in 10s, fall back to sync.
-      this.workerInitTimeout = setTimeout(() => {
-        if (!this.active) return;
-        if (this.workerReady) return; // already ready, no-op
-        console.warn('[CameraCapture] Worker init timed out after 10s, falling back to sync');
-        this.terminateWorker();
-        this.initMediaPipeSync().catch((err: unknown) => this.handleInitError(err));
-      }, 10_000);
+      // `handleWorkerMessage('ready')` starts the detection loop + onSuccess.
+      // `handleWorkerMessage({type:'error'})` triggers immediate sync fallback.
       return;
     }
 
     // Sync fallback: load MediaPipe on main thread (original behavior)
     await this.initMediaPipeSync();
-  }
-
-  /**
-   * Detect if the device has a unified GPU (shared CPU/GPU memory)
-   * where Worker mode causes GPU contention. Returns true for sync preference.
-   *
-   * Uses WebGPU adapter info when available, falls back to heuristics.
-   */
-  private static async shouldPreferSync(): Promise<boolean> {
-    // Check localStorage cache first
-    const cached = typeof localStorage !== 'undefined' ? localStorage.getItem('glymo-mp-mode') : null;
-    if (cached === 'sync') return true;
-    if (cached === 'worker') return false;
-
-    // Try WebGPU adapter detection
-    if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
-      try {
-        const adapter = await (navigator as any).gpu.requestAdapter();
-        if (adapter) {
-          const info = await adapter.requestAdapterInfo?.() ?? adapter.info;
-          const desc = (info?.description ?? info?.device ?? '').toLowerCase();
-          const arch = (info?.architecture ?? '').toLowerCase();
-
-          // Apple Silicon unified GPU: M1, M2, M3 (not M4 Pro/Max which are faster)
-          const isAppleSilicon = desc.includes('apple') || arch.includes('apple');
-          const isBaseTier = /m[123]\b/.test(desc) || /m[123]\b/.test(arch)
-            || desc.includes('m1 pro') || desc.includes('m2 pro');
-          // M4 Pro and above have enough GPU headroom for Worker
-          const isHighTier = desc.includes('m4') || desc.includes('m3 max') || desc.includes('m3 ultra');
-
-          if (isAppleSilicon && isBaseTier && !isHighTier) {
-            localStorage?.setItem('glymo-mp-mode', 'sync');
-            return true;
-          }
-
-          if (isAppleSilicon && isHighTier) {
-            localStorage?.setItem('glymo-mp-mode', 'worker');
-            return false;
-          }
-        }
-      } catch {
-        // WebGPU not available or blocked
-      }
-    }
-
-    // No detection available — keep calibration-based fallback
-    return false;
   }
 
   /** Fallback: load MediaPipe on main thread and start sync detection loop */
