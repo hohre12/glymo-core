@@ -417,6 +417,162 @@ describe('Hologram3DRenderer media-art mesh lifecycle', () => {
   });
 });
 
+// ── Phase 6 6a-5a — I10 (Issue #3) coexistence regression gate ──────────────
+//
+// Pre-Phase-6 the renderer had an exclusivity branch in `renderFrame`:
+//
+//   if (this.meshes.size > 0) {
+//     this.renderMeshFrame(elapsed);
+//     this.applyContainerRotationAndZoom(...);
+//     this.postProcessing!.render();
+//     return;   //  ← skipped the char-sync loop below
+//   }
+//
+// User-visible consequence: "apply MediaArt → switch to text mode → type a
+// character → select the hologram tool" rendered nothing for the typed
+// glyph because the mesh-loaded gate short-circuited the char loop. The
+// 6a-5a fix drops the early-return; both loops now coexist (renderMeshFrame
+// is internally guarded by `loadedSlots.length === 0 → return`).
+//
+// This regression suite asserts the post-fix behaviour: with mesh slots
+// loaded AND chars queued via `setText`, `renderFrame` materialises char
+// meshes via the char-sync loop, leaving both registries populated.
+//
+// `getRenderedCharIds()` (added in 0.27.0) is the load-bearing probe — it
+// surfaces the post-`renderFrame` `charMeshes` registry without exposing
+// the private map.
+
+describe('Hologram3DRenderer I10 (Issue #3) coexistence — Phase 6 6a-5a', () => {
+  // The load-bearing assertion: with mesh slots loaded AND chars queued via
+  // `setText`, `renderFrame` walks the chars and CALLS `createCharMesh` for
+  // each new id. Pre-fix the `if (this.meshes.size > 0) {…; return;}`
+  // exclusivity gate skipped this loop entirely; the fix removed the gate
+  // and now `createCharMesh` MUST be invoked.
+  //
+  // We spy on `createCharMesh` rather than asserting `getRenderedCharIds()`
+  // includes the char because `createCharMesh` returns `null` whenever
+  // `this.loadedFont` is unset (font load races with the test's
+  // `renderFrame` call — incidental to the I10 contract). The spy
+  // observation is unambiguous: pre-fix it would NOT be called when meshes
+  // are loaded; post-fix it IS called.
+  //
+  // Type cast to `any` for the private method spy is the canonical Vitest
+  // pattern for asserting on inaccessible-by-design APIs that are still
+  // load-bearing for behaviour. The fix surface (`renderFrame`) is public.
+
+  it('renderFrame with mesh slots AND chars walks the char loop (createCharMesh invoked)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    // Wait for init() — guarantees `loadedFont` is set so the char loop's
+    // first guard (`if (!THREE || !this.loadedFont) return null`) inside
+    // createCharMesh does not short-circuit unrelated to the I10 contract.
+    await r.ready;
+
+    // 1. Apply MediaArt — mesh slot loaded.
+    await r.addMesh('obj-1', 'mesh-asset', {
+      type: 'gltf',
+      id: 'mesh-asset',
+      url: 'https://cdn.test/mesh.glb',
+    });
+    expect(r.hasAnyMesh()).toBe(true);
+
+    // 2. Add a text-mode char (the Hologram tool target).
+    r.setText([
+      {
+        id: 'char-A',
+        char: 'A',
+        x: 100,
+        y: 100,
+        height: 60,
+        entryTime: 0,
+        isDeleting: false,
+      } as never,
+    ]);
+
+    // 3. Spy on the private char-mesh factory BEFORE driving the frame.
+    //    `mockImplementation(() => null)` short-circuits the original body
+    //    (which depends on `TextGeometry.computeBoundingBox`, not provided
+    //    by the StubPlaneGeometry). The I10 contract is "the loop CALLS
+    //    createCharMesh"; whether the stubbed factory yields a real mesh
+    //    is incidental.
+    const createCharSpy = vi
+      .spyOn(r as any, 'createCharMesh')
+      .mockImplementation(() => null);
+
+    // 4. Drive a frame at full transition.
+    r.setTransition(1);
+    expect(() => r.renderFrame()).not.toThrow();
+
+    // 5. Load-bearing post-fix assertion: the char loop ran and asked the
+    //    factory to materialise 'A'.
+    expect(createCharSpy).toHaveBeenCalledTimes(1);
+    expect(createCharSpy).toHaveBeenCalledWith('A', expect.any(Number), expect.any(Number));
+    // Mesh slot still loaded (renderMeshFrame is internally guarded but
+    // does not delete slots).
+    expect(r.hasAnyMesh()).toBe(true);
+
+    r.dispose();
+  });
+
+  it('renderFrame with mesh slots and NO chars does NOT call createCharMesh', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    await r.addMesh('obj-1', 'mesh-only', {
+      type: 'gltf',
+      id: 'mesh-only',
+      url: 'https://cdn.test/mesh.glb',
+    });
+    r.setText([]);
+
+    const createCharSpy = vi
+      .spyOn(r as any, 'createCharMesh')
+      .mockImplementation(() => null);
+    r.setTransition(1);
+    expect(() => r.renderFrame()).not.toThrow();
+
+    expect(r.hasAnyMesh()).toBe(true);
+    // Empty char set → factory never called even though the loop walks.
+    expect(createCharSpy).not.toHaveBeenCalled();
+
+    r.dispose();
+  });
+
+  it('renderFrame with chars and NO mesh slots still walks the char loop (regression: char-only path unchanged)', async () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    await r.ready;
+    expect(r.hasAnyMesh()).toBe(false);
+
+    r.setText([
+      {
+        id: 'char-B',
+        char: 'B',
+        x: 50,
+        y: 50,
+        height: 60,
+        entryTime: 0,
+        isDeleting: false,
+      } as never,
+    ]);
+
+    const createCharSpy = vi
+      .spyOn(r as any, 'createCharMesh')
+      .mockImplementation(() => null);
+    r.setTransition(1);
+    expect(() => r.renderFrame()).not.toThrow();
+
+    expect(r.hasAnyMesh()).toBe(false);
+    expect(createCharSpy).toHaveBeenCalledTimes(1);
+    expect(createCharSpy).toHaveBeenCalledWith('B', expect.any(Number), expect.any(Number));
+
+    r.dispose();
+  });
+
+  it('getRenderedCharIds() exposes empty registry on a fresh renderer', () => {
+    const r = new Hologram3DRenderer({ canvas: createMockCanvas() });
+    expect(r.getRenderedCharIds()).toEqual([]);
+    r.dispose();
+  });
+});
+
 // ── Mesh single-hand pinch-grab API (#26) ────────────────────────────────────
 //
 // Pins the contract exposed by Hologram3DRenderer for media-art single-hand

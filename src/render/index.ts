@@ -43,3 +43,7 @@ export {
   AmbientGlowLayer,
   type AmbientGlowLayerOptions,
 } from './layers/AmbientGlowLayer.js';
+export {
+  Hologram3DLayer,
+  type Hologram3DLayerOptions,
+} from './layers/Hologram3DLayer.js';

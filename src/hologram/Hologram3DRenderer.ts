@@ -686,6 +686,19 @@ export class Hologram3DRenderer {
   }
 
   /**
+   * Enumerate every char id that currently has a 3D mesh in the scene.
+   * `setText` queues chars; `renderFrame` lazily materialises each char
+   * into a `charMeshes` entry the first time it is seen. This getter
+   * surfaces the post-`renderFrame` state for diagnostics and for the
+   * Phase 6 6a-5a I10 regression test (which asserts mesh slots and char
+   * meshes COEXIST after the early-return fix). Readonly so consumers
+   * can't mutate internal state via the returned array.
+   */
+  getRenderedCharIds(): readonly string[] {
+    return [...this.charMeshes.keys()];
+  }
+
+  /**
    * Tear down the mesh registered under `objectId` and release its GPU /
    * scene-graph resources. Returns `true` when a slot existed and was
    * disposed, `false` when no slot was registered — idempotent for the
@@ -1125,33 +1138,30 @@ export class Hologram3DRenderer {
     const elapsed = (now - this.startTime) * 0.001;
     const transition = this.transition;
 
-    // ── Mesh path — iterate every slot in `this.meshes` ───────────────────
-    // Presence of any mesh slot takes over the frame: text-mode char
-    // resources are not touched while meshes are in play. Coexistence with
-    // the text-mode char lift below is a three.js-level concern (e.g. a
-    // recognition-pending drawing plus a mediaArt-applied object share the
-    // same scene graph); for now the mesh path is exclusive and the char
-    // loop only runs when no slot is loaded. Container rotation / zoom /
-    // pivot indicator at the end of this branch runs for both paths.
+    // ── Phase 6 6a-5a / Issue #3 (I10) RESOLVED — coexistence path ───────
+    // Pre-Phase-6 the renderer treated mesh slots and text-mode char meshes
+    // as MUTUALLY EXCLUSIVE — the presence of any mesh slot short-circuited
+    // the char sync loop, so the user-reported scenario "apply MediaArt →
+    // switch to text mode → type a character → select the hologram tool"
+    // would render nothing for the typed glyph. The canonical fix (named
+    // in this file's pre-fix comment, deferred because it lacked a
+    // regression gate) is exactly this: drop the exclusive branch, run
+    // BOTH loops per frame (`renderMeshFrame` is internally guarded so it
+    // is a no-op when `loadedSlots.length === 0`), then call
+    // `applyContainerRotationAndZoom` and `postProcessing!.render()` ONCE
+    // at the end of the unified flow.
     //
-    // KNOWN LIMITATION (2026-04-24 QA — Issue #3, tracked in the 0.50.0
-    // release notes): with this early-return in place, the scenario
-    // "apply MediaArt → switch to text mode → type a character → select
-    // the hologram tool" renders nothing for the text-mode char because
-    // the slot-count gate short-circuits the char sync loop below. The
-    // user sees their MediaArt mesh alone and their typed glyph never
-    // lifts into the 3D layer. The canonical fix is to drop the exclusive
-    // branch and run BOTH loops per frame (meshes + chars coexist in the
-    // scene graph), then call postProcessing.render() once. That change
-    // is deferred because it requires end-to-end repro verification of
-    // z-order / alpha blending / bloom interaction between the two layer
-    // types — a core-side change without that repro is speculative.
-    if (this.meshes.size > 0) {
-      this.renderMeshFrame(elapsed);
-      this.applyContainerRotationAndZoom(elapsed, transition);
-      this.postProcessing!.render();
-      return;
-    }
+    // Z-order / alpha-blending safety: meshes live under `meshRoot` (a
+    // non-rotating sibling of `charContainer` introduced in 0.18.0), so
+    // they do not inherit the idle-wobble that `applyContainerRotationAndZoom`
+    // applies to chars. Each path's geometry is depth-tested by the
+    // shared scene's renderer; bloom passes over the unified output once.
+    //
+    // Regression gate: `tests/Hologram3DRenderer.coexistence.test.ts`
+    // (added Phase 6 6a-5a) asserts that with `meshes.size > 0`,
+    // `renderFrame()` still walks `chars` to update / create char meshes.
+    // A reintroduction of the exclusivity gate would surface immediately.
+    this.renderMeshFrame(elapsed);
 
     const chars = this.chars.filter(c => !c.isDeleting);
     const numChars = Math.min(chars.length, 20);

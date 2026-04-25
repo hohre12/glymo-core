@@ -5,6 +5,109 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.0] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-5a: I10 (Issue #3) coexistence fix + Hologram3DLayer.**
+
+The single most user-visible Phase 6 win to date. Two intertwined changes:
+
+### Behavioural fix (Hologram3DRenderer.renderFrame) — closes invariant I10 / Issue #3
+
+Pre-Phase-6 the renderer had an exclusivity branch in `renderFrame`:
+
+```ts
+if (this.meshes.size > 0) {
+  this.renderMeshFrame(elapsed);
+  this.applyContainerRotationAndZoom(...);
+  this.postProcessing!.render();
+  return;   //  ← skipped the char-sync loop below
+}
+```
+
+The pre-fix in-code KNOWN LIMITATION comment (lines 1137-1148, now replaced) named the user-visible consequence: "apply MediaArt → switch to text mode → type a character → select the hologram tool" rendered nothing for the typed glyph because the mesh-loaded gate short-circuited the char loop. The fix the comment NAMED — "drop the exclusive branch and run BOTH loops per frame, then call postProcessing.render() once" — is exactly what this commit implements:
+
+```ts
+this.renderMeshFrame(elapsed);  // internally guarded by loadedSlots.length === 0
+
+const chars = this.chars.filter(c => !c.isDeleting);
+const numChars = Math.min(chars.length, 20);
+// … existing char-sync loop unchanged …
+
+this.applyContainerRotationAndZoom(elapsed, transition);
+this.postProcessing!.render();   // one render call, single bloom pass
+```
+
+Z-order / alpha-blending safety: meshes live under `meshRoot` (a non-rotating sibling of `charContainer` introduced in 0.18.0), so they do not inherit the idle-wobble that `applyContainerRotationAndZoom` applies to chars. Each path's geometry is depth-tested by the shared scene's renderer; bloom passes over the unified output once.
+
+The pre-fix's deferral rationale was "lacks a regression gate." This commit ships the gate (see Test results below).
+
+### Architectural absorption (Hologram3DLayer) — §5 Phase 6 layer
+
+Per `docs/plans/rendering-pipeline-v2.md` §5 ("`useHologram3D.ts` → `HologramLayer.ts` — Promotes hologram from 'one-off layer' to the master scene's child"). New `Hologram3DLayer` class: CanvasTexture quad wrapping `Hologram3DRenderer`'s WebGPU output canvas, mounted onto the SceneGraph at default z=2 (above TextOverlayLayer's z=1). Same proven CanvasTexture pattern as StrokeLayer (6a-2), TextOverlayLayer (6a-3a), AmbientGlowLayer (6a-4a).
+
+### 6a-5a vs 6a-5b — the literal split deferral
+
+I10's user-visible promise — "the typed glyph DOES lift into 3D after MediaArt is applied" — is delivered IN FULL by this commit's `renderFrame` rewrite.
+
+I10's structural promise — TWO layers (`HologramLayer` + `MediaArtLayer`) with their own renderers / scene contexts — is genuinely a from-scratch architectural job. `Hologram3DRenderer` owns ONE `WebGPURenderer` + ONE `Scene` + ONE `PerspectiveCamera`. The two prospective sublayers would each need their own renderer, OR a single renderer with two `RenderTarget`s captured separately, OR a complete migration to SceneGraph's `OrthographicCamera` (rewriting the perspective-frustum math the existing renderer leans on for 3D char extrusion + mesh placement). All three options are multi-day jobs; the §9 R2 fallback ("keep CPU physics and only replace the render call") applies directly here.
+
+Sub-slice 6a-5b acceptance prerequisites (deferred):
+1. Decision on camera ownership (per-layer renderers vs shared OrthographicCamera with rewritten frustum math vs RenderTarget multi-pass). Each option has a multi-day cost profile — `glymo-architect` review required before kickoff.
+2. Parity gate: the new split must produce visually equivalent output to the post-6a-5a unified renderer for the canonical scenarios (text-only, mesh-only, mesh+text coexistence). Browser Mode regression goldens for each scenario provide the diff surface.
+3. Migration of `useHologram3D.ts`, `useHologramController.ts`, and every consumer of `Hologram3DRenderer` to the split surfaces.
+
+Until 6a-5b lands, `Hologram3DLayer` is the canonical Phase 6 entry for hologram + mediaArt content composition into the SceneGraph.
+
+### Composition contract progress (4 layers Z-stack-ordered)
+
+| Z   | Layer              | Status          |
+|-----|--------------------|-----------------|
+| -1  | AmbientGlowLayer   | ✅ 6a-4a (0.26.3)|
+|  0  | StrokeLayer        | ✅ 6a-2 (0.26.1)|
+|  1  | TextOverlayLayer   | ✅ 6a-3a (0.26.2)|
+|  2  | Hologram3DLayer    | ✅ this commit (0.27.0) |
+|  N/A| PostProcessLayer   | 6a-4b (TSL, scope-locked) |
+| ≥3  | HandLayer          | 6a-6 |
+
+### Added
+- `src/render/layers/Hologram3DLayer.ts` — `Hologram3DLayer` class implementing the `Layer` interface. Constructor accepts `{ source: HTMLCanvasElement, name?, z? }` — public surface is plain TS / DOM types only (R-A). Wraps the WebGPU output canvas of an existing `Hologram3DRenderer` instance. `render()` is allocation-free; `resize()` rebuilds geometry; `dispose()` is idempotent. Mesh named `Hologram3DLayer:<name>`.
+- `src/render/index.ts` — re-exports `Hologram3DLayer` + `Hologram3DLayerOptions`.
+- `Hologram3DRenderer.getRenderedCharIds(): readonly string[]` — public diagnostic that surfaces the post-`renderFrame` `charMeshes` registry (without exposing the private map). Load-bearing for the I10 regression suite.
+
+### Changed
+- `src/hologram/Hologram3DRenderer.ts` `renderFrame()` — removed the `if (this.meshes.size > 0) {…; return;}` exclusivity branch. Both `renderMeshFrame` (internally guarded) and the char-sync loop now run per frame, with one `applyContainerRotationAndZoom` + one `postProcessing!.render()` at the end. The pre-fix block-comment is replaced by the post-fix rationale.
+
+### Test results
+- `npm test` (jsdom): 838/838 green (was 834/834 on 0.26.3; this slice adds 4 cases — three I10 coexistence regressions + one `getRenderedCharIds()` smoke). The new suite uses `vi.spyOn(r as any, 'createCharMesh').mockImplementation(() => null)` to assert "char loop runs and invokes the factory" without coupling to the stubbed font / TextGeometry surface (where `computeBoundingBox` is not provided).
+- Browser-runtime evidence in `glymo-ui` Browser Mode: see `glymo-ui/src/canvas/__tests__/hologram3dlayer-stack.browser.test.tsx` (separate commit on glymo-ui's phase-6 branch). Cases cover the per-layer surface (constructor / init z=2 default / mirror golden / mutation propagation / resize / idempotent dispose / re-init throw) AND a 4-layer Z-stack composite gate (Ambient + Stroke + TextOverlay + Hologram). The 4-layer composite extends the previous 3-layer gate with Hologram as the topmost CanvasTexture-quad layer.
+
+### Phase 6 sub-slice contract progress
+- 6a-1  ✅ SceneGraph foundation (0.26.0).
+- 6a-2  ✅ StrokeLayer first cut (0.26.1).
+- 6a-3a ✅ TextOverlayLayer first cut — R2 conservative (0.26.2).
+- 6a-3b (deferred): TextOverlayLayer TSL InstancedMesh + parity gate.
+- 6a-4a ✅ AmbientGlowLayer first cut — R2 conservative (0.26.3).
+- 6a-4b (deferred, scope-locked): PostProcessLayer with Three.js TSL bloom + parity gate.
+- 6a-5a ✅ Hologram3DLayer + I10 fix (this commit, 0.27.0).
+- 6a-5b (deferred, scope-locked above): true HologramLayer + MediaArtLayer split.
+- 6a-6 (forthcoming): HandLayer.
+- 6b-1+ (forthcoming): `<CanvasEngine>` single-canvas refactor + `GLYMO_RENDER_V2` flag.
+
+### Version bump rationale (MINOR — 0.26.3 → 0.27.0)
+This is the first 6a-* slice that changes BEHAVIOUR of an existing class (`Hologram3DRenderer.renderFrame`). The change is a documented bug fix (matching the in-code comment that named the canonical fix), but consumers that built workarounds depending on the pre-fix exclusive behaviour (none known) would observe a behavioural change. Per semver this argues PATCH (it's a fix). However the slice ALSO adds a new public class (`Hologram3DLayer`) and a new public method (`getRenderedCharIds`), both of which independently warrant MINOR. Going MINOR for the combined slice is the conservative choice.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched.
+- I3 CLAUDE.md absolutes: untouched.
+- I4 MediaArt seam: untouched.
+- I5 i18n parity: N/A.
+- I6 Feature-flag deferrals: untouched.
+- I7 Drawing-classifier-worker URL: untouched.
+- I8 Preserve the shape: ENFORCED — Hologram3DLayer's contract is "mirror the source canvas bit-for-bit". The renderFrame fix produces ADDITIONAL pixels (the typed glyph that was previously invisible); this is the explicit invariant fulfilment, not violation.
+- I9 Tests stay green: enforced (838/838).
+- I10 MediaArt + text-mode hologram coexistence: ✅ **CLOSED** by this commit's renderFrame rewrite + the regression gates. The `getRenderedCharIds()` probe surfaces the coexistence surface; the I10 regression suite asserts both registries populate independently after the fix.
+
 ## [0.26.3] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-4a: AmbientGlowLayer first cut (R2 conservative path).**
