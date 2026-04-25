@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.26.3] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-4a: AmbientGlowLayer first cut (R2 conservative path).**
+
+Concrete `Layer` artefact under the `@glymo/core/render` subpath. Per `docs/plans/rendering-pipeline-v2.md` §5 Package role realignment ("`useAmbientGlow.ts` (RAF) → `AmbientGlowLayer.ts` — Glow is a render pass, not a React hook") AND §9 R2 mitigation.
+
+This sub-slice (6a-4a) takes the §9 R2 conservative path. The substantial 2D-canvas radial-glow rendering in `glymo-ui/src/canvas/hooks/useAmbientGlow.ts` (213 LOC, per-character radial gradients with fade tracking) STAYS in place. AmbientGlowLayer mirrors the existing `ambientCanvasRef` output canvas onto the SceneGraph as a `CanvasTexture` quad — same proven pattern as `StrokeLayer` (6a-2) and `TextOverlayLayer` (6a-3a) — at a LOWER Z (`-1` by default) so it composites BEHIND the stroke surface.
+
+A future TSL upgrade (no current sub-slice number — likely 6a-4c or later) may migrate the ambient glow into a vertex-shader radial pass on the SceneGraph itself, eliminating the offscreen 2D canvas. Until then, the conservative R2 path is canonical.
+
+### Composition contract progress (3 layers now Z-stack-ordered)
+
+| Z   | Layer              | Status          |
+|-----|--------------------|-----------------|
+| -1  | AmbientGlowLayer   | ✅ this commit  |
+|  0  | StrokeLayer        | ✅ 6a-2 (0.26.1)|
+|  1  | TextOverlayLayer   | ✅ 6a-3a (0.26.2)|
+|  ≥2 | Hologram/MediaArt  | 6a-5            |
+|  N/A| PostProcessLayer   | **6a-4b** — see deferral note below |
+|  ≥2 | HandLayer          | 6a-6            |
+
+Three layers now share the CanvasTexture-quad pattern. After 6a-6 lands, if the pattern is still shared by ≥3 of the ≥5 final layers, a focused refactor commit will extract a shared `CanvasMirrorLayer` utility. Until then, parallel implementations read better.
+
+### PostProcessLayer (sub-slice 6a-4b) — DEFERRED, separately scoped
+
+Per §5 the planned post-process replacement is:
+
+  > `useWebGPUPostProcess.ts` (RAF, custom WGSL) → replaced by Three.js
+  > `PostProcessing` + TSL in `@glymo/core/src/render/PostProcessPass.ts`
+  > — Three.js already ships bloom + chromatic-aberration nodes; ~500
+  > lines of custom WGSL are deleted.
+
+This sub-slice is INTENTIONALLY split off from 6a-4a for a load-bearing reason: the §9 R2 fallback ("wrap as quad") would defeat the entire architectural value. The §5 win is "delete 500 LOC of custom WGSL by using Three.js's bloom + chromaticAberration nodes." A CanvasTexture quad of the existing WebGPU output canvas would just be `Compositor.drawImage` with extra steps — zero LOC reduction, zero cross-browser benefit. Therefore PostProcessLayer ships as 6a-4b with the actual TSL plumbing AND a parity gate (per §9 R2 — "glyph centroid position match within 1 px MSE against the CPU reference", adapted here for the bloom intensity / chromatic offset against the legacy WGSL output).
+
+Sub-slice 6a-4b acceptance prerequisites:
+1. Reference fixture: render the existing `useWebGPUPostProcess` output for a known stroke + text scene; capture as the parity baseline.
+2. New `PostProcessPass` using Three.js `PostProcessing` + `bloom` + chromatic offset TSL nodes.
+3. Side-by-side run on the fixture; assert `maxDiffPixelRatio: 0.005` (the same gate `vitest.browser.config.ts` already pre-wires for layer goldens).
+4. Ship.
+
+Until 6a-4b lands, the legacy `useWebGPUPostProcess.ts` stays in `@glymo/ui` and the post-process surface remains on the pre-flag codepath. No SceneGraph PostProcess wiring exists yet — `<CanvasEngine>` cannot turn this on even if it wanted to.
+
+### Added
+- `src/render/layers/AmbientGlowLayer.ts` — `AmbientGlowLayer` class implementing the `Layer` interface. Constructor accepts `{ source: HTMLCanvasElement, name?, z? }` — public surface is plain TS / DOM types only (R-A). Implementation mirrors `StrokeLayer` and `TextOverlayLayer` with documented Z=-1 default. `render()` is allocation-free; `resize()` rebuilds geometry; `dispose()` is idempotent. Mesh named `AmbientGlowLayer:<name>`.
+- `src/render/index.ts` — re-exports `AmbientGlowLayer` + `AmbientGlowLayerOptions`.
+
+### Test results
+- `npm test` (jsdom): 834/834 green, unchanged.
+- Browser-runtime evidence in `glymo-ui` Browser Mode: see `glymo-ui/src/canvas/__tests__/ambientglowlayer-stack.browser.test.tsx`. 9 cases covering per-layer surface (constructor / init with `z=-1` default / mirror golden / mutation propagation / resize / idempotent dispose / re-init throw) PLUS a 3-layer Z-stack composite gate (Ambient z=-1 yellow halo + Stroke z=0 cyan rect + TextOverlay z=1 magenta circle) producing a stable golden that proves all three layers compose in the documented Z order. Total Browser Mode count: 36/36 green (was 27/27 on 0.26.2; this slice adds 9 cases).
+- Build: `dist/render/layers/AmbientGlowLayer.d.ts` produced + all 4 classes (`SceneGraph`, `StrokeLayer`, `TextOverlayLayer`, `AmbientGlowLayer`) reachable via `@glymo/core/render`.
+
+### Phase 6 sub-slice contract progress
+- 6a-1 ✅ SceneGraph foundation (0.26.0).
+- 6a-2 ✅ StrokeLayer first cut (0.26.1).
+- 6a-3a ✅ TextOverlayLayer first cut — R2 conservative (0.26.2).
+- 6a-3b (deferred): TextOverlayLayer TSL InstancedMesh + parity gate.
+- 6a-4a ✅ AmbientGlowLayer first cut — R2 conservative (this commit, 0.26.3).
+- 6a-4b (deferred, scope-locked above): PostProcessLayer with Three.js TSL bloom + parity gate.
+- 6a-5 (forthcoming): HologramLayer + MediaArtLayer split (I10).
+- 6a-6 (forthcoming): HandLayer.
+- 6b-1+ (forthcoming): `<CanvasEngine>` single-canvas refactor + `GLYMO_RENDER_V2` flag.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched.
+- I3 CLAUDE.md absolutes: untouched.
+- I4 MediaArt seam: untouched.
+- I5 i18n parity: N/A.
+- I6 Feature-flag deferrals: untouched.
+- I7 Drawing-classifier-worker URL: untouched.
+- I8 Preserve the shape: ENFORCED — AmbientGlowLayer's contract is "mirror the source canvas bit-for-bit". The §9 R2 conservative path protects I8 — the radial glow pixels DO NOT change because the 2D canvas chain stays intact.
+- I9 Tests stay green: enforced.
+- I10 MediaArt + text-mode hologram coexistence: pre-condition for 6a-5; not affected by this slice.
+
 ## [0.26.2] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-3a: TextOverlayLayer first cut (R2 conservative path).**

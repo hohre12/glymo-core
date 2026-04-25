@@ -39,3 +39,7 @@ export {
   TextOverlayLayer,
   type TextOverlayLayerOptions,
 } from './layers/TextOverlayLayer.js';
+export {
+  AmbientGlowLayer,
+  type AmbientGlowLayerOptions,
+} from './layers/AmbientGlowLayer.js';
