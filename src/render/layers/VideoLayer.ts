@@ -236,7 +236,25 @@ export class VideoLayer implements Layer {
 
     c2d.save();
 
+    // Reset transform first then clear — prevents the blur halo from
+    // the previous frame accumulating at the rect edges (each frame's
+    // `drawImage` with `filter: blur(N)` paints into approximately
+    // (-N..w+N) due to the kernel; without clearRect those edge pixels
+    // compound across frames, producing visible banding / sparkle
+    // along the top/bottom/left/right margins of the canvas — read by
+    // the user as "noise"). Clear in identity-transform space so the
+    // full canvas is wiped regardless of the mirror/scale we apply
+    // below.
+    c2d.setTransform(1, 0, 0, 1, 0, 0);
+    c2d.clearRect(0, 0, w, h);
+
     // Apply blur first — applies to subsequent draw calls per spec.
+    // Blur radius is in CANVAS pixels (the preprocess canvas is sized
+    // at viewport CSS × DPR, so multiplying by DPR keeps the visual
+    // blur radius constant in CSS-pixel space — same effect on retina
+    // and non-retina). Legacy Compositor used non-DPR-multiplied blur
+    // because it ran on the visible compositor canvas which is sized
+    // in CSS pixels; here we run on a higher-DPI buffer.
     c2d.filter = this.blur > 0 ? `blur(${this.blur * this.dpr}px)` : 'none';
 
     if (this.mirror) {
