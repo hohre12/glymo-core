@@ -34,6 +34,17 @@ export type { Layer, LayerInitContext } from './Layer.js';
 // options, public methods) deals only in Glymo / DOM types. Three.js
 // types are confined to the implementation.
 
+// Shared base for the CanvasTexture-quad layer family
+// (StrokeLayer / TextOverlayLayer / AmbientGlowLayer / Hologram3DLayer /
+// HandLayer all extend it). Exposed for `@internal` consumption by future
+// layer authors and for direct construction in tests / consumers that
+// want non-default name/z combinations without picking a specific
+// subclass.
+export {
+  CanvasMirrorLayer,
+  type CanvasMirrorLayerInit,
+} from './layers/CanvasMirrorLayer.js';
+
 export { StrokeLayer, type StrokeLayerOptions } from './layers/StrokeLayer.js';
 export {
   TextOverlayLayer,

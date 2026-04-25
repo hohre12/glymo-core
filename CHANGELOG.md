@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.2] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6b-pre: CanvasMirrorLayer base extracted.**
+
+Pure refactor commit. Promised in the 6a-6 (0.27.1) CHANGELOG ("if ≥3 of the ≥5 final layers still share this pattern after 6a-6, a focused refactor commit will extract a shared `CanvasMirrorLayer` utility — that condition is now MET (5 of 5)"). Shipped as a separate sub-slice (6b-pre) so the diff is reviewable in isolation — bundling it into 6b-1 (the user-visible flag work) would mix two concerns.
+
+### Added
+- `src/render/layers/CanvasMirrorLayer.ts` — concrete base class implementing the full lifecycle (init / render / resize / dispose) plus the CanvasTexture-quad Three.js wiring exactly once. Required `CanvasMirrorLayerInit` shape: `{ source, name, z, logName }` (subclasses pre-fill defaults; `logName` drives the bracketed prefix in error messages and the diagnostic mesh name `<logName>:<name>`).
+- `src/render/index.ts` — re-exports `CanvasMirrorLayer` + `CanvasMirrorLayerInit` (`@internal`-flavour — exposed for future layer authors and for direct construction in tests / consumers wanting non-default name+z combinations without picking a specific subclass).
+
+### Changed
+- `src/render/layers/StrokeLayer.ts` — collapsed from 220 LOC to 36 LOC (extends CanvasMirrorLayer; provides `name='stroke', z=0, logName='StrokeLayer'` defaults). Public surface (`StrokeLayer`, `StrokeLayerOptions`) UNCHANGED.
+- `src/render/layers/TextOverlayLayer.ts` — collapsed from 240 LOC to 42 LOC (defaults: `name='text-overlay', z=1, logName='TextOverlayLayer'`).
+- `src/render/layers/AmbientGlowLayer.ts` — collapsed from 245 LOC to 37 LOC (defaults: `name='ambient-glow', z=-1, logName='AmbientGlowLayer'`).
+- `src/render/layers/Hologram3DLayer.ts` — collapsed from 255 LOC to 50 LOC (defaults: `name='hologram-3d', z=2, logName='Hologram3DLayer'`).
+- `src/render/layers/HandLayer.ts` — collapsed from 230 LOC to 42 LOC (defaults: `name='hand', z=3, logName='HandLayer'`).
+
+Total: ~990 LOC of duplicated layer-wiring code → ~210 LOC across 5 thin subclasses + 230 LOC base.
+
+### Test results
+- `npm test` (jsdom): unchanged 838/838 green.
+- Browser-runtime evidence in `glymo-ui` Browser Mode: **all 55 cases green unchanged** (was 55/55 on 0.27.1; refactor must NOT change goldens). Specifically:
+    * 6a-1 SceneGraph (9 cases)
+    * 6a-0 Browser Mode smoke (2 cases)
+    * 6a-2 StrokeLayer (7 cases)
+    * 6a-3a TextOverlayLayer (9 cases — per-layer + composite)
+    * 6a-4a AmbientGlowLayer (10 cases — per-layer + step-down)
+    * 6a-5a Hologram3DLayer (9 cases — per-layer + 4-layer composite)
+    * 6a-6 HandLayer (9 cases — per-layer + 5-layer FULL composite)
+  All goldens (`mirror-A`, `mirror-B`, `text-mirror-magenta`, `text-mirror-yellow`, `composite-stroke-text`, `composite-stroke-only`, `ambient-mirror-amber`, `ambient-mirror-teal`, `composite-ambient-stroke-text`, `composite-ambient-stroke`, `composite-ambient-only`, `hologram-mirror-diamond`, `hologram-mirror-orange`, `composite-4layer-stack`, `composite-4layer-without-hologram`, `hand-mirror-skeleton`, `hand-mirror-dot`, `composite-5layer-full-stack`, `composite-5layer-without-hand`) compared bit-for-bit against pre-refactor — pixelmatch 0% diff.
+- Build: all 7 classes (`SceneGraph`, `CanvasMirrorLayer`, `StrokeLayer`, `TextOverlayLayer`, `AmbientGlowLayer`, `Hologram3DLayer`, `HandLayer`) reachable via `@glymo/core/render` + inheritance verified (`Subclass.prototype instanceof CanvasMirrorLayer === true` for each of the 5).
+
+Version bump: 0.27.1 → 0.27.2 (patch — pure refactor, public API surface unchanged for all 5 existing classes; new `CanvasMirrorLayer` export is additive).
+
+### Phase 6 sub-slice contract progress
+- 6a-1…6a-6 ✅ (structural scope closed in 0.27.1).
+- **6b-pre** ✅ Shared base extracted (this commit, 0.27.2).
+- 6b-1 (next): `GLYMO_RENDER_V2` flag + CanvasEngine SceneGraph mount.
+- 6b-2 (after 6b-1): Wire 5 layers to existing source canvases.
+- 6b-3 (after 6b-2): Consumer page migration.
+- 6b-4 (after 6b-3): Visual baseline regen + local bench-perf + Phase 6 acceptance verdict.
+
+### Invariants preserved
+- I1–I10: untouched (this commit changes ZERO behaviour — refactor only).
+- I9 Tests stay green: enforced (838 + 478 + 55 unchanged).
+
 ## [0.27.1] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-6: HandLayer first cut (R2 conservative path).**
