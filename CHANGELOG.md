@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.26.2] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-3a: TextOverlayLayer first cut (R2 conservative path).**
+
+Concrete `Layer` artefact under the `@glymo/core/render` subpath. Per `docs/plans/rendering-pipeline-v2.md` §5 Package role realignment ("`TextOverlayCanvas.tsx` → render logic → `@glymo/core/src/render/layers/TextOverlayLayer.ts` (InstancedMesh, GPU particles)") AND §9 R2 mitigation ("If divergent, keep CPU physics and only replace the render call").
+
+This sub-slice (6a-3a) takes the §9 R2 conservative path. The substantial CPU physics in `glymo-ui/src/canvas/components/TextOverlayCanvas.tsx` (1097 LOC, ~290 of per-particle physics, layout transitions, hand-repulsion, eraser masks, transit sparkles, morph particles, etc.) STAYS in place. Migrating it to TSL InstancedMesh while simultaneously moving the renderer architecturally would create exactly the divergence risk §9 R2 names. Instead, this layer mirrors the existing TextOverlayCanvas output canvas onto the SceneGraph as a `CanvasTexture` quad — same proven pattern as `StrokeLayer` (6a-2) — at a higher Z so it composites ON TOP of strokes.
+
+### Deferred — sub-slice 6a-3b
+The TSL InstancedMesh upgrade is an explicitly separate sub-slice (6a-3b) that lands AFTER:
+1. A glyph-centroid parity fixture exists in glymo-ui Browser Mode.
+2. The fixture proves the CPU physics output is reproducible bit-for-bit across two consecutive runs of the existing canvas.
+3. The TSL implementation is parity-checked against that fixture per §9 R2 ("glyph centroid position match within 1 px MSE against the CPU reference").
+
+Until those land, the conservative R2 path is the canonical Phase 6 shape for the text overlay surface.
+
+### Composition contract (new)
+`TextOverlayLayer`'s default `z = 1` is ABOVE `StrokeLayer`'s default `z = 0`. Both layers run with `transparent: true` + `depthTest: false`, so Three.js's renderer sorts them back-to-front by Z. This matches the legacy Compositor stacking order in `@glymo/ui/canvas/lib/Compositor.ts` (drawing layer added before overlay).
+
+The convention for future layers (documented in TextOverlayLayer.ts):
+- AmbientGlowLayer        z = -1   (background)
+- StrokeLayer             z =  0   (drawing surface)
+- TextOverlayLayer        z =  1   (text composites on top)
+- HandLayer / Hologram    z >= 2   (UI overlays)
+- PostProcessLayer        N/A      (post-process pass, not Z-stacked)
+
+### Added
+- `src/render/layers/TextOverlayLayer.ts` — `TextOverlayLayer` class implementing the `Layer` interface. Constructor accepts `{ source: HTMLCanvasElement, name?, z? }` — public surface is plain TS / DOM types only (R-A). Implementation mirrors `StrokeLayer` (CanvasTexture + MeshBasicMaterial transparent + depthTest:false + PlaneGeometry sized to viewport CSS pixels) with the documented Z-stack offset. `render()` is allocation-free; `resize()` rebuilds geometry; `dispose()` is idempotent. Mesh named `TextOverlayLayer:<name>`.
+- `src/render/index.ts` — re-exports `TextOverlayLayer` + `TextOverlayLayerOptions` from the `@glymo/core/render` barrel.
+
+### Why not extract a shared `CanvasMirrorLayer` base class
+StrokeLayer (6a-2) and TextOverlayLayer (6a-3) both wrap an HTMLCanvasElement as a CanvasTexture quad. The implementations are nearly identical, only the defaults differ. Premature extraction would lock us into a shape we don't yet fully understand:
+- 6a-3b will replace this layer's INTERNALS with InstancedMesh + TSL (no longer a CanvasTexture quad). A shared base would make that migration painful.
+- 6a-4 AmbientGlowLayer is a post-process pass.
+- 6a-5 Hologram / MediaArt are 3D mesh layers.
+- 6a-6 HandLayer is a Line2 mesh.
+None of these share the StrokeLayer/TextOverlayLayer pattern wholesale.
+
+### Test results
+- `npm test` (jsdom): unchanged — TextOverlayLayer is browser-only.
+- Browser-runtime evidence in `glymo-ui` Browser Mode: see `glymo-ui/src/canvas/__tests__/textoverlaylayer-composite.browser.test.tsx`. Two-layer composite test (StrokeLayer at z=0 with cyan rect + TextOverlayLayer at z=1 with magenta circle) produces a stable golden proving correct Z-order composition; per-layer mirror gates + lifecycle (init/render/resize/dispose) coverage matches the StrokeLayer test shape. Total Browser Mode count: 24+/24+ green.
+
+### Phase 6 sub-slice contract progress
+- 6a-1 ✅ SceneGraph foundation (0.26.0).
+- 6a-2 ✅ StrokeLayer first cut (0.26.1).
+- 6a-3a ✅ TextOverlayLayer first cut (R2 conservative — this commit, 0.26.2).
+- 6a-3b (deferred): TSL InstancedMesh + parity gate.
+- 6a-4 (forthcoming): AmbientGlowLayer + PostProcessLayer.
+- 6a-5 (forthcoming): HologramLayer + MediaArtLayer split (I10).
+- 6a-6 (forthcoming): HandLayer.
+- 6b-1+ (forthcoming): `<CanvasEngine>` single-canvas refactor + `GLYMO_RENDER_V2` flag.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched.
+- I3 CLAUDE.md absolutes: untouched.
+- I4 MediaArt seam: untouched.
+- I5 i18n parity: N/A.
+- I6 Feature-flag deferrals: untouched.
+- I7 Drawing-classifier-worker URL: untouched.
+- I8 Preserve the shape: ENFORCED — TextOverlayLayer's contract is "mirror the source canvas bit-for-bit" (modulo the documented 0.005 pixelmatch tolerance). The §9 R2 conservative path is precisely the choice that protects I8 — the text glyph rendering pixels DO NOT change because the CPU physics + 2D draw chain stays intact.
+- I9 Tests stay green: enforced (834/834 jsdom + browser-mode evidence).
+- I10 MediaArt + text-mode hologram coexistence: pre-condition for 6a-5; not affected by this slice.
+
 ## [0.26.1] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-2: StrokeLayer first cut.**

@@ -35,3 +35,7 @@ export type { Layer, LayerInitContext } from './Layer.js';
 // types are confined to the implementation.
 
 export { StrokeLayer, type StrokeLayerOptions } from './layers/StrokeLayer.js';
+export {
+  TextOverlayLayer,
+  type TextOverlayLayerOptions,
+} from './layers/TextOverlayLayer.js';
