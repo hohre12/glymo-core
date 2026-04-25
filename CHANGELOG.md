@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.1] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-6: HandLayer first cut (R2 conservative path).**
+
+The FINAL Phase 6 layer slice. Concrete `Layer` artefact under the `@glymo/core/render` subpath. Per `docs/plans/rendering-pipeline-v2.md` §4.1 target architecture diagram ("HandLayer (Line2 from mediapipe landmarks)") AND §6 Phase 6 sub-task 6a Scope ("Add `layers/HandLayer.ts`").
+
+Same R2 conservative-path rationale as the previous 6a layer slices applies: `HandVisualizer` (`@glymo/core/src/input/HandVisualizer.ts`) draws hand-skeleton landmarks onto a dedicated 2D canvas (`skeletonCanvasRef` in `CanvasEngine.tsx`). `HandLayer` mirrors the existing skeleton canvas onto the SceneGraph as a `CanvasTexture` quad — same proven pattern as the previous four layers — at z=3 so it composites ABOVE `Hologram3DLayer`'s z=2.
+
+Hand visualisation is a UI overlay — it must remain visible on top of every content surface (strokes, text, hologram chars, MediaArt meshes) so the user always sees where their hand is. The default `z = 3` enforces that contract.
+
+### Sub-slice 6a-6b — DEFERRED, separately scoped
+
+The plan's eventual target ("Line2 from mediapipe landmarks" per §4.1) replaces the 2D Canvas skeleton draw with Three.js `Line2` + `LineSegments2` from `examples/jsm/lines/` — GPU-resident line geometry with per-vertex thickness. Acceptance prerequisites:
+
+1. Reference fixture: `HandVisualizer` output for a known set of MediaPipe landmark coordinates (21 landmarks per hand, fixed connector list); capture as parity baseline.
+2. New `HandLayer` implementation using `Line2` + `LineSegments2`.
+3. Side-by-side run on the fixture; assert `maxDiffPixelRatio: 0.005` against the legacy 2D output.
+
+Per §9 R2 the fallback is "keep the 2D canvas chain and only replace the render call" — i.e. this very slice's shape — if the parity gate is impractical to satisfy. The `Line2` upgrade is opt-in.
+
+### Composition contract — COMPLETE (5 of 5 layer types in their R2 form)
+
+| Z   | Layer              | Status          |
+|-----|--------------------|-----------------|
+| -1  | AmbientGlowLayer   | ✅ 6a-4a (0.26.3)|
+|  0  | StrokeLayer        | ✅ 6a-2 (0.26.1)|
+|  1  | TextOverlayLayer   | ✅ 6a-3a (0.26.2)|
+|  2  | Hologram3DLayer    | ✅ 6a-5a (0.27.0)|
+|  3  | HandLayer          | ✅ this commit (0.27.1) |
+|  N/A| PostProcessLayer   | 6a-4b (TSL, scope-locked) |
+
+All 5 documented `layers/*` files in `docs/plans/rendering-pipeline-v2.md` §6 Phase 6 sub-task 6a Scope are now shipped (`StrokeLayer`, `TextOverlayLayer`, `AmbientGlowLayer`, `HandLayer`, `Hologram3DLayer`; PostProcessLayer is intentionally a separate "pass" rather than a Z-stacked layer per §5 — `PostProcessPass.ts` not `PostProcessLayer.ts`). Phase 6 sub-task 6a's structural scope is closed; the deferred sub-slices (6a-3b, 6a-4b, 6a-5b, 6a-6b) are quality / architecture upgrades over the working R2 baseline.
+
+### Added
+- `src/render/layers/HandLayer.ts` — `HandLayer` class implementing the `Layer` interface. Constructor accepts `{ source: HTMLCanvasElement, name?, z? }` — public surface is plain TS / DOM types only (R-A). Implementation mirrors the prior CanvasTexture-quad layers with documented `z = 3` default. `render()` is allocation-free; `resize()` rebuilds geometry; `dispose()` is idempotent. Mesh named `HandLayer:<name>`.
+- `src/render/index.ts` — re-exports `HandLayer` + `HandLayerOptions`.
+
+### Test results
+- `npm test` (jsdom): unchanged 838/838 green.
+- Browser-runtime evidence in `glymo-ui` Browser Mode: see `glymo-ui/src/canvas/__tests__/handlayer-fullstack.browser.test.tsx` (separate commit on glymo-ui's phase-6 branch). Cases cover the per-layer surface (constructor / init z=3 default / mirror golden / mutation propagation / resize / idempotent dispose / re-init throw) AND a FIVE-layer Z-stack composite gate — the FULL Phase 6 layer stack (Ambient + Stroke + TextOverlay + Hologram + Hand) producing one stable golden that locks the entire pipeline as a single regression surface. Total Browser Mode count: 55/55 green (was 46/46 on 0.27.0; this slice adds 9 cases).
+- Build: `dist/render/layers/HandLayer.d.ts` produced + all 6 classes (`SceneGraph`, `StrokeLayer`, `TextOverlayLayer`, `AmbientGlowLayer`, `Hologram3DLayer`, `HandLayer`) reachable via `@glymo/core/render`.
+
+### Phase 6 sub-slice contract progress
+- 6a-1  ✅ SceneGraph foundation (0.26.0).
+- 6a-2  ✅ StrokeLayer first cut (0.26.1).
+- 6a-3a ✅ TextOverlayLayer first cut — R2 conservative (0.26.2).
+- 6a-3b (deferred): TextOverlayLayer TSL InstancedMesh + parity gate.
+- 6a-4a ✅ AmbientGlowLayer first cut — R2 conservative (0.26.3).
+- 6a-4b (deferred, scope-locked): PostProcessLayer with Three.js TSL bloom + parity gate.
+- 6a-5a ✅ Hologram3DLayer + I10 fix (0.27.0).
+- 6a-5b (deferred, scope-locked): true HologramLayer + MediaArtLayer split.
+- 6a-6  ✅ HandLayer first cut — R2 conservative (this commit, 0.27.1).
+- 6a-6b (deferred, scope-locked): HandLayer Line2 + LineSegments2 + parity gate.
+- **6a structural scope ✅ CLOSED.**
+- 6b-1+ (forthcoming): `<CanvasEngine>` single-canvas refactor + `GLYMO_RENDER_V2` flag — the FIRST user-visible Phase 6 change.
+
+### Why not extract a shared `CanvasMirrorLayer` base class — revisited
+After 6a-6, FIVE layers (`Stroke`, `TextOverlay`, `AmbientGlow`, `Hologram3D`, `Hand`) share the CanvasTexture-quad pattern almost verbatim. The previous comments (in TextOverlayLayer.ts, AmbientGlowLayer.ts) said "if ≥3 of the ≥5 final layers still share this pattern after 6a-6, a focused refactor commit will extract a shared `CanvasMirrorLayer` utility." That condition is now met (5 of 5).
+
+**Decision (deferred to a focused refactor commit, NOT bundled into 6a-6):** The `CanvasMirrorLayer` extract should land as its own commit so the diff is reviewable in isolation. Bundling the extract into 6a-6 would mix two concerns ("add HandLayer" + "refactor 4 existing layers") and risk hiding subtle behavioural drift between the layer-specific class and the new shared base. The extract is straightforward (constructor signature + 4 lifecycle methods are identical modulo defaults) and can land before 6b-1.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched.
+- I3 CLAUDE.md absolutes: untouched.
+- I4 MediaArt seam: untouched.
+- I5 i18n parity: N/A.
+- I6 Feature-flag deferrals: untouched.
+- I7 Drawing-classifier-worker URL: untouched.
+- I8 Preserve the shape: ENFORCED — HandLayer's contract is "mirror the source canvas bit-for-bit". The §9 R2 conservative path protects I8 — the hand skeleton pixels DO NOT change because the 2D canvas chain stays intact.
+- I9 Tests stay green: enforced.
+- I10 MediaArt + text-mode hologram coexistence: ✅ closed in 6a-5a; not affected by this slice.
+
 ## [0.27.0] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-5a: I10 (Issue #3) coexistence fix + Hologram3DLayer.**

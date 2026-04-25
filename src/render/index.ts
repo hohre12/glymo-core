@@ -47,3 +47,7 @@ export {
   Hologram3DLayer,
   type Hologram3DLayerOptions,
 } from './layers/Hologram3DLayer.js';
+export {
+  HandLayer,
+  type HandLayerOptions,
+} from './layers/HandLayer.js';
