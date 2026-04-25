@@ -99,6 +99,13 @@ export default defineConfig(() => {
         entry: {
           index: 'src/index.ts',
           'classifier/classifier': 'src/classifier/index.ts',
+          // Phase 6 sub-slice 6a-1 — `@glymo/core/render` subpath that
+          // hosts the new SceneGraph + Layer types. Loaded only by the
+          // post-Phase-6 single-canvas codepath in `@glymo/ui`; the legacy
+          // CanvasRenderer / WebGPURenderer paths still come in via the
+          // root `index` entry so consumers on the pre-flag branch pay
+          // zero cost.
+          'render/index': 'src/render/index.ts',
         },
         name: 'Glymo',
         formats: ['es', 'cjs'],

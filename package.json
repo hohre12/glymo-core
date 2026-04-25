@@ -1,6 +1,6 @@
 {
   "name": "@glymo/core",
-  "version": "0.25.3",
+  "version": "0.26.0",
   "description": "Hand-powered creative toolkit for the browser. Hand tracking + artistic effects + gesture control in one library.",
   "type": "module",
   "main": "./dist/glymo.js",
@@ -17,7 +17,12 @@
       "import": "./dist/classifier/classifier.mjs",
       "require": "./dist/classifier/classifier.js"
     },
-    "./classifier/classifier.worker.js": "./dist/classifier/classifier.worker.mjs"
+    "./classifier/classifier.worker.js": "./dist/classifier/classifier.worker.mjs",
+    "./render": {
+      "types": "./dist/render/index.d.ts",
+      "import": "./dist/render/index.mjs",
+      "require": "./dist/render/index.js"
+    }
   },
   "files": [
     "dist",

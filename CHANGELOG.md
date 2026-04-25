@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.26.0] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-1: SceneGraph foundation.**
+
+First implementation artefact of the Phase 6 big-bang (`docs/plans/rendering-pipeline-v2.md` §6 Phase 6, §4 target architecture). Introduces the Three.js-backed master scene graph that subsequent sub-slices will populate with concrete layers (Stroke / TextOverlay / AmbientGlow / Hologram / MediaArt / Hand / PostProcess) absorbed from the seven pre-refactor rendering surfaces.
+
+This release ships the FOUNDATION only — class wiring + lifecycle + browser-runtime smoke evidence. Concrete layers, the `<CanvasEngine>` integration, and the `GLYMO_RENDER_V2` feature flag plumbing land in subsequent sub-slices. Until those land, the pre-Phase-6 codepath (CanvasRenderer / WebGPURenderer / CanvasLayerStack / Compositor) remains the only active renderer; the new SceneGraph is dormant code reachable only via the new `@glymo/core/render` subpath.
+
+### Added
+- `src/render/Layer.ts` — `Layer` interface + `LayerInitContext` type. Defines the per-layer lifecycle (`init` / `render` / `resize` / `dispose`) every concrete layer authored under `src/render/layers/*` (forthcoming) implements. `@internal` — Three.js types appear in `LayerInitContext` so layer authors can mount scene subtrees, but the surface is not part of the supported public API.
+- `src/render/SceneGraph.ts` — `SceneGraph` class. Three.js Scene + OrthographicCamera + WebGPURenderer wrapper. Public surface deals only in plain TS types (HTMLCanvasElement, number, string, `SceneGraphBackend` union) per §1.5.4 R-A — no Three.js types leak out. WebGPU primary, WebGL2 automatic fallback (Three.js built-in since r170 — `await renderer.init()` handles backend negotiation; the resolved backend is reported via `getBackend()`). Lazy `import('three/webgpu')` mirrors the existing `Hologram3DRenderer` SSR-safe pattern. Idempotent `dispose()` for React Strict Mode double-cleanup safety. Camera convention: 1 world unit = 1 CSS pixel, frustum centred at origin, Y-up.
+- `src/render/index.ts` — `@glymo/core/render` subpath barrel re-exporting `SceneGraph`, `SceneGraphInitOptions`, `SceneGraphBackend`, plus `Layer` / `LayerInitContext` (the latter pair flagged `@internal`).
+- `package.json` `exports[./render]` map + `vite.config.ts` library entry `'render/index': 'src/render/index.ts'` so consumers can `import { SceneGraph } from '@glymo/core/render'`. Three.js stays external (the existing `/^three\//` rollup external pattern covers `three/webgpu`).
+
+### Phase 6 sub-slice contract
+- 6a-1 (this commit): SceneGraph foundation only.
+- 6a-2 (forthcoming): StrokeLayer first cut (CanvasTexture from existing 2D output → quad on the new graph). Pixel-identity gate.
+- 6a-3 (forthcoming): TextOverlayLayer (InstancedMesh + TSL particle physics).
+- 6a-4 (forthcoming): AmbientGlowLayer + PostProcessLayer (Three.js bloom + chromatic aberration replaces `useWebGPUPostProcess`).
+- 6a-5 (forthcoming): HologramLayer + MediaArtLayer split per invariant I10 (mesh registry vs char registry — eliminates the `if (this.meshes.size > 0) return;` early-return in `Hologram3DRenderer.renderFrame`).
+- 6a-6 (forthcoming): HandLayer.
+- 6b-1+ (forthcoming): `<CanvasEngine>` single-canvas refactor + `GLYMO_RENDER_V2` flag plumbing.
+
+### Test results
+- `npm test` (jsdom): unchanged — SceneGraph is browser-only and not collected by the existing core jsdom suite (no `*.test.ts` file under `src/render/`).
+- Browser runtime evidence lives in `glymo-ui` Browser Mode under sub-task 6a-0's infra (`@glymo/ui` 0.51.1+) — see `glymo-ui/src/canvas/__tests__/scenegraph-init.browser.test.tsx`. The cross-package test home is the documented pattern for §7.2 — `@glymo/ui` is where `@vitest/browser` is installed; `@glymo/core` consumes it transitively via `npm link`.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched (no serialisation surface changed).
+- I2 CanvasEngineHandle: untouched (no `<CanvasEngine>` props or methods changed).
+- I3 CLAUDE.md absolutes: untouched (no smoothing / matching / morph code paths touched).
+- I4 MediaArt seam: untouched (no catalog imports added; `MediaArtMeshState` shape unchanged).
+- I5 i18n parity: N/A (no UI strings).
+- I6 Feature-flag deferrals: untouched (Pro / Verse / Challenges / Presets / Upgrade still hidden).
+- I7 Drawing-classifier-worker URL: untouched (classifier subpath build unaffected).
+- I8 Preserve the shape: N/A (no pixel-rendering changes; SceneGraph is dormant).
+- I9 Tests stay green: enforced (existing 0.25.3 test count + green status preserved).
+- I10 MediaArt + text-mode hologram coexistence: pre-condition for the forthcoming 6a-5 split. SceneGraph is the absorption target; no behaviour change yet.
+
+### Local-dev note
+Consumers using `npm link @glymo/core` (the documented Glymo dev convention from CLAUDE.md §"Relationships") pick up the new `@glymo/core/render` subpath transparently after the next `npm run build` in `glymo-core`. Consumers using `file:` deps to a packed tgz (`glymo-app` / `glymo-landing`) need `npm pack` here + a fresh tgz path in their `package.json`.
+
 ## [0.25.3] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 4: CameraCapture worker-path hardening.**
