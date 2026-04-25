@@ -14,3 +14,7 @@ tests/visual/__snapshots__/*.diff.png
 
 # npm auth — never commit
 .npmrc
+
+# Local `npm pack` artefacts (consumed by sibling repos via `file:` deps
+# during local dev; regenerated per machine, never committed).
+*.tgz
