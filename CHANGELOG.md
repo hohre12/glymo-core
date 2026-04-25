@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.26.1] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-2: StrokeLayer first cut.**
+
+Concrete `Layer` artefact under the `@glymo/core/render` subpath introduced in 0.26.0. Per `docs/plans/rendering-pipeline-v2.md` §6 Phase 6 / Sub-task 6a Scope:
+
+  > "StrokeLayer first pass: render the existing 2D stroke canvas content into an OrthographicCamera quad via CanvasTexture. This preserves the existing CanvasRenderer output bit-for-bit — the stroke pixels are identical; only the compositing path changes."
+
+Architecture intent: the legacy `CanvasRenderer` (the 2D Canvas owner of the 6-stage pipeline's pixel work) keeps producing pixels onto its existing offscreen 2D `<canvas>`. `StrokeLayer` wraps that canvas as a Three.js `CanvasTexture`, mounts it on a fullscreen quad inside the SceneGraph, and the per-frame `render()` invalidates the texture so the GPU re-uploads the latest 2D content.
+
+This is a deliberately narrow first cut — it does NOT replace the 2D stroke renderer. It moves the COMPOSITING from a CPU-side `drawImage` in `@glymo/ui/canvas/lib/Compositor.ts` into a GPU-side single fullscreen quad inside the master scene graph. Future sub-slices may migrate stroke rendering itself onto a TSL shader (R1 in §9 risks), but the contract today is "no pixel change".
+
+### Added
+- `src/render/layers/StrokeLayer.ts` — `StrokeLayer` class implementing the `Layer` interface from 0.26.0. Constructor accepts `{ source: HTMLCanvasElement, name?, z? }` — public surface is plain TS / DOM types only (R-A). Implementation uses `CanvasTexture` (sRGB, flipY=true defaults are correct for sRGB 2D canvases) + `MeshBasicMaterial` (`transparent: true`, `depthTest: false`, `depthWrite: false` so the layer composes cleanly under future layers stacked on higher Z) + `PlaneGeometry` sized to (`widthCss`, `heightCss`) in CSS-pixel world units. `render()` is allocation-free (single `texture.needsUpdate = true`); `resize()` rebuilds the geometry; `dispose()` releases texture / material / geometry / mesh and is idempotent. Mesh is `frustumCulled = false` (always in view by definition) and named `StrokeLayer:<name>` for diagnostics.
+- `src/render/index.ts` — re-exports `StrokeLayer` + `StrokeLayerOptions` from the `@glymo/core/render` barrel so consumers can `import { StrokeLayer } from '@glymo/core/render'`.
+
+### Test results
+- `npm test` (jsdom): unchanged — StrokeLayer is browser-only and not collected by the jsdom suite (vanilla three vector math doesn't need jsdom CanvasTexture mocks).
+- Browser-runtime evidence in `glymo-ui` Browser Mode: see `glymo-ui/src/canvas/__tests__/strokelayer-mirror.browser.test.tsx` — 7 cases covering construction validation, init lifecycle, mesh registration in scene graph, render() texture invalidation, source-canvas mutation propagation across two consecutive renders (stable golden A → mutate source → stable golden B), resize geometry rebuild, idempotent dispose. Goldens for the mirror tests live under `__screenshots__/strokelayer-mirror.browser.test.tsx/`.
+
+### Phase 6 sub-slice contract progress
+- 6a-1 ✅ SceneGraph foundation (0.26.0).
+- 6a-2 ✅ StrokeLayer first cut (this commit, 0.26.1).
+- 6a-3 (forthcoming): TextOverlayLayer.
+- 6a-4 (forthcoming): AmbientGlowLayer + PostProcessLayer.
+- 6a-5 (forthcoming): HologramLayer + MediaArtLayer split (I10 Issue #3).
+- 6a-6 (forthcoming): HandLayer.
+- 6b-1+ (forthcoming): `<CanvasEngine>` single-canvas refactor + `GLYMO_RENDER_V2` flag.
+
+### Invariants preserved (I1–I10 from docs/plans/rendering-pipeline-v2.md §3)
+- I1 SessionDoc: untouched.
+- I2 CanvasEngineHandle: untouched.
+- I3 CLAUDE.md absolutes: untouched.
+- I4 MediaArt seam: untouched.
+- I5 i18n parity: N/A (no UI strings).
+- I6 Feature-flag deferrals: untouched.
+- I7 Drawing-classifier-worker URL: untouched.
+- I8 Preserve the shape: ENFORCED — StrokeLayer's contract is "mirror the source canvas bit-for-bit" (modulo the documented 0.005 pixelmatch tolerance for sub-pixel anti-alias jitter on WebGPU/WebGL2 backend negotiation). Pixel-identity gate covered by the cross-render fixture in the browser test.
+- I9 Tests stay green: enforced (existing 0.26.0 test count + green status preserved).
+- I10 MediaArt + text-mode hologram coexistence: pre-condition for 6a-5; not affected by this slice.
+
 ## [0.26.0] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-1: SceneGraph foundation.**

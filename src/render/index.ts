@@ -24,3 +24,14 @@ export {
 // reaching into `./Layer.js` directly. External consumers should treat
 // these as not part of the supported public surface.
 export type { Layer, LayerInitContext } from './Layer.js';
+
+// ── Concrete layers (Phase 6 sub-slices 6a-2…6a-6) ────────────────────────
+// Concrete `Layer` implementations live under `./layers/` and re-export
+// from this barrel so consumers `import { StrokeLayer, … } from
+// '@glymo/core/render'` without reaching into the sub-directory.
+//
+// Per §1.5.4 R-A — each concrete layer's PUBLIC surface (constructor
+// options, public methods) deals only in Glymo / DOM types. Three.js
+// types are confined to the implementation.
+
+export { StrokeLayer, type StrokeLayerOptions } from './layers/StrokeLayer.js';
