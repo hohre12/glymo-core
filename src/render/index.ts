@@ -62,3 +62,11 @@ export {
   HandLayer,
   type HandLayerOptions,
 } from './layers/HandLayer.js';
+export {
+  VideoLayer,
+  type VideoLayerOptions,
+} from './layers/VideoLayer.js';
+export {
+  WatermarkLayer,
+  type WatermarkLayerOptions,
+} from './layers/WatermarkLayer.js';

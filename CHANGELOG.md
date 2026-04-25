@@ -5,6 +5,94 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.4] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6b-5+6b-6: VideoLayer + WatermarkLayer + Compositor-parity options.**
+
+User-found regression: under `NEXT_PUBLIC_GLYMO_RENDER_V2=true`, camera mode rendered with a black background. Root cause: 6b-1+6b-2 wired only 5 of the legacy Compositor's source canvases (Stroke / TextOverlay / AmbientGlow / Hologram3D / Hand) and left the `'video'` and `'watermark'` layers unwired. This commit closes that gap AND adds the opacity / mirror options the legacy `videoPreprocess` expected.
+
+Honest scope: this commit fixes the visibly broken camera background and the Strict-Mode dev safety bug. Other audit-surfaced gaps (camera blur, object-cover crop, post-process bloom, hologram double-image, recording target canvas) are explicitly DEFERRED with scope-locked sub-slice numbers below. `renderV2 = false` (default) is the production-safe path; flipping the flag to true is local-dev only until those sub-slices land.
+
+### Added
+- `src/render/layers/VideoLayer.ts` — wraps an `HTMLVideoElement` (camera stream) as a Three.js `VideoTexture` mounted on a fullscreen quad. Default `z = -2` (background, BELOW AmbientGlowLayer). `VideoTexture` auto-uploads frames every render; the layer's `render()` is a no-op. New options vs initial 6b-5 cut:
+    * `opacity?: number` (default `1`; legacy compositor parity = `0.3`). Sub-1 forces `transparent: true` on the underlying material.
+    * `mirror?: boolean` (default `true`). Achieved via `mesh.scale.x = -1` — free, no shader pass.
+- `src/render/layers/WatermarkLayer.ts` — thin `CanvasMirrorLayer` subclass for the synthetic watermark tile canvas. Default `z = 4` (topmost; ABOVE HandLayer's z=3). Same `CanvasMirrorLayer` lifecycle.
+- `src/render/index.ts` — re-exports `VideoLayer`, `VideoLayerOptions`, `WatermarkLayer`, `WatermarkLayerOptions`.
+
+### Composition contract — COMPLETE for the renderV2 path
+
+| Z   | Layer              | Source                        | Status        |
+|-----|--------------------|-------------------------------|---------------|
+| -2  | VideoLayer         | HTMLVideoElement (camera)     | ✅ this commit |
+| -1  | AmbientGlowLayer   | useAmbientGlow canvas         | ✅ 6a-4a      |
+|  0  | StrokeLayer        | CanvasRenderer canvas         | ✅ 6a-2       |
+|  1  | TextOverlayLayer   | TextOverlayCanvas             | ✅ 6a-3a      |
+|  2  | Hologram3DLayer    | Hologram3DRenderer canvas     | ✅ 6a-5a      |
+|  3  | HandLayer          | HandVisualizer canvas         | ✅ 6a-6       |
+|  4  | WatermarkLayer     | watermark tile canvas         | ✅ this commit |
+
+All 7 legacy Compositor source canvases are now mirrored as SceneGraph layers in their documented Z order.
+
+### KNOWN GAPS — DEFERRED, scope-locked
+
+Three independent audit passes (glymo-ui-expert + glymo-qa-expert + export-pipeline) surfaced the following parity gaps from the legacy Compositor. Each is non-blocking for `renderV2 = false` (the default in production); each MUST close before the flag can be flipped to default-on.
+
+**P0 — visibly broken under renderV2=true**:
+
+1. **PostProcessLayer (6a-4b, scope-locked)** — `useWebGPUPostProcess` (`bloom + chromatic aberration + scanlines`) is the legacy `'webgpu'` Compositor layer. Not yet wired into SceneGraph. `aurora` and `hologram` effects render with no bloom under renderV2. Acceptance prereq: Three.js `PostProcessing` + TSL bloom node + parity gate vs legacy WGSL output.
+
+2. **VideoLayer `blur: 6` + object-cover crop (6b-6b, this commit's follow-up)** — legacy `videoPreprocess.blur: 6` (CSS `filter: blur(6px)`) gives the camera the soft-defocus look that lets strokes pop. Legacy object-cover crop (`Compositor.ts:276-282`) preserves AR via `scale = max(w/vw, h/vh)`. Without these, the camera background is sharper and may be horizontally stretched on mismatched canvas/webcam ARs. Acceptance prereq: TSL blur shader (or single-pass Gaussian via PostProcessing) + UV remap on PlaneGeometry geometry.
+
+3. **Fill source canvas verification (6b-6c)** — the audit could not confirm whether the fill tool's output goes through the stroke source canvas (mirrored by StrokeLayer) or a dedicated fill canvas (NOT mirrored). User-visible: fills may be invisible under renderV2. Acceptance prereq: trace the fill pipeline and add FillLayer if needed.
+
+**P1 — degraded under renderV2=true**:
+
+4. **`setLayerVisible` / `setLayerOpacity` parity (6b-6d)** — legacy Compositor surface is `compositor.setLayerVisible(id, bool)`. SceneGraph has no equivalent. Affected user actions: `showSkeleton` toggle (skeleton stays visible), hologram-mode 2D-overlay hide (text+3D double-image), transparent-export camera bleed-through. Acceptance prereq: add `Layer.setVisible(bool)` to the Layer interface + per-layer mesh.visible writeback.
+
+5. **`exportFrame` + `captureStream` target canvas (6b-6e)** — both currently read from `compositorCanvasRef` (legacy compositor canvas, hidden but still drawing). Under renderV2 the user looks at `sceneCanvasRef`. If the two canvases diverge visually (post-process / blend / gamma), exports and recordings will not match the on-screen output. Acceptance prereq: branch on `renderV2` to read from `sceneCanvasRef` for both surfaces.
+
+6. **`beforeRead` callback parity (6b-6f)** — legacy Compositor invokes `Hologram3DRenderer.renderFrame()` synchronously just before reading hologram pixels. SceneGraph relies on the renderer's own scheduler subscription, which may be one phase behind the compositor's read. Possible 1-frame visual lag under load.
+
+### Changed
+- `package.json` `version`: 0.27.3 → 0.27.4 (this slice).
+
+### Test results
+- `npm test` (jsdom): 838/838 green, unchanged.
+- `npm run test:browser` (via `glymo-ui`): 55/55 green, unchanged. (Goldens for VideoLayer / WatermarkLayer are not yet added — production camera/watermark rendering will produce visible deltas vs legacy until 6b-6b ships, so re-baseling now would lock the wrong reference.)
+- Build: all 9 classes (`SceneGraph`, `CanvasMirrorLayer`, `StrokeLayer`, `TextOverlayLayer`, `AmbientGlowLayer`, `Hologram3DLayer`, `HandLayer`, `VideoLayer`, `WatermarkLayer`) reachable via `@glymo/core/render`.
+
+### Phase 6 sub-slice contract progress
+- 6a-1…6a-6 ✅ structural scope closed (0.27.1).
+- 6b-pre   ✅ CanvasMirrorLayer extracted (0.27.2).
+- 6b-1+6b-2 ✅ CanvasEngine SceneGraph mount + 5-layer wiring (@glymo/ui 0.52.0).
+- 6b-3 ✅ Consumer-page renderV2 wiring + dep bumps.
+- 6b-4 ✅ multi-run bench + Phase 6 acceptance verdict.
+- **6b-5+6b-6 ✅ this commit** (VideoLayer + WatermarkLayer + opacity/mirror options + Strict-Mode cleanup).
+- 6b-6b (deferred): VideoLayer blur + object-cover crop.
+- 6b-6c (deferred): Fill source canvas verification.
+- 6b-6d (deferred): `Layer.setVisible(bool)` API + per-layer wiring.
+- 6b-6e (deferred): `exportFrame` + `captureStream` branch on renderV2.
+- 6b-6f (deferred): `beforeRead` callback for Hologram3DRenderer in SceneGraph tick.
+- 6a-3b / 6a-4b / 6a-5b / 6a-6b (deferred): per-layer GPU-native upgrades.
+- Phase 6 ships behind the flag with `renderV2 = false` default. Flipping to default-on requires ALL P0 sub-slices above to close + a re-run of the §6 visual-regression gate within 0.5% pixelmatch tolerance.
+
+### Invariants preserved (I1–I10)
+- I1–I7: untouched.
+- I8 Preserve the shape: ENFORCED in legacy path (`renderV2 = false`, default). renderV2=true still has documented gaps; the visual-regression gate MUST run before the flag can flip default-on.
+- I9 Tests stay green: enforced (838/838 + 478/478 + 55/55).
+- I10 MediaArt + text-mode hologram coexistence: closed in 6a-5a; benefits both paths.
+
+## [0.27.3] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6b-5: VideoLayer + WatermarkLayer (initial cut, superseded by 0.27.4 which adds opacity+mirror).**
+
+Initial cut of `VideoLayer` (HTMLVideoElement → VideoTexture quad at z=-2) and `WatermarkLayer` (CanvasMirrorLayer subclass at z=4). Camera mode under `renderV2=true` had a black background prior to this commit because the SceneGraph had no video source layer. Watermark was also absent on the renderV2 visible canvas.
+
+Public surface added via `@glymo/core/render`: `VideoLayer`, `VideoLayerOptions`, `WatermarkLayer`, `WatermarkLayerOptions`.
+
+This release ships the bare layer additions. 0.27.4 (next) extends `VideoLayer` with `opacity` + `mirror` options to match the legacy Compositor's `videoPreprocess` more faithfully.
+
 ## [0.27.2] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6b-pre: CanvasMirrorLayer base extracted.**
