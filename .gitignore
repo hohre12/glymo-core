@@ -14,3 +14,5 @@ tests/visual/__snapshots__/*.diff.png
 
 # npm auth — never commit
 .npmrc
+*.tgz
+.claude/
