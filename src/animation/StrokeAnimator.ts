@@ -5,6 +5,43 @@
 
 import type { AnimationKeyframe, AnimationParams, AnimationTransform, StrokeAnimation } from './types.js';
 
+/**
+ * Normalise a direction string from either vocabulary into an axis + sign:
+ *
+ *   - 4-way concrete (`up` | `down` | `left` | `right`) — used by the
+ *     legacy `fly` primitive AND emitted by the @glymo/ui adapter when it
+ *     translates `AnimationProfile.direction` to the core type union (see
+ *     `glymo-ui/src/canvas/lib/animation/adapter.ts:profileDirectionToCore`).
+ *   - 2-way axis (`horizontal` | `vertical`) — the original drawing-mode
+ *     primitive convention. Older case bodies in this switch checked for
+ *     these strings literally and treated everything else as the vertical
+ *     branch — which silently routed every adapter-emitted `'right'` /
+ *     `'left'` / `'up'` / `'down'` value into vertical motion. That was
+ *     the visible cause of the 2026-04-26 "magic-pinch on a car moves
+ *     top→bottom instead of left→right" regression.
+ *
+ * Sign is +1 for forward (right / down / horizontal / vertical default)
+ * and -1 only for the explicitly negative concrete directions (left / up).
+ */
+function normalizeDirectionAxis(
+  dir: 'up' | 'down' | 'left' | 'right' | undefined,
+): { axis: 'horizontal' | 'vertical'; sign: 1 | -1 } {
+  // The static type union is the 4-way concrete variant, but @glymo/ui's
+  // adapter has historically been free to pass `'horizontal'` / `'vertical'`
+  // through unchanged in some code paths — handle both vocabularies
+  // defensively rather than assume any single naming convention.
+  const raw = dir as string | undefined;
+  switch (raw) {
+    case 'left':       return { axis: 'horizontal', sign: -1 };
+    case 'right':      return { axis: 'horizontal', sign: 1 };
+    case 'up':         return { axis: 'vertical',   sign: -1 };
+    case 'down':       return { axis: 'vertical',   sign: 1 };
+    case 'vertical':   return { axis: 'vertical',   sign: 1 };
+    case 'horizontal':
+    default:           return { axis: 'horizontal', sign: 1 };
+  }
+}
+
 // Default amplitude values per animation type
 const DEFAULT_AMPLITUDE: Record<string, number> = {
   // ── Legacy types ────────────────────────────────────────────────────────
@@ -16,14 +53,23 @@ const DEFAULT_AMPLITUDE: Record<string, number> = {
   fadeOut: 0,       // not used
   rotate: 0,        // not used
   // ── Locomotion primitives (drawing-mode, task #112) ──────────────────────
-  drift: 0.02,      // NDC fraction per second
-  traverse: 0.5,    // fraction of canvas width per cycle
+  // All amplitudes here are PIXELS — the switch cases below use the value
+  // directly as `identity.translateX/Y` (which is canvas pixels). Pre-0.25.1
+  // the comments labelled some entries as "NDC fraction" or "fraction of
+  // canvas width per cycle" but the runtime code never converted them; with
+  // a 0.5px or 0.3px default amplitude the stroke moved by a sub-pixel and
+  // looked frozen. Magic-pinch on a `car` (CATEGORY_PROFILE locomotion =
+  // 'traverse', no explicit amplitude) hit this default and the user saw
+  // no movement at all — this was the visible half of the 2026-04-26
+  // "magic touch does nothing" regression.
+  drift: 60,        // pixels — slow ambient sway per cycle
+  traverse: 400,    // pixels — end-to-end horizontal travel per cycle
   oscillate: 20,    // pixels peak displacement
   orbit: 30,        // pixels orbit radius
   swim: 18,         // pixels lateral sinusoid amplitude
   flutter: 14,      // pixels irregular sinusoid amplitude
-  fall: 0.3,        // fraction of canvas height per cycle
-  rise: 0.3,        // fraction of canvas height per cycle
+  fall: 250,        // pixels per cycle — vertical descent travel
+  rise: 250,        // pixels per cycle — vertical ascent travel
   random: 15,       // pixels Brownian step
   // ── Modulation primitives (drawing-mode, task #112) ──────────────────────
   // shine/glow/sparkle drive glowIntensity as their primary signal, but they
@@ -324,12 +370,12 @@ export class StrokeAnimator {
         // displacement accumulates — non-looping callers should control
         // duration to reset via repeat.
         const driftAmp = amplitude;
-        const dir = params.direction ?? 'horizontal';
+        const { axis, sign } = normalizeDirectionAxis(params.direction);
         const cyclePos = Math.sin(t * TWO_PI);
-        if (dir === 'horizontal') {
-          identity.translateX = driftAmp * cyclePos;
+        if (axis === 'horizontal') {
+          identity.translateX = driftAmp * sign * cyclePos;
         } else {
-          identity.translateY = driftAmp * cyclePos;
+          identity.translateY = driftAmp * sign * cyclePos;
         }
         break;
       }
@@ -337,10 +383,10 @@ export class StrokeAnimator {
       case 'traverse': {
         // One-shot end-to-end travel across the canvas. Uses linear progress.
         // amplitude = travel distance in pixels. Fades in first 10%, out last 20%.
-        const dir = params.direction ?? 'horizontal';
-        const travelAmp = amplitude;
+        const { axis, sign } = normalizeDirectionAxis(params.direction);
+        const travelAmp = amplitude * sign;
         const progress = t; // linear 0→1
-        if (dir === 'horizontal') {
+        if (axis === 'horizontal') {
           identity.translateX = -travelAmp * 0.5 + travelAmp * progress;
         } else {
           identity.translateY = -travelAmp * 0.5 + travelAmp * progress;
@@ -355,10 +401,10 @@ export class StrokeAnimator {
 
       case 'oscillate': {
         // Back-and-forth pendulum swing around the origin. Symmetric sine.
-        const dir = params.direction ?? 'horizontal';
+        const { axis } = normalizeDirectionAxis(params.direction);
         const oscAmp = amplitude;
         const oscVal = oscAmp * Math.sin(t * TWO_PI);
-        if (dir === 'horizontal') {
+        if (axis === 'horizontal') {
           identity.translateX = oscVal;
         } else {
           identity.translateY = oscVal;

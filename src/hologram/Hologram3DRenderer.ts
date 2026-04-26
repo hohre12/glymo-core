@@ -102,6 +102,30 @@ interface InternalMeshSlot {
    * `disposeMeshSlot` / `resetTransform` (mesh-sizing is slot-owned state).
    */
   sizeCss: { width: number; height: number } | null;
+  /**
+   * Per-mesh user-driven X/Y/Z rotation (radians) and zoom multiplier
+   * (0.25.0). Set by the dispatcher → controller path when the user
+   * gestures on a SELECTED mesh, so each loaded mesh can rotate / scale
+   * independently of the others.
+   *
+   * Why per-slot and not a single set of `this.rot{X,Y,Z}` / `this.zoom`?
+   * Pre-0.25 every mesh in `renderMeshFrame` consumed the same renderer-
+   * wide rotation / zoom — so two-hand gestures drove every loaded mesh
+   * in lockstep regardless of which one the user selected ("all meshes
+   * react together" bug, 2026-04-26). Slotting the user transform per
+   * objectId lets the per-frame loop apply each mesh's own values without
+   * disturbing the global text-mode state on `charContainer` (which still
+   * uses `this.rot{X,Y,Z}` and `this.zoom` for the camera dolly path).
+   *
+   * `null` means "use the renderer-wide defaults" — preserved as a back-
+   * stop so legacy callers that still call the global `setRotation` /
+   * `setZoom` keep working unchanged when no per-mesh value has been set.
+   * Cleared by `resetTransform` (mesh "reset scene") and `disposeMeshSlot`.
+   */
+  userRotX: number | null;
+  userRotY: number | null;
+  userRotZ: number | null;
+  userZoom: number | null;
 }
 
 // ── Lazy Three.js WebGPU imports ──────────────────────────────────────────────
@@ -381,9 +405,78 @@ export class Hologram3DRenderer {
    * two-hand stretch per user request (2026-04-23). The previous 0.3–3.0
    * clamp was a design-era default that also capped mesh mode; the floor
    * is kept only as a mathematical safety rail.
+   *
+   * Renderer-wide channel — affects every mesh that has not had a per-mesh
+   * `setMeshZoom(objectId, …)` written, plus the camera dolly used to
+   * project per-mesh `offsetCss` anchors. For per-mesh isolation use
+   * `setMeshZoom`; this setter is preserved for the text-mode path and as
+   * the global default fallback.
    */
   setZoom(zoom: number): void {
     this.zoom = Math.max(0.01, zoom);
+  }
+
+  /**
+   * Per-mesh user X/Y/Z rotation in radians (0.25.0). Overrides the
+   * renderer-wide `setRotation` ONLY for the slot keyed by `objectId`;
+   * other meshes continue to consume `this.rot{X,Y,Z}` so a global rotate
+   * still works when no slot has its own value set.
+   *
+   * No-op when the slot is missing (unknown objectId) or still loading —
+   * the next add/replace cycle re-primes the slot with `null` user
+   * values, which is the canonical "no per-mesh override yet" state.
+   * `rotZ` defaults to the slot's existing value (or 0 when not yet set)
+   * so a caller that only wants to drive X/Y can omit Z.
+   */
+  setMeshRotation(
+    objectId: string,
+    rotX: number,
+    rotY: number,
+    rotZ?: number,
+  ): void {
+    const slot = this.meshes.get(objectId);
+    if (!slot) return;
+    slot.userRotX = rotX;
+    slot.userRotY = rotY;
+    if (rotZ !== undefined) {
+      slot.userRotZ = rotZ;
+    } else if (slot.userRotZ === null) {
+      slot.userRotZ = 0;
+    }
+  }
+
+  /**
+   * Per-mesh user zoom multiplier (0.25.0). Same scoping rules as
+   * `setMeshRotation` — overrides the renderer-wide `setZoom` for the
+   * matched slot only. Lower-clamped to 0.01 to mirror the global setter's
+   * mathematical safety rail; no upper bound.
+   */
+  setMeshZoom(objectId: string, zoom: number): void {
+    const slot = this.meshes.get(objectId);
+    if (!slot) return;
+    slot.userZoom = Math.max(0.01, zoom);
+  }
+
+  /**
+   * Read the per-mesh user transform (0.25.0). Returns `null` when the
+   * slot does not exist. When a slot exists but no per-mesh user value
+   * has been written, the renderer-wide defaults (`this.rot{X,Y,Z}`,
+   * `this.zoom`) are returned so the controller can snapshot a coherent
+   * baseline before the first per-mesh gesture starts driving the slot
+   * — this avoids a "jump from 0" on the first frame of the first
+   * two-hand gesture targeting a freshly-loaded mesh.
+   */
+  getMeshTransform(
+    objectId: string,
+  ): { rotX: number; rotY: number; rotZ: number; zoom: number } | null {
+    const slot = this.meshes.get(objectId);
+    if (!slot) return null;
+    return {
+      rotX: slot.userRotX ?? this.rotX,
+      rotY: slot.userRotY ?? this.rotY,
+      rotZ: slot.userRotZ ?? this.rotZ,
+      zoom: slot.userZoom ?? this.zoom,
+    };
   }
 
   /** Set transition progress (0 = hidden, 1 = fully visible) */
@@ -475,6 +568,15 @@ export class Hologram3DRenderer {
       // genuinely returns every mesh to its default normalise-to-world-2
       // scaling, not to the last size the caller happened to set.
       slot.sizeCss = null;
+      // 0.25.0: clear per-mesh user transforms so reset truly returns
+      // every slot to the renderer-wide defaults — matching the
+      // resetTransform semantics for `this.rot{X,Y,Z}` / `this.zoom`
+      // above. Without this clear, a previously-driven mesh would keep
+      // its last user rotation / zoom after a "reset scene".
+      slot.userRotX = null;
+      slot.userRotY = null;
+      slot.userRotZ = null;
+      slot.userZoom = null;
     }
     if (this.charContainer) {
       this.charContainer.position.set(0, 0, 0);
@@ -533,6 +635,10 @@ export class Hologram3DRenderer {
       handle: null,
       offsetCss: null,
       sizeCss: null,
+      userRotX: null,
+      userRotY: null,
+      userRotZ: null,
+      userZoom: null,
     };
     this.meshes.set(objectId, slot);
 
@@ -1428,17 +1534,27 @@ export class Hologram3DRenderer {
       // `baseScale` is already zoom-independent — the camera dolly alone
       // provides linear zoom response, so a zoom multiplier here would
       // produce quadratic response. Gate accordingly.
-      const zoomMultiplier = slot.sizeCss ? this.zoom : 1;
+      // Per-mesh user zoom override (0.25.0). When the slot has its own
+      // `userZoom`, use it; otherwise fall back to `this.zoom` (renderer-
+      // wide default). The `sizeCss` gate stays — `computeMeshNormalize`
+      // already cancels the camera dolly in the sizeCss branch, so we
+      // multiply by the effective zoom there to reintroduce gesture
+      // response; in the maxDim branch the camera dolly alone provides
+      // linear zoom response, so we keep the multiplier at 1.
+      const effectiveZoom = slot.userZoom ?? this.zoom;
+      const zoomMultiplier = slot.sizeCss ? effectiveZoom : 1;
       const zoomedScale = baseScale * zoomMultiplier;
       group.scale.set(zoomedScale, zoomedScale, zoomedScale);
-      // User-driven rotation (0.22.2). Meshes live on `meshRoot` (0.18.0)
-      // which does NOT inherit `charContainer.rotation`, so the two-hand
-      // X/Y/Z rotation channel written onto `this.rot{X,Y,Z}` by the host
-      // controller was not reaching mesh-mode meshes. Writing the rotation
-      // directly onto each mesh slot's group is the canonical sink for
-      // mesh mode — applied around the group's local origin, which is
-      // offset below so the bbox center is the actual world pivot point.
-      group.rotation.set(this.rotX, this.rotY, this.rotZ);
+      // Per-mesh user rotation override (0.25.0). Falls back to the
+      // renderer-wide `this.rot{X,Y,Z}` when no per-slot value is set,
+      // preserving the global-rotate path for legacy callers. With per-
+      // slot values, two-hand gestures can drive each selected mesh
+      // independently — fixing the "all meshes rotate together" bug
+      // documented in the 2026-04-26 regression report.
+      const effectiveRotX = slot.userRotX ?? this.rotX;
+      const effectiveRotY = slot.userRotY ?? this.rotY;
+      const effectiveRotZ = slot.userRotZ ?? this.rotZ;
+      group.rotation.set(effectiveRotX, effectiveRotY, effectiveRotZ);
 
       const cx = (bb.max.x + bb.min.x) * 0.5;
       const cy = (bb.max.y + bb.min.y) * 0.5;
