@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.28.0] - 2026-04-26
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-4b: native TSL post-process chain (`PostProcessLayer`).**
+
+Replaces the 6a-4a `CanvasMirrorLayer` subclass that mirrored the legacy `useWebGPUPostProcess` WebGPU canvas. The new `PostProcessLayer` is a native Three.js TSL producer: it constructs a `PostProcessing` chain on the SceneGraph's existing `WebGPURenderer` and ports the bloom + chromatic aberration + scanlines effects from 646 LOC of hand-rolled WGSL into TSL Fn nodes + `three/addons/tsl/display/BloomNode.js`.
+
+### Breaking — public surface
+
+- `PostProcessLayer` no longer extends `CanvasMirrorLayer`. It implements `Layer` directly.
+- `PostProcessLayerOptions` shape changed: removed `source: HTMLCanvasElement` (no longer mirrors an external canvas); added `initialIntensity?: number` (default `0.7`) and `scanlinesEnabled?: boolean` (default `false`). The `name?` and `z?` fields are unchanged.
+- Consumers (only `@glymo/ui`'s `<CanvasEngine>` today) construct as `new PostProcessLayer({ initialIntensity: 0.7, scanlinesEnabled: false })` — no canvas argument required. The companion `useWebGPUPostProcess` hook in `@glymo/ui` is scheduled for deletion in the follow-up migration commit (see `docs/plans/render-v2-6a-4b-postprocess-tsl.md` §6).
+
+### Added — public surface
+
+- `PostProcessLayer.setEffectIntensity(n: number)` — master 0–1 intensity (replaces the legacy `setIntensity`). Drives bloom strength, chromatic-aberration scale, and scanline opacity in lock-step.
+- `PostProcessLayer.setScanlinesEnabled(on: boolean)` — toggle scanlines without recompile.
+- `PostProcessLayer.setBloomStrength(n: number)` — independent bloom multiplier (default `2.0`).
+- `PostProcessLayer.setBloomThreshold(n: number)` — bloom luminance threshold (default `0.15`).
+- `PostProcessLayer.setChromaticAberration(n: number)` — CA scale in pixels at full intensity (default `3.0`).
+- `PostProcessLayer.setScanlineOpacity(n: number)` — scanline dim opacity at full intensity (default `0.12`).
+- `SceneGraph.setPostProcessingChain(chain: unknown | null)` — attach a Three.js `PostProcessing` chain to the master render call. When attached, `SceneGraph.render()` calls `chain.render()` instead of the default `renderer.render(scene, camera)` path. Owned by the calling layer; SceneGraph never disposes it directly.
+- `SceneGraph.hasPostProcessingChain(): boolean` — diagnostic.
+- `LayerInitContext.sceneGraph: SceneGraphHandle` — new field added to the `Layer` init context. Carries a structural-typed handle to the owning SceneGraph so layers (today only `PostProcessLayer`) can call `setPostProcessingChain` from inside their own `init`. Other layers MAY ignore it.
+
+### Changed — public surface
+
+- `prefetchRenderModule()` now also prefetches `three/tsl` + `three/addons/tsl/display/BloomNode.js` in parallel with `three/webgpu`. The boolean return value remains gated on the WebGPU core load (post-process modules are optional — only `PostProcessLayer` consumes them).
+- `SceneGraph.warmup()` now also pre-runs `postProcessing.render()` once when a chain is attached, forcing the bloom + custom Fn pipelines to compile during warmup instead of on the first user-visible frame.
+
+### Why it matters
+
+After 6a-4b the post-process effects are produced by ONE renderer (the SceneGraph's WebGPURenderer) instead of two (SceneGraph + the dedicated `useWebGPUPostProcess` overlay canvas). Eliminates one DOM `<canvas>`, one per-frame `copyExternalImageToTexture` round-trip, and 646 LOC of hand-rolled WGSL. WebGL2 fallback parity comes for free — TSL's dual-target codegen emits both WGSL (WebGPU) and GLSL (WebGL2) automatically; the legacy WGSL path was WebGPU-only.
+
+### Tests
+
+- `tests/PostProcessLayer.test.ts` — public API smoke (constructor, defaults, idempotent dispose, setter pre-init no-op behaviour). Full TSL chain compile-time tests are deferred to a Browser Mode follow-up because `PostProcessing.render()` requires a real GPU device that jsdom cannot provide.
+
+### Consumer wiring (DEFERRED — separate `@glymo/ui` commit)
+
+`@glymo/ui` migration steps per `docs/plans/render-v2-6a-4b-postprocess-tsl.md` §6:
+
+1. `CanvasEngine.tsx:1039–1085` — delete the `useWebGPUPostProcess` hook call; replace with `addLayer(new PostProcessLayer({ initialIntensity: 0.7, scanlinesEnabled: false }))` inside the existing SceneGraph init effect.
+2. `CanvasEngine.tsx:87` — delete the `useWebGPUPostProcess` import.
+3. `CanvasEngine.tsx:1058–1059` — delete the `layerRefs.postProcessCanvas` write.
+4. `CanvasEngine.tsx:1183` — replace `webGPU: { available: webGPUAvailable, setPaused: setWebGPUPaused }` with `{ available: true, setPaused: () => {} }` (one-release shim) then drop the field.
+5. `CanvasEngine.tsx:2044–2047` — delete the `syncLayerVisible('drawing'|'overlay'|'webgpu', …)` calls.
+6. `CanvasEngine.tsx:2391–2393` — delete the `addLayer({ id: 'webgpu', source: webGPUCanvasRef.current, … })` legacy compositor registration.
+7. `canvas/client/index.ts:17,21` — delete `useWebGPUPostProcess` re-export.
+8. `canvas/hooks/useWebGPUPostProcess.ts` — delete the file + sibling tests.
+9. `useHologramController` — replace every `webGPU.available` read with `true` or drop the parameter.
+
+### Rationale + design doc references
+
+- `docs/plans/rendering-pipeline-v2.md` §6 Phase 9 (acceptance: `useWebGPUPostProcess.ts` deleted; `webGPUCanvasRef` removed; visual goldens green at 0.5% diff)
+- `docs/plans/render-v2-6a-4b-postprocess-tsl.md` (this slice — full WGSL→TSL parameter mapping, chain design, per-effect notes, risk assessment)
+
 ## [0.27.9] - 2026-04-26
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-6b: native HandLayer (Line2 + InstancedMesh).**

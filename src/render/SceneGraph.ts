@@ -37,7 +37,10 @@ import type {
   Scene as ThreeScene,
   OrthographicCamera as ThreeOrthographicCamera,
 } from 'three';
-import type { WebGPURenderer as ThreeWebGPURenderer } from 'three/webgpu';
+import type {
+  WebGPURenderer as ThreeWebGPURenderer,
+  PostProcessing as ThreePostProcessing,
+} from 'three/webgpu';
 
 import type { Layer, LayerInitContext } from './Layer.js';
 
@@ -45,6 +48,16 @@ import type { Layer, LayerInitContext } from './Layer.js';
 
 let WEBGPU: typeof import('three/webgpu') | null = null;
 let webgpuLoadPromise: Promise<boolean> | null = null;
+
+// Phase 6 sub-slice 6a-4b — the TSL + BloomNode addons used by
+// `PostProcessLayer`. Loaded by `prefetchRenderModule()` (called from
+// CanvasEngine mount via `requestIdleCallback`) so the chunk bytes are
+// in the module cache before PostProcessLayer.init() awaits them.
+// Both modules expose a default object with the named exports we use
+// (no destructuring at module scope — that races with the lazy import).
+let TSL_MODULE: typeof import('three/tsl') | null = null;
+let BLOOM_MODULE: typeof import('three/addons/tsl/display/BloomNode.js') | null = null;
+let postProcessLoadPromise: Promise<boolean> | null = null;
 
 /**
  * Dynamically imports `three/webgpu` exactly once, sharing the in-flight
@@ -73,6 +86,50 @@ async function loadWebGPUModule(): Promise<boolean> {
   return webgpuLoadPromise;
 }
 
+/**
+ * Dynamically imports the TSL post-process modules (`three/tsl` +
+ * `three/addons/tsl/display/BloomNode.js`) exactly once. Internal helper
+ * surfaced through `prefetchRenderModule()` so callers can warm the
+ * chunk cache during browser idle. PostProcessLayer.init() also calls
+ * this to acquire the modules synchronously after the await.
+ *
+ * @internal
+ */
+export async function loadPostProcessModules(): Promise<boolean> {
+  if (TSL_MODULE && BLOOM_MODULE) return true;
+  if (postProcessLoadPromise) return postProcessLoadPromise;
+  postProcessLoadPromise = (async () => {
+    try {
+      const [tslModule, bloomModule] = await Promise.all([
+        import('three/tsl'),
+        import('three/addons/tsl/display/BloomNode.js'),
+      ]);
+      TSL_MODULE = tslModule;
+      BLOOM_MODULE = bloomModule;
+      return true;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[SceneGraph] Failed to load TSL post-process modules:', e);
+      postProcessLoadPromise = null;
+      return false;
+    }
+  })();
+  return postProcessLoadPromise;
+}
+
+/**
+ * Resolved-module accessors for the lazy TSL + BloomNode chunks. Returns
+ * `null` until `loadPostProcessModules()` resolves successfully.
+ *
+ * @internal — consumed by `PostProcessLayer.init()`.
+ */
+export function getLoadedTSL(): typeof import('three/tsl') | null {
+  return TSL_MODULE;
+}
+export function getLoadedBloom(): typeof import('three/addons/tsl/display/BloomNode.js') | null {
+  return BLOOM_MODULE;
+}
+
 // ── Phase 8 — Three.js / WebGPU warm-up ─────────────────────────────────────
 //
 // `prefetchRenderModule()` triggers the lazy `three/webgpu` dynamic import
@@ -90,8 +147,18 @@ async function loadWebGPUModule(): Promise<boolean> {
 //
 // Returns the same boolean contract as the internal loader — `true` when
 // the module is now resident, `false` on network/parse failure.
+//
+// Phase 6 sub-slice 6a-4b — also prefetches the TSL + BloomNode addons
+// used by `PostProcessLayer` so the first hologram/aurora frame does not
+// pay the chunk-load cost. Both are awaited in parallel; the boolean
+// result is `true` only when BOTH downloads + parses succeed (the
+// SceneGraph itself works without the post-process chunks, so a failure
+// only degrades the post-process layer; we return `true` when at least
+// the WebGPU core loaded successfully).
 export function prefetchRenderModule(): Promise<boolean> {
-  return loadWebGPUModule();
+  return Promise.all([loadWebGPUModule(), loadPostProcessModules()]).then(
+    ([webgpuOk]) => webgpuOk,
+  );
 }
 
 // ── Module-scoped warmup cache (Phase 8) ─────────────────────────────────────
@@ -178,6 +245,19 @@ export class SceneGraph {
 
   /** Layer registry, keyed by `Layer.name`. Insertion order = render order. */
   private readonly layers = new Map<string, Layer>();
+
+  /**
+   * Optional Three.js `PostProcessing` chain attached by a layer (today
+   * only `PostProcessLayer`). When non-null, `render()` calls
+   * `postProcessing.render()` instead of the default
+   * `renderer.render(scene, camera)` path. Owned by the layer that
+   * attached it — SceneGraph never disposes it directly; the layer must
+   * detach via `setPostProcessingChain(null)` in its `dispose()`.
+   *
+   * Phase 6 sub-slice 6a-4b — see Layer.SceneGraphHandle for the
+   * structural interface PostProcessLayer uses to inject the chain.
+   */
+  private postProcessing: ThreePostProcessing | null = null;
 
   /** Set the moment `dispose()` runs the first time. Idempotency gate. */
   private disposed = false;
@@ -354,6 +434,10 @@ export class SceneGraph {
       widthCss: this.widthCss,
       heightCss: this.heightCss,
       dpr: this.dpr,
+      // Phase 6 sub-slice 6a-4b — pass the SceneGraph itself so
+      // PostProcessLayer.init() can call setPostProcessingChain on us.
+      // Other layers may ignore this field.
+      sceneGraph: this,
     };
     await layer.init(ctx);
   }
@@ -403,7 +487,67 @@ export class SceneGraph {
       }
     }
 
-    this.renderer.render(this.scene, this.camera);
+    if (this.postProcessing) {
+      // Phase 6 sub-slice 6a-4b — when a PostProcessing chain is attached
+      // (today only by `PostProcessLayer`), it owns the final present.
+      // The chain internally walks the scene+camera pass node, so we MUST
+      // NOT also call `renderer.render(scene, camera)` here — that would
+      // double-render the scene and clobber the post-processed output.
+      //
+      // `postProcessing.render()` is the synchronous fire-and-forget
+      // variant (mirrors `Hologram3DRenderer.ts:1317` which ships this
+      // pattern in production). The async `renderAsync()` variant is
+      // available but we deliberately keep `SceneGraph.render()` sync so
+      // the scheduler does not need to await — back-pressure is naturally
+      // bounded by the next rAF tick.
+      try {
+        this.postProcessing.render();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('[SceneGraph] postProcessing.render() threw:', e);
+      }
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  // ── Post-processing chain attachment ─────────────────────────────────────
+
+  /**
+   * Phase 6 sub-slice 6a-4b — attach (or detach with `null`) a Three.js
+   * `PostProcessing` chain that takes over the per-frame present.
+   *
+   * Lifecycle contract:
+   *   - The CALLING LAYER owns the chain — SceneGraph never disposes it.
+   *   - PostProcessLayer.init() calls `setPostProcessingChain(chain)`
+   *     after constructing `new PostProcessing(renderer)`.
+   *   - PostProcessLayer.dispose() calls `setPostProcessingChain(null)`
+   *     BEFORE calling `chain.dispose()` so the SceneGraph stops trying
+   *     to render through a disposed chain.
+   *   - At most ONE chain may be attached at a time. Calling
+   *     `setPostProcessingChain(b)` while `a` is already attached
+   *     replaces `a`; the SceneGraph does NOT dispose the previous
+   *     chain — that is the previous owner's responsibility.
+   *
+   * Typed via the Layer.SceneGraphHandle structural interface (parameter
+   * type `unknown | null`) to keep the public render-module type surface
+   * Three.js-free for `@internal` consumers; cast internally to the real
+   * Three.js type.
+   */
+  setPostProcessingChain(chain: unknown | null): void {
+    if (chain === null) {
+      this.postProcessing = null;
+      return;
+    }
+    this.postProcessing = chain as ThreePostProcessing;
+  }
+
+  /**
+   * Diagnostic — returns true when a `PostProcessing` chain is currently
+   * attached and will drive the next `render()` call.
+   */
+  hasPostProcessingChain(): boolean {
+    return this.postProcessing !== null;
   }
 
   // ── Phase 8 — Warmup ─────────────────────────────────────────────────────
@@ -473,6 +617,28 @@ export class SceneGraph {
       (dummyMesh.material as InstanceType<typeof T.MeshBasicMaterial>).dispose();
       dummyScene.remove(dummyMesh);
     }
+
+    // Phase 6 sub-slice 6a-4b — also warm the post-process chain if a
+    // `PostProcessing` instance is attached. The bloom + chromatic
+    // aberration + scanline TSL pipelines compile lazily on first render;
+    // running an extra `postProcessing.render()` here forces the compile
+    // during warmup so the user-visible first frame does not pay it.
+    //
+    // Wrapped in try/catch — chain.render() may transiently fail when
+    // upstream layers haven't pushed any geometry yet (empty scene OK,
+    // but some node compilations require a non-degenerate input). Failure
+    // here is non-fatal; first real frame retries.
+    if (this.postProcessing && this.scene && this.camera) {
+      try {
+        this.postProcessing.render();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error(
+          '[SceneGraph] warmup postProcessing.render() threw:',
+          e,
+        );
+      }
+    }
   }
 
   // ── Resize ───────────────────────────────────────────────────────────────
@@ -537,6 +703,15 @@ export class SceneGraph {
       }
     }
     this.layers.clear();
+
+    // Phase 6 sub-slice 6a-4b — drop the chain reference. Per the
+    // `setPostProcessingChain` contract the chain is OWNED by its
+    // attaching layer (PostProcessLayer) and that layer's `dispose()`
+    // will dispose the underlying chain when it runs above (we already
+    // walked `layers.values()` in reverse). Setting the field to null
+    // here is purely defensive — guarantees a stale chain reference
+    // cannot survive past dispose.
+    this.postProcessing = null;
 
     if (this.renderer) {
       try {

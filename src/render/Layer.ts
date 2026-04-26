@@ -22,6 +22,32 @@ import type { Scene, OrthographicCamera } from 'three';
 import type { WebGPURenderer } from 'three/webgpu';
 
 /**
+ * Minimal SceneGraph surface exposed to layers. Phase 6 sub-slice 6a-4b
+ * added so `PostProcessLayer.init(ctx)` can call
+ * `ctx.sceneGraph.setPostProcessingChain(this.postProcessing)` to inject
+ * its TSL post-process chain into the master render call.
+ *
+ * Forward-declared as a structural interface (NOT an `import` of the
+ * concrete `SceneGraph` class) to avoid a Layer.ts ⇄ SceneGraph.ts import
+ * cycle. The runtime type is `SceneGraph`; consumers cast through this
+ * interface at the layer boundary.
+ *
+ * @internal
+ */
+export interface SceneGraphHandle {
+  /**
+   * Attach (or detach with `null`) a Three.js `PostProcessing` chain.
+   * When attached, `SceneGraph.render()` calls `chain.render()` instead
+   * of `renderer.render(scene, camera)`. See SceneGraph.setPostProcessingChain.
+   *
+   * Typed as `unknown` to keep the structural interface free of a
+   * three/webgpu type leak; the concrete SceneGraph implementation
+   * expects an `InstanceType<typeof import('three/webgpu').PostProcessing>`.
+   */
+  setPostProcessingChain(chain: unknown | null): void;
+}
+
+/**
  * Init context handed to every Layer when it is added to a SceneGraph.
  * Holds the parent scene + the active orthographic camera + the live
  * renderer so layers can mount their own scene subtrees, register
@@ -41,6 +67,15 @@ export interface LayerInitContext {
   readonly heightCss: number;
   /** Device pixel ratio in effect at init time. */
   readonly dpr: number;
+  /**
+   * Owning SceneGraph reference. Phase 6 sub-slice 6a-4b — added so
+   * `PostProcessLayer.init(ctx)` can call
+   * `ctx.sceneGraph.setPostProcessingChain(chain)` to inject its TSL
+   * post-process chain into the master render call. Other layers MAY
+   * use this for cross-layer coordination but SHOULD prefer scene-local
+   * mechanisms when possible.
+   */
+  readonly sceneGraph: SceneGraphHandle;
 }
 
 /**
