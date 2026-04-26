@@ -96,3 +96,18 @@ export {
   PostProcessLayer,
   type PostProcessLayerOptions,
 } from './layers/PostProcessLayer.js';
+
+// Phase 6 sub-slice 6a-5b — additive split of `Hologram3DRenderer` into two
+// native SceneGraph layers (text-mode chars + media-art mesh slots). The
+// legacy `Hologram3DRenderer` + `Hologram3DLayer` (CanvasMirrorLayer wrapper)
+// stay live during the migration; consumers (`@glymo/ui`'s `<CanvasEngine>`)
+// flip over in a follow-up commit. See
+// `docs/plans/render-v2-6a-5b-hologram-split.md`.
+export {
+  TextHologramLayer,
+  type TextHologramLayerOptions,
+} from './layers/TextHologramLayer.js';
+export {
+  MediaArtLayer,
+  type MediaArtLayerOptions,
+} from './layers/MediaArtLayer.js';

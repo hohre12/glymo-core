@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.30.0] - 2026-04-26
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-5b: scaffold native split of `Hologram3DRenderer` into TextHologramLayer + MediaArtLayer.**
+
+Additive scaffold landing the two SceneGraph-native layers that, once the migration completes, replace `Hologram3DRenderer`'s separate `WebGPURenderer` + dedicated `<canvas>`. The legacy renderer + the `Hologram3DLayer` `CanvasMirrorLayer` wrapper stay live and unmodified during this commit — consumers (`@glymo/ui`'s `<CanvasEngine>` via `useHologram3DMesh`) flip to the new layers in a follow-up commit.
+
+### Added — public surface
+
+- `TextHologramLayer` (`@glymo/core/render`) — native text-mode 3D-character layer. Wires against the SceneGraph's shared scene + camera; exposes `updateChars(chars)`, `setRotation` / `setZoom` / `setTransition` / `setSpread` / `setHandActive` / `setEnabled` / `resetTransform`, `grabChar` / `releaseChar`, `hitTestChar` (2D fallback this commit), `getRenderedCharIds`. MVP-quality per-char render is a placeholder cyan plane — TextGeometry + the `createHologramMaterial` TSL port land in the full-port commit (see `docs/plans/render-v2-6a-5b-hologram-split.md` §7 parity matrix).
+- `MediaArtLayer` (`@glymo/core/render`) — native media-art mesh-slot layer. Exposes the full multi-mesh API (`addMesh` / `removeMesh` / `getMesh` / `getAllMeshIds` / `hasAnyMesh`), per-slot transforms (`translateMeshTo` / `translateMeshBy` / `setMeshSizeCss` / `getMeshSizeCss` / `getMeshOffsetCss`), per-slot animation control (`isMeshAnimationPaused` / `toggleMeshAnimation`), selection raycast (`hitTestMeshForSelection`), pinch-grab indicator (`grabMesh` / `releaseMesh`), and the shared gesture inputs. Reuses the existing `createMeshSource(descriptor)` factory under `glymo-core/src/hologram/sources/`. Adds the canonical PBR scene lights (DirectionalLight + AmbientLight, EarthPreview-matched) once per shared scene via a `userData['__hologramSharedLights']` flag so two layer instances don't double-light.
+- `TextHologramLayerOptions` / `MediaArtLayerOptions` types re-exported from `@glymo/core/render`.
+
+### Why it matters
+
+`Hologram3DRenderer` is the largest single class in `@glymo/core` (1961 LOC) and the only producer that still owns its own `WebGPURenderer` + `<canvas>`. The current `Hologram3DLayer` mirrors that canvas into the SceneGraph, so on the hologram path the device runs TWO WebGPU renderers (one per canvas) and one CPU↔GPU `copyExternalImageToTexture` per frame. Splitting the renderer into native SceneGraph layers eliminates the dedicated canvas + the duplicate renderer, cutting GPU memory and the per-frame copy.
+
+### Deferred (separate commits per the plan §10 schedule)
+
+- Port `createHologramMaterial` + `createTextureCharMesh` (TSL fresnel / scanline / flicker / CJK volumetric stack) to a shared `hologram/sharedShaders.ts` so both layers and the legacy renderer use one source of truth.
+- Port the full text-mode `renderFrame` body (TextGeometry, entrance elastic, spread Z layering, drag counter-rotate, 3D raycaster).
+- Port the pivot crosshair + opacity fade to a `hologram/sharedPivot.ts` helper consumable by either layer.
+- `@glymo/ui` `<CanvasEngine>` wire-up under a `RENDER_V2_HOLOGRAM_NATIVE` flag, then default-flip, then Phase-9 reaping of `Hologram3DRenderer.ts` + `Hologram3DLayer.ts` + `useHologram3DMesh`'s legacy branch + the `hologramMeshCanvas` DOM element.
+- Browser Mode visual goldens (hologram + media-art + co-presence) at the standard 0.5% pixel tolerance.
+
+### Tests
+
+- This commit ships the scaffolds without dedicated unit suites — the per-frame paths require a real WebGPU device (Browser Mode in `@glymo/ui`) for end-to-end coverage. The full-port commit adds:
+  - `tests/render/MediaArtLayer.test.ts` — `addMesh` race / `removeMesh` idempotency / `translateMeshTo` per-slot isolation / `hitTestMeshForSelection` returns nearest objectId.
+  - `tests/render/TextHologramLayer.test.ts` — `updateChars` add/remove parity / `hitTestChar` 2D fallback when WebGPU absent.
+- Existing `Hologram3DRenderer.coexistence.test.ts` continues to pass — this commit is non-destructive.
+
+### Rationale + design doc references
+
+- `docs/plans/rendering-pipeline-v2.md` §6 (target architecture: 1 visible canvas, native producer per layer)
+- `docs/plans/render-v2-6a-5b-hologram-split.md` (this slice — feature inventory, split decision, parity matrix, 5-day full migration estimate)
+
 ## [0.28.0] - 2026-04-26
 
 **Rendering pipeline v2 — Phase 6 sub-slice 6a-4b: native TSL post-process chain (`PostProcessLayer`).**
