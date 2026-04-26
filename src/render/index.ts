@@ -81,6 +81,8 @@ export {
 export {
   HandLayer,
   type HandLayerOptions,
+  type HandLayerStyle,
+  type HandLandmark,
 } from './layers/HandLayer.js';
 export {
   VideoLayer,

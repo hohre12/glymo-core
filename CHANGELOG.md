@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.9] - 2026-04-26
+
+**Rendering pipeline v2 — Phase 6 sub-slice 6a-6b: native HandLayer (Line2 + InstancedMesh).**
+
+Replaces the 0.27.x mirror-of-`HandVisualizer` `HandLayer` (a `CanvasMirrorLayer` subclass that uploaded a 2D `<canvas>` as a `CanvasTexture` quad each frame) with a native Three.js producer built from `LineSegments2` + `InstancedMesh` primitives. Eliminates the `handLandmarkCanvas` DOM element from `<CanvasLayerStack>` once the @glymo/ui follow-up lands (canvas count -1 toward the §2 design target of 1 visible canvas).
+
+### Breaking — public surface
+
+- `HandLayer` constructor signature changed: no longer accepts `source: HTMLCanvasElement`. The new `HandLayerOptions` shape is `{ name?, z?, style?, maxHands? }`. Consumers (only `@glymo/ui`'s `<CanvasEngine>` today) call the new `updateLandmarks(landmarks, isPinching, handIndex?)` and `setStyle(style)` methods to drive the layer instead of repainting an external canvas.
+
+### Added — public surface
+
+- `HandLayer.updateLandmarks(landmarks, isPinching, handIndex?)` — zero-allocation per-frame data sink. Mutates the persistent `Float32Array` interleaved-buffer in place; never `new`s geometry / material / array on the hot path. Pass `landmarks: []` to hide a single hand.
+- `HandLayer.clearLandmarks()` — hide every hand in one call (cheaper than per-hand empty arrays when MediaPipe reports global tracking loss).
+- `HandLayer.setStyle(style)` / `HandLayer.getStyle()` — runtime style switching. Supported: `'neon-skeleton'` (default; exact functional port of the legacy NeonSkeletonStyle), `'crystal'`, `'flame'`, `'aurora'`, `'particle-cloud'` (latter four render a recognisable hand with style-appropriate palette but do not bit-for-bit reproduce the HandVisualizer 2D output — full parity in Phase 6c per the plan doc).
+- `HandLayerStyle` type re-export from `@glymo/core/render`.
+- `HandLandmark` type re-export — minimal `{x,y,z}` shape for callers without a MediaPipe import.
+
+### Why it matters
+
+After 6a-6 the SceneGraph composited 8 source canvases into 1 visible canvas, but each producer (StrokeRenderer, TextOverlay, AmbientGlow, Hologram3D, **HandVisualizer**, Watermark, Video, PostProcess) still owned its own `<canvas>` element. HandVisualizer maps cleanly onto Three.js primitives (21 landmarks × 23 bones → `LineSegments2`; joints + tips → `InstancedMesh`; cursor → `Mesh`), so it is the easiest of the 8 to convert natively. Removing the source canvas drops one DOM node, one `ResizeObserver` client, and one CPU↔GPU texture upload per frame.
+
+### Tests
+
+- The HandLayer unit smoke is intentionally NOT added in this commit — `LineSegments2` + `Line2NodeMaterial` require a real WebGPU device for end-to-end verification, which jsdom cannot provide. Acceptance is the @glymo/ui Browser Mode golden once the integration step lands (paired follow-up commit).
+
+### Consumer wiring (DEFERRED — separate @glymo/ui commit)
+
+`@glymo/ui`'s `<CanvasEngine>` must:
+1. Stop constructing `new HandLayer({ source: skeletonCanvasRef.current })`. The constructor no longer accepts `source`.
+2. Pipe MediaPipe landmark callbacks (currently `handVisualizerRef.current.draw(...)`) to `sceneHandLayerRef.current?.updateLandmarks(...)` when renderV2 is on.
+3. Mirror the existing `useEffect` that calls `handVisualizerRef.current.setStyle(...)` with `sceneHandLayerRef.current?.setStyle(...)`.
+4. Delete `handLandmarkCanvas` from `CanvasLayerRefs` and remove the `<canvas ref={refs.handLandmarkCanvas} ... />` element from `<CanvasLayerStack>`.
+
+`HandVisualizer` itself remains intact — the legacy non-renderV2 path still constructs it. Phase 9 deletes it.
+
+### Rationale + design doc references
+
+- `docs/plans/rendering-pipeline-v2.md` §6 (target architecture: 1 visible canvas, native producer per layer)
+- `docs/plans/render-v2-6a-6b-handlayer-line2.md` (this slice — file-by-file change list, per-style strategy, risks)
+
 ## [0.27.8] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 8: Three.js / WebGPU warm-up.**
