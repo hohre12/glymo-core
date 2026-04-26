@@ -1,6 +1,14 @@
 // ── Hologram Module Barrel Exports ────────────────────────────────────────────
 
-export { Hologram3DRenderer } from './Hologram3DRenderer.js';
+export {
+  Hologram3DRenderer,
+  // Phase 8 — idle prefetch entry. Triggers the bundle of dynamic imports
+  // (`three/webgpu` + `three/tsl` + bloom + TextGeometry + FontLoader)
+  // that `Hologram3DRenderer` lazy-loads on first use. Called from
+  // `<CanvasEngine>` mount via `requestIdleCallback` so the chunks are
+  // in the module cache before the user enters hologram mode.
+  prefetchHologramModules,
+} from './Hologram3DRenderer.js';
 export type {
   HologramChar,
   Hologram3DRendererOptions,

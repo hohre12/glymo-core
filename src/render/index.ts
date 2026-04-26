@@ -16,6 +16,12 @@ export {
   SceneGraph,
   type SceneGraphInitOptions,
   type SceneGraphBackend,
+  // Phase 8 — idle prefetch entry. Triggers the lazy `three/webgpu`
+  // dynamic import without constructing a renderer; consumers call this
+  // from `<CanvasEngine>` mount via `requestIdleCallback` so the chunk
+  // is in the module cache by the time the user enters camera/hologram
+  // mode.
+  prefetchRenderModule,
 } from './SceneGraph.js';
 
 // `Layer` + `LayerInitContext` are kept @internal — re-exported here only

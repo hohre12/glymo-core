@@ -74,6 +74,22 @@ export interface CanvasMirrorLayerInit {
    * is responsible for keeping pixels current.
    */
   beforeRender?: () => void;
+  /**
+   * Phase 6 6b-6c — when `true`, horizontally flips the texture by
+   * inverting the U coordinate (`texture.repeat.x = -1; texture.offset.x
+   * = 1`). Used by HandLayer to compensate for renderV2's coordinate
+   * system inverting horizontally vs the legacy compositor — root
+   * cause not yet diagnosed (Three.js's CanvasTexture + PlaneGeometry
+   * default UV should preserve horizontal but empirically does not).
+   * Default `false`; opt-in per layer.
+   *
+   * Implementation note: we flip via `texture.repeat`/`texture.offset`
+   * (UV inversion) rather than `mesh.scale.x = -1` because a negative
+   * scale flips the winding order which `MeshBasicMaterial` (default
+   * `side: FrontSide`) culls. UV inversion has no winding side
+   * effects.
+   */
+  horizontalMirror?: boolean;
 }
 
 /**
@@ -92,6 +108,7 @@ export class CanvasMirrorLayer implements Layer {
   protected readonly z: number;
   protected readonly logName: string;
   protected readonly beforeRenderCallback: (() => void) | null;
+  protected readonly horizontalMirror: boolean;
 
   // ── Internal state (lazily allocated in init) ───────────────────────────
 
@@ -118,6 +135,7 @@ export class CanvasMirrorLayer implements Layer {
     this.z = opts.z;
     this.logName = opts.logName;
     this.beforeRenderCallback = opts.beforeRender ?? null;
+    this.horizontalMirror = opts.horizontalMirror ?? false;
   }
 
   // ── Layer lifecycle ─────────────────────────────────────────────────────
@@ -137,6 +155,13 @@ export class CanvasMirrorLayer implements Layer {
     // These are the right values for sRGB browser canvases regardless
     // of the source canvas's underlying context type.
     this.texture = new CanvasTexture(this.source);
+    if (this.horizontalMirror) {
+      // Invert U coordinate sampling so the rendered quad shows the
+      // texture mirrored horizontally. Doesn't affect mesh winding
+      // (MeshBasicMaterial.FrontSide stays valid).
+      this.texture.repeat.x = -1;
+      this.texture.offset.x = 1;
+    }
     this.texture.needsUpdate = true;
 
     this.material = new MeshBasicMaterial({

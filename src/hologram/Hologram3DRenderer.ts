@@ -154,6 +154,27 @@ function loadThreeDeps(): Promise<boolean> {
   return loadPromise;
 }
 
+// ── Phase 8 — public prefetch entry ───────────────────────────────────────────
+//
+// `prefetchHologramModules()` triggers the bundle of dynamic imports that
+// `Hologram3DRenderer` lazy-loads on first use (three/webgpu + three/tsl +
+// three/addons/tsl/display/BloomNode + TextGeometry + FontLoader) WITHOUT
+// constructing a renderer. Intended to be called from `<CanvasEngine>`
+// mount via `requestIdleCallback` so the bytes are downloaded + parsed
+// during browser idle BEFORE the user enters hologram mode.
+//
+// Per `docs/plans/rendering-pipeline-v2.md` §6 Phase 8 acceptance: the
+// hologram scenario's longest RAF handler must drop from 401ms (Phase 6
+// measurement) to < 200ms — pre-loading these chunks is the largest single
+// contributor to that improvement (the dynamic imports themselves block
+// the first hologram frame for ~1–2s on a cold cache).
+//
+// Idempotent — internally guarded by the same `loadPromise` cache that
+// every per-frame caller uses, so repeated calls coalesce.
+export function prefetchHologramModules(): Promise<boolean> {
+  return loadThreeDeps();
+}
+
 // ── Font loading URLs ─────────────────────────────────────────────────────────
 
 const DEFAULT_FONT_URLS = [

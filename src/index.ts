@@ -184,7 +184,12 @@ export { executeFill } from './render/FloodFill.js';
 
 // ── Hologram 3D ──────────────────────────────────────
 
-export { Hologram3DRenderer } from './hologram/index.js';
+export {
+  Hologram3DRenderer,
+  // Phase 8 (rendering-pipeline-v2) — idle prefetch entry; see
+  // `./hologram/Hologram3DRenderer.ts` module header for the rationale.
+  prefetchHologramModules,
+} from './hologram/index.js';
 export type {
   HologramChar,
   Hologram3DRendererOptions,

@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.27.8] - 2026-04-25
+
+**Rendering pipeline v2 — Phase 8: Three.js / WebGPU warm-up.**
+
+Spreads the one-shot pipeline-compilation cost away from the per-frame critical path. Targets the §6 Phase 8 acceptance gate: hologram-scenario longest RAF handler 401ms (Phase 6 measurement) → < 200ms.
+
+### Added — public surface
+
+- `SceneGraph.warmup(): Promise<void>` — pre-compiles the canonical `MeshBasicMaterial` + `PlaneGeometry` pipeline that every `CanvasMirrorLayer` subclass uses. Builds an offscreen dummy scene, calls `renderer.compileAsync(dummyScene, dummyCamera)` (Three.js r170+ WebGPURenderer pre-compile API), disposes the dummy. Idempotent per renderer instance via a module-scoped `WeakSet<WebGPURenderer>`; safe under React Strict Mode dev double-invoke. Recommended call sequence: `await sg.init()` → `addLayer(...)` (any number) → `await sg.warmup()`.
+- `prefetchRenderModule(): Promise<boolean>` (re-exported from `@glymo/core/render`) — triggers the lazy `three/webgpu` dynamic import without constructing a renderer. Returns `true` when the module is now resident, `false` on network/parse failure. Coalesces concurrent callers via the same in-flight promise the internal `loadWebGPUModule` uses.
+- `prefetchHologramModules(): Promise<boolean>` (re-exported from both `@glymo/core` and `@glymo/core/hologram`) — triggers the bundle of dynamic imports `Hologram3DRenderer` lazy-loads on first use (`three/webgpu` + `three/tsl` + `three/addons/tsl/display/BloomNode` + `TextGeometry` + `FontLoader`). Largest single contributor to the Phase 8 acceptance delta.
+
+### Why it matters
+
+Phase 6 introduced the SceneGraph + 8 CanvasMirrorLayer subclasses but the FIRST mesh-bearing render still pays a synchronous compile cost on the GPU device — observed in the 2026-04-24 dev-tools transcript as a 3.62s `frameloop/batcher.mjs` blocking call during Three.js initialisation, and in the Phase 6 perf baseline as the 401ms longest-RAF handler in the hologram scenario. Pre-loading the modules during browser idle (via the consumer's `requestIdleCallback`) and pre-compiling the pipeline against a dummy scene moves both costs to mount time.
+
+### Consumer wiring
+
+`@glymo/ui`'s `<CanvasEngine>` is expected to:
+1. On mount, schedule via `requestIdleCallback` (with `setTimeout(_, 50)` fallback) two parallel calls to the prefetch helpers above. Gated on `renderV2 === true` so the legacy codepath does not pay the bundle cost.
+2. After `await sg.init()` AND `addLayer(...)` for every layer, `await sg.warmup()` before subscribing to the scheduler.
+
+### Rationale + design doc reference
+
+Per `docs/plans/rendering-pipeline-v2.md` §6 Phase 8: "Prefetch the `three/webgpu` dynamic chunks during browser idle. Precompile the mesh pipelines that Phase 6 introduced, against an offscreen dummy scene, so the first real `applyMediaArt` call does not block on pipeline compilation. Cache the compiled pipelines on a module-scoped WeakMap keyed by renderer instance."
+
+WeakSet is used (not WeakMap) because the cache only needs presence semantics ("warmed already?"); WeakSet drops the entry automatically when the renderer is GC'd.
+
+### Tests
+
+- Existing `glymo-ui` Browser Mode goldens (scene-graph init + 5 mirror-layer composites + hologram + hand) act as the regression gate — all must pass unchanged. `warmup()` is purely additive and does not affect visible output.
+- A focused unit test for `warmup()` is intentionally NOT added — `compileAsync` requires a real WebGPU device, which neither jsdom nor the existing CI runner provides. Acceptance is measured via `bench-perf.mjs` on a real browser (Phase 9 production-build gate).
+
+### Also in 0.27.8 — dormant `CanvasMirrorLayerInit.horizontalMirror?` option
+
+While diagnosing the Phase 6 6b-6 hand-skeleton mirror regression on 2026-04-25, an opt-in `horizontalMirror?: boolean` flag was added to `CanvasMirrorLayerInit` — when `true`, the layer inverts the `CanvasTexture` U coordinate (`texture.repeat.x = -1; texture.offset.x = 1`) instead of touching `mesh.scale.x`, which would flip the winding order and trip `MeshBasicMaterial.FrontSide` culling. The actual root cause turned out to be a stale `.next` build cache, not the texture orientation, so no subclass currently passes `horizontalMirror: true`. The option ships as DORMANT public surface — additive (defaults to `false`, zero behavioural change for every existing caller) and intentionally retained as a tested escape hatch for any future per-layer flip requirement (e.g. front-camera vs rear-camera coordinate space mismatch on mobile). Removing it would be a follow-up after the Phase 9 production-build verification.
+
 ## [0.27.6] - 2026-04-25
 
 **Rendering pipeline v2 — Phase 6 Batch A+B+D: constants module + Layer.setVisible API + beforeRender callback + PostProcessLayer.**

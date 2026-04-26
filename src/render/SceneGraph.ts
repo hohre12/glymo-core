@@ -73,6 +73,42 @@ async function loadWebGPUModule(): Promise<boolean> {
   return webgpuLoadPromise;
 }
 
+// ── Phase 8 — Three.js / WebGPU warm-up ─────────────────────────────────────
+//
+// `prefetchRenderModule()` triggers the lazy `three/webgpu` dynamic import
+// without constructing a renderer. Intended to be called from
+// `<CanvasEngine>` mount via `requestIdleCallback` so the module bytes are
+// downloaded + parsed during browser idle BEFORE the user enters camera /
+// hologram mode. Subsequent `SceneGraph.init()` calls find the module
+// already loaded and skip the await on the network.
+//
+// Per `docs/plans/rendering-pipeline-v2.md` §6 Phase 8 (paraphrased): "On
+// `<CanvasEngine>` mount, prefetch the `three/webgpu` dynamic chunks during
+// browser idle." The 3.62s `frameloop/batcher.mjs` blocking call observed in
+// the 2026-04-24 transcript (Three.js init + pipeline compile) drops below
+// 500ms when the chunk is already in the module cache.
+//
+// Returns the same boolean contract as the internal loader — `true` when
+// the module is now resident, `false` on network/parse failure.
+export function prefetchRenderModule(): Promise<boolean> {
+  return loadWebGPUModule();
+}
+
+// ── Module-scoped warmup cache (Phase 8) ─────────────────────────────────────
+//
+// Each `WebGPURenderer` instance pays a one-shot pipeline-compilation cost
+// the first time `compileAsync(scene, camera)` runs — this is the cost the
+// Phase 8 acceptance criteria (`hologram longest RAF 401ms → < 200ms`)
+// targets. We cache "this renderer instance has been warmed" via a
+// WeakSet so a single SceneGraph's `warmup()` is idempotent across
+// repeated callers (Strict Mode dev double-invocation safe).
+//
+// WeakSet — not Map — because we only need presence semantics ("warmed
+// already?"), and WeakSet drops the entry automatically when the renderer
+// is GC'd (e.g. SceneGraph.dispose released the only reference).
+const warmedRenderers: WeakSet<ThreeWebGPURenderer> =
+  new WeakSet<ThreeWebGPURenderer>();
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface SceneGraphInitOptions {
@@ -368,6 +404,75 @@ export class SceneGraph {
     }
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  // ── Phase 8 — Warmup ─────────────────────────────────────────────────────
+
+  /**
+   * Pre-compile the GPU pipelines for the canonical SceneGraph mesh
+   * (`MeshBasicMaterial` + `PlaneGeometry` — the shape every
+   * CanvasMirrorLayer subclass uses). Builds a tiny offscreen dummy scene,
+   * runs `renderer.compileAsync(dummyScene, dummyCamera)` to force pipeline
+   * compilation on a non-visible target, then disposes the dummy resources.
+   *
+   * Per `docs/plans/rendering-pipeline-v2.md` §6 Phase 8 (acceptance):
+   * "longest RAF handler in the hologram scenario drops from 401ms (Phase 6
+   * measurement) to < 200ms." First-render pipeline compile is the dominant
+   * contributor to that 401ms; pre-compilation moves it to mount time
+   * where the user does not notice it (the hologram canvas isn't visible
+   * yet) and out of the per-frame critical path.
+   *
+   * Idempotent — every renderer instance is warmed at most once (cached on
+   * a module-scoped WeakSet). Calling `warmup()` repeatedly is cheap.
+   *
+   * Safe to call before `addLayer` — the dummy scene is independent of the
+   * layer registry. Recommended sequencing in the consumer is:
+   *   await sg.init();
+   *   // …addLayer(...) for each layer
+   *   await sg.warmup();
+   */
+  async warmup(): Promise<void> {
+    if (!this.initialized || this.disposed) return;
+    if (!this.renderer || !WEBGPU) return;
+    if (warmedRenderers.has(this.renderer)) return;
+
+    const T = WEBGPU;
+    // Dummy scene independent of the live one — keeps live layer state
+    // untouched and lets the warmup run before any layer is added.
+    const dummyScene = new T.Scene();
+    const dummyCamera = new T.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+
+    // Match the canonical CanvasMirrorLayer shape exactly:
+    // MeshBasicMaterial(transparent, depthTest:false, depthWrite:false) +
+    // PlaneGeometry. The compileAsync call below walks the scene and forces
+    // every distinct material's GPU pipeline to be compiled.
+    const dummyGeometry = new T.PlaneGeometry(1, 1);
+    const dummyMaterial = new T.MeshBasicMaterial({
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const dummyMesh = new T.Mesh(dummyGeometry, dummyMaterial);
+    dummyMesh.frustumCulled = false;
+    dummyScene.add(dummyMesh);
+
+    try {
+      // `compileAsync(scene, camera)` is the WebGPURenderer pre-compile API
+      // (Three.js r170+). Walks the scene, compiles every material's
+      // pipeline against the renderer's GPU device, awaits completion.
+      await this.renderer.compileAsync(dummyScene, dummyCamera);
+      warmedRenderers.add(this.renderer);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[SceneGraph] warmup compileAsync threw:', e);
+      // Non-fatal — first real frame will pay the un-amortised compile
+      // cost. We do NOT mark the renderer as warmed so a future caller
+      // (e.g. on backend swap) can retry.
+    } finally {
+      dummyMesh.geometry.dispose();
+      (dummyMesh.material as InstanceType<typeof T.MeshBasicMaterial>).dispose();
+      dummyScene.remove(dummyMesh);
+    }
   }
 
   // ── Resize ───────────────────────────────────────────────────────────────
