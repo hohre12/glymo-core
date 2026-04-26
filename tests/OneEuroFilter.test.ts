@@ -1,4 +1,25 @@
-import { OneEuroFilter } from '../src/filter/OneEuroFilter.js';
+import { OneEuroFilter, MIN_CUTOFF, BETA, D_CUTOFF } from '../src/filter/OneEuroFilter.js';
+
+// ── Parameter Lock (CLAUDE.md absolute rule) ──────────
+//
+// These tests MUST fail if any tuned constant is changed without an
+// explicit test-plan update.  The test values ARE the specification.
+// Do not update these expectations without a parameter-sweep proposal
+// reviewed by the team lead (see CLAUDE.md § Technical Prohibitions).
+
+describe('OneEuroFilter — immutable parameter lock (CLAUDE.md absolute rule)', () => {
+  it('MIN_CUTOFF is locked at 1.0 — changing requires explicit test update', () => {
+    expect(MIN_CUTOFF).toBe(1.0);
+  });
+
+  it('BETA is locked at 0.007 — changing requires explicit test update', () => {
+    expect(BETA).toBe(0.007);
+  });
+
+  it('D_CUTOFF is locked at 1.0 — changing requires explicit test update', () => {
+    expect(D_CUTOFF).toBe(1.0);
+  });
+});
 
 // ── Initialization ────────────────────────────────────
 
