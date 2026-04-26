@@ -348,6 +348,36 @@ export class TextHologramLayer implements Layer {
     return [...this.charMeshes.keys()];
   }
 
+  /**
+   * Diagnostic — current spread multiplier (0..6). Reserved for the
+   * full-port spread Z-layering math; surfaced here so external probes (and
+   * the noUnusedLocals TS gate) have a read-site for the field.
+   */
+  getSpread(): number {
+    return this.spread;
+  }
+
+  /**
+   * Diagnostic — true while a controller has signalled `setHandActive(true)`.
+   * Reserved for the pivot-fade visual port; the legacy renderer reads it
+   * inside `applyContainerRotationAndZoom`. Surfaced here as a probe so the
+   * gesture-input wiring can be exercised before the visual lands.
+   */
+  isHandActive(): boolean {
+    return this.handActive;
+  }
+
+  /**
+   * Diagnostic — the orthographic camera handed in via `init`'s
+   * `LayerInitContext`. Returns `null` before init / after dispose. The
+   * full-port hit-test will use this to build the per-frame Raycaster;
+   * exposed now so test fixtures can verify the camera reference survives
+   * `init` correctly.
+   */
+  getCamera(): ThreeOrthographicCamera | null {
+    return this.camera;
+  }
+
   // ── Internal helpers ──────────────────────────────────────────────────────
 
   /**

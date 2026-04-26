@@ -154,9 +154,15 @@ export class MediaArtLayer implements Layer {
   private rotZ = 0;
   private zoom = 1;
   private transition = 1;
-  private handActive = false;
+  // `_handActive` + `_activeMeshDrag` are reserved for the full-port pivot
+  // crosshair fade — `applyContainerRotationAndZoom` reads them in the
+  // legacy renderer to drive the indicator opacity. The setters / mutators
+  // are public surface today (matched against the legacy API) so consumers
+  // can wire without waiting for the visual to land. Underscore prefix so
+  // TS noUnusedLocals doesn't flag them while no read-site exists yet.
+  private _handActive = false;
   private enabled = true;
-  private activeMeshDrag = false;
+  private _activeMeshDrag = false;
 
   /** Wall-clock elapsed seconds since `init` resolved. Drives `uTime`. */
   private startTimeMs = 0;
@@ -539,12 +545,25 @@ export class MediaArtLayer implements Layer {
   grabMesh(objectId: string): boolean {
     const slot = this.meshes.get(objectId);
     if (!slot || !slot.loaded) return false;
-    this.activeMeshDrag = true;
+    this._activeMeshDrag = true;
     return true;
   }
 
   releaseMesh(): void {
-    this.activeMeshDrag = false;
+    this._activeMeshDrag = false;
+  }
+
+  /**
+   * Diagnostic — true while a single-hand pinch-grab is in flight, OR while
+   * the two-hand gesture controller signalled `setHandActive(true)`. Reserved
+   * for the pivot-fade port: the legacy renderer reads both flags inside
+   * `applyContainerRotationAndZoom` to drive the crosshair's opacity. Until
+   * that visual lands, exposing the combined flag here keeps the public API
+   * stable and gives callers a probe into the layer's gesture state without
+   * reaching into private fields.
+   */
+  isGestureActive(): boolean {
+    return this._handActive || this._activeMeshDrag;
   }
 
   // ── Shared gesture inputs ────────────────────────────────────────────────
@@ -564,7 +583,7 @@ export class MediaArtLayer implements Layer {
   }
 
   setHandActive(active: boolean): void {
-    this.handActive = active;
+    this._handActive = active;
   }
 
   setEnabled(enabled: boolean): void {
@@ -576,7 +595,7 @@ export class MediaArtLayer implements Layer {
     this.rotY = 0;
     this.rotZ = 0;
     this.zoom = 1;
-    this.activeMeshDrag = false;
+    this._activeMeshDrag = false;
     for (const slot of this.meshes.values()) {
       slot.offsetCss = null;
       slot.sizeCss = null;
